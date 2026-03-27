@@ -87,6 +87,38 @@ fn bench_wolf_alarm_howl(c: &mut Criterion) {
     });
 }
 
+fn bench_bee_buzz(c: &mut Criterion) {
+    c.bench_function("bee_buzz_300ms", |b| {
+        let voice = CreatureVoice::new(Species::Bee);
+        b.iter(|| {
+            let samples = voice.vocalize(&Vocalization::Buzz, 44100.0, 0.3).unwrap();
+            black_box(samples);
+        });
+    });
+}
+
+fn bench_crow_screech(c: &mut Criterion) {
+    c.bench_function("crow_screech_500ms", |b| {
+        let voice = CreatureVoice::new(Species::Crow);
+        b.iter(|| {
+            let samples = voice
+                .vocalize(&Vocalization::Screech, 44100.0, 0.5)
+                .unwrap();
+            black_box(samples);
+        });
+    });
+}
+
+fn bench_crocodilian_rumble(c: &mut Criterion) {
+    c.bench_function("crocodilian_rumble_1s", |b| {
+        let voice = CreatureVoice::new(Species::Crocodilian);
+        b.iter(|| {
+            let samples = voice.vocalize(&Vocalization::Rumble, 44100.0, 1.0).unwrap();
+            black_box(samples);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_wolf_howl,
@@ -97,6 +129,9 @@ criterion_group!(
     bench_songbird_trill,
     bench_lion_roar,
     bench_wolf_alarm_howl,
+    bench_bee_buzz,
+    bench_crow_screech,
+    bench_crocodilian_rumble,
 );
 
 criterion_main!(benches);

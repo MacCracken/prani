@@ -52,8 +52,9 @@ impl CreatureTract {
             [f[0], f[1], f[2], f[2] * 1.3, f[2] * 1.5], // F4/F5 estimated
             [b[0], b[1], b[2], b[2] * 1.2, b[2] * 1.4],
         );
-        // Ignore error — fallback to default if formants are out of range
-        let _ = tract.set_formants_from_target(&target);
+        if let Err(e) = tract.set_formants_from_target(&target) {
+            tracing::warn!(?e, "species formants out of range, using defaults");
+        }
 
         Self {
             tract,

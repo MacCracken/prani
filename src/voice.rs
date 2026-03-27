@@ -187,7 +187,8 @@ impl CreatureVoice {
         // Dragon fire-breath: mix broadband turbulent noise with the vocalization.
         // Scales with breathiness and matches the roar/growl envelope.
         if self.species == Species::Dragon {
-            let mut fire_rng = crate::rng::Rng::new(8888);
+            let mut fire_rng =
+                crate::rng::Rng::new(self.params.resonance_seed().wrapping_add(0xF12E));
             let fire_amp = self.params.breathiness * 0.4;
             for (i, sample) in samples.iter_mut().enumerate() {
                 let t = i as f32 / num_samples.max(1) as f32;

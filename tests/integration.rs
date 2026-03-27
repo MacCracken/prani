@@ -234,3 +234,120 @@ fn test_serde_roundtrip_error() {
     let e2: PraniError = serde_json::from_str(&json).unwrap();
     assert_eq!(err.to_string(), e2.to_string());
 }
+
+#[test]
+fn test_serde_roundtrip_intent_modifiers() {
+    let mods = CallIntent::Alarm.modifiers();
+    let json = serde_json::to_string(&mods).unwrap();
+    let m2: prani::vocalization::IntentModifiers = serde_json::from_str(&json).unwrap();
+    assert!((m2.pitch_scale - mods.pitch_scale).abs() < f32::EPSILON);
+    assert!((m2.amplitude_scale - mods.amplitude_scale).abs() < f32::EPSILON);
+    assert!((m2.duration_scale - mods.duration_scale).abs() < f32::EPSILON);
+    assert!((m2.urgency - mods.urgency).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_serde_roundtrip_creature_tract() {
+    let params = Species::Wolf.params();
+    let tract = prani::tract::CreatureTract::new(&params, 44100.0);
+    let json = serde_json::to_string(&tract).unwrap();
+    let t2: prani::tract::CreatureTract = serde_json::from_str(&json).unwrap();
+    let json2 = serde_json::to_string(&t2).unwrap();
+    assert_eq!(json, json2);
+}
+
+#[test]
+fn test_zero_duration_synthesis() {
+    let voice = CreatureVoice::new(Species::Wolf);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 0.0).unwrap();
+    assert!(samples.is_empty());
+}
+
+#[test]
+fn test_high_frequency_syringeal_path() {
+    // Songbird trill with alarm intent pushes f0 above 2000 Hz,
+    // exercising the dual-source syringeal synthesis path.
+    let voice = CreatureVoice::new(Species::Songbird);
+    let samples = voice
+        .vocalize_with_intent(&Vocalization::Trill, CallIntent::Alarm, 44100.0, 0.3)
+        .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_bee_buzz() {
+    let voice = CreatureVoice::new(Species::Bee);
+    let samples = voice.vocalize(&Vocalization::Buzz, 44100.0, 0.3).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_crow_screech() {
+    let voice = CreatureVoice::new(Species::Crow);
+    let samples = voice
+        .vocalize(&Vocalization::Screech, 44100.0, 0.5)
+        .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_all_intents_modify_differently() {
+    let intents = [
+        CallIntent::Alarm,
+        CallIntent::Territorial,
+        CallIntent::Mating,
+        CallIntent::Distress,
+        CallIntent::Idle,
+        CallIntent::Threat,
+        CallIntent::Social,
+    ];
+    // Each intent should produce different modifiers
+    for (i, a) in intents.iter().enumerate() {
+        for b in intents.iter().skip(i + 1) {
+            let ma = a.modifiers();
+            let mb = b.modifiers();
+            let same = (ma.pitch_scale - mb.pitch_scale).abs() < f32::EPSILON
+                && (ma.amplitude_scale - mb.amplitude_scale).abs() < f32::EPSILON
+                && (ma.duration_scale - mb.duration_scale).abs() < f32::EPSILON
+                && (ma.urgency - mb.urgency).abs() < f32::EPSILON;
+            assert!(!same, "{a:?} and {b:?} should have different modifiers");
+        }
+    }
+}
+
+#[test]
+fn test_crocodilian_rumble_with_subharmonics() {
+    let voice = CreatureVoice::new(Species::Crocodilian);
+    let samples = voice.vocalize(&Vocalization::Rumble, 44100.0, 1.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+    let max_amp: f32 = samples.iter().map(|s| s.abs()).fold(0.0, f32::max);
+    assert!(max_amp > 0.001, "output too quiet: {max_amp}");
+}
+
+#[test]
+fn test_raptor_screech() {
+    let voice = CreatureVoice::new(Species::Raptor);
+    let samples = voice
+        .vocalize(&Vocalization::Screech, 44100.0, 0.5)
+        .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_dragon_individual_variation() {
+    // Two dragons with different sizes should produce different f0
+    let small = CreatureVoice::new(Species::Dragon).with_size(0.5);
+    let large = CreatureVoice::new(Species::Dragon).with_size(3.0);
+    assert!(small.effective_f0() > large.effective_f0());
+
+    // Both should synthesize successfully
+    let s1 = small.vocalize(&Vocalization::Roar, 44100.0, 0.5).unwrap();
+    let s2 = large.vocalize(&Vocalization::Roar, 44100.0, 0.5).unwrap();
+    assert!(s1.iter().all(|s| s.is_finite()));
+    assert!(s2.iter().all(|s| s.is_finite()));
+}

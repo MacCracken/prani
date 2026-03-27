@@ -68,6 +68,7 @@ pub enum VocalApparatus {
 
 /// Species-specific vocal parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct SpeciesParams {
     /// Vocal apparatus type.
     pub apparatus: VocalApparatus,
@@ -107,7 +108,6 @@ impl SpeciesParams {
 
 impl Species {
     /// Returns the default vocal parameters for this species.
-    #[must_use]
     pub fn params(self) -> SpeciesParams {
         // Formant frequencies derived from vocal tract length:
         // F_n ≈ (2n-1) * c / (4L), c=343 m/s

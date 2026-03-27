@@ -48,9 +48,7 @@
 extern crate alloc;
 
 pub mod error;
-#[allow(dead_code)]
 mod math;
-#[allow(dead_code)]
 pub(crate) mod rng;
 pub mod species;
 pub mod tract;

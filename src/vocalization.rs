@@ -65,6 +65,7 @@ pub enum CallIntent {
 
 /// Parameters that modify a vocalization based on intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct IntentModifiers {
     /// Pitch multiplier (1.0 = species default).
     pub pitch_scale: f32,
@@ -78,7 +79,6 @@ pub struct IntentModifiers {
 
 impl CallIntent {
     /// Returns the prosodic modifiers for this intent.
-    #[must_use]
     pub fn modifiers(self) -> IntentModifiers {
         match self {
             Self::Alarm => IntentModifiers {

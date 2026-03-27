@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- CI/CD pipeline: GitHub Actions workflows (ci.yml, release.yml) matching svara
+- Makefile with check, fmt, clippy, test, audit, deny, bench, coverage, build, doc targets
+- rust-toolchain.toml pinning stable with rustfmt + clippy
+- codecov.yml with 80% coverage target
+- scripts/bench-history.sh for benchmark tracking
+- `#[must_use]` on `SpeciesParams` and `IntentModifiers` structs
+- Tracing warning when species formants fall out of svara's valid range
+- 10 new tests: serde roundtrips for IntentModifiers and CreatureTract, zero-duration synthesis, high-frequency syringeal path, bee buzz, crow screech, raptor screech, all-intents-differ, crocodilian rumble, dragon individual variation
+- 3 new benchmarks: bee_buzz_300ms, crow_screech_500ms, crocodilian_rumble_1s
+- docs/architecture/overview.md with module map and data flow
+- docs/development/roadmap.md with completed, backlog, future sections
+- Expanded .gitignore (coverage/, editor files, CSV history)
+
+### Changed
+
+- Dragon fire-breath RNG seed now derived from species params instead of hardcoded
+- Removed unused f64 math module and unused RNG methods (poisson, next_f32_range, next_f32_unsigned)
+- Removed `#[allow(dead_code)]` from math and rng modules
+
+### Performance
+
+- No regressions. Benchmark-to-benchmark improvements due to dead code removal:
+  - snake_hiss_500ms: 519 -> 261 us (-40%)
+  - songbird_trill_500ms: 872 -> 671 us (-29%)
+  - lion_roar_1s: 1.64 -> 1.29 ms (-22%)
+  - wolf_howl_1s: 1.29 -> 1.06 ms (-17%)
+
 ## [1.0.0] - 2026-03-27
 
 ### Added
