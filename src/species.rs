@@ -80,6 +80,11 @@ pub struct SpeciesParams {
     /// Vocal tract length scaling (1.0 = human male reference).
     /// Shorter tracts (< 1.0) = higher formants, longer (> 1.0) = lower.
     pub tract_scale: f32,
+    /// Species formant frequencies F1-F3 (Hz). Scaled by tract_scale internally.
+    /// These define the characteristic resonance of the species' vocal tract.
+    pub formants: [f32; 3],
+    /// Formant bandwidths B1-B3 (Hz). Wider = less defined resonance.
+    pub bandwidths: [f32; 3],
     /// Default breathiness (0.0-1.0).
     pub breathiness: f32,
     /// Default jitter (0.0-0.05).
@@ -104,6 +109,10 @@ impl Species {
     /// Returns the default vocal parameters for this species.
     #[must_use]
     pub fn params(self) -> SpeciesParams {
+        // Formant frequencies derived from vocal tract length:
+        // F_n ≈ (2n-1) * c / (4L), c=343 m/s
+        // Human male tract ~17cm → F1≈500, F2≈1500, F3≈2500
+        // Species tracts scaled proportionally.
         match self {
             Self::Wolf => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -111,6 +120,8 @@ impl Species {
                 f0_max: 1200.0,
                 f0_default: 400.0,
                 tract_scale: 1.2,
+                formants: [420.0, 1250.0, 2100.0], // ~20cm tract
+                bandwidths: [100.0, 120.0, 150.0],
                 breathiness: 0.05,
                 jitter: 0.015,
                 shimmer: 0.03,
@@ -121,6 +132,8 @@ impl Species {
                 f0_max: 2000.0,
                 f0_default: 300.0,
                 tract_scale: 0.9,
+                formants: [550.0, 1650.0, 2750.0], // ~15cm tract
+                bandwidths: [100.0, 130.0, 160.0],
                 breathiness: 0.03,
                 jitter: 0.012,
                 shimmer: 0.025,
@@ -131,6 +144,8 @@ impl Species {
                 f0_max: 1000.0,
                 f0_default: 500.0,
                 tract_scale: 0.5,
+                formants: [850.0, 2500.0, 4200.0], // ~10cm tract
+                bandwidths: [120.0, 150.0, 200.0],
                 breathiness: 0.08,
                 jitter: 0.02,
                 shimmer: 0.04,
@@ -141,6 +156,8 @@ impl Species {
                 f0_max: 200.0,
                 f0_default: 80.0,
                 tract_scale: 2.0,
+                formants: [250.0, 750.0, 1250.0], // ~35cm tract
+                bandwidths: [80.0, 100.0, 130.0],
                 breathiness: 0.1,
                 jitter: 0.025,
                 shimmer: 0.05,
@@ -151,6 +168,8 @@ impl Species {
                 f0_max: 8000.0,
                 f0_default: 3000.0,
                 tract_scale: 0.15,
+                formants: [3500.0, 7000.0, 10500.0], // ~2.5cm tract
+                bandwidths: [300.0, 500.0, 700.0],
                 breathiness: 0.02,
                 jitter: 0.005,
                 shimmer: 0.01,
@@ -161,6 +180,8 @@ impl Species {
                 f0_max: 2000.0,
                 f0_default: 800.0,
                 tract_scale: 0.3,
+                formants: [1400.0, 4200.0, 7000.0], // ~6cm tract
+                bandwidths: [200.0, 300.0, 500.0],
                 breathiness: 0.15,
                 jitter: 0.03,
                 shimmer: 0.05,
@@ -171,6 +192,8 @@ impl Species {
                 f0_max: 4000.0,
                 f0_default: 2500.0,
                 tract_scale: 0.2,
+                formants: [2100.0, 5500.0, 8500.0], // ~4cm tract
+                bandwidths: [250.0, 400.0, 600.0],
                 breathiness: 0.1,
                 jitter: 0.01,
                 shimmer: 0.02,
@@ -181,6 +204,8 @@ impl Species {
                 f0_max: 0.0,
                 f0_default: 0.0,
                 tract_scale: 0.4,
+                formants: [2500.0, 5000.0, 8000.0], // Noise shaping bands
+                bandwidths: [1500.0, 2000.0, 2500.0], // Very wide = noisy
                 breathiness: 1.0,
                 jitter: 0.0,
                 shimmer: 0.0,
@@ -191,6 +216,8 @@ impl Species {
                 f0_max: 200.0,
                 f0_default: 60.0,
                 tract_scale: 2.5,
+                formants: [200.0, 600.0, 1000.0], // ~40cm+ tract
+                bandwidths: [70.0, 90.0, 120.0],
                 breathiness: 0.15,
                 jitter: 0.03,
                 shimmer: 0.06,
@@ -201,6 +228,8 @@ impl Species {
                 f0_max: 8000.0,
                 f0_default: 4500.0,
                 tract_scale: 0.05,
+                formants: [4500.0, 9000.0, 13500.0], // Resonant body
+                bandwidths: [500.0, 800.0, 1000.0],
                 breathiness: 0.0,
                 jitter: 0.002,
                 shimmer: 0.005,
@@ -211,6 +240,8 @@ impl Species {
                 f0_max: 500.0,
                 f0_default: 300.0,
                 tract_scale: 0.03,
+                formants: [300.0, 600.0, 900.0], // Wing resonance
+                bandwidths: [100.0, 200.0, 300.0],
                 breathiness: 0.0,
                 jitter: 0.001,
                 shimmer: 0.003,
@@ -221,6 +252,8 @@ impl Species {
                 f0_max: 500.0,
                 f0_default: 70.0,
                 tract_scale: 3.0,
+                formants: [170.0, 500.0, 850.0], // ~50cm+ tract
+                bandwidths: [60.0, 80.0, 110.0],
                 breathiness: 0.2,
                 jitter: 0.04,
                 shimmer: 0.08,
@@ -231,6 +264,8 @@ impl Species {
                 f0_max: 2000.0,
                 f0_default: 200.0,
                 tract_scale: 1.0,
+                formants: [500.0, 1500.0, 2500.0], // Human-like default
+                bandwidths: [80.0, 100.0, 130.0],
                 breathiness: 0.05,
                 jitter: 0.015,
                 shimmer: 0.03,

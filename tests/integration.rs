@@ -147,10 +147,84 @@ fn test_serde_roundtrip_call_intent() {
 
 #[test]
 fn test_serde_roundtrip_creature_voice() {
-    let voice = CreatureVoice::new(Species::Wolf).with_size(1.5);
+    let voice = CreatureVoice::new(Species::Wolf)
+        .with_size(1.5)
+        .with_f0_offset(50.0)
+        .with_breathiness(0.12);
     let json = serde_json::to_string(&voice).unwrap();
     let v2: CreatureVoice = serde_json::from_str(&json).unwrap();
     assert_eq!(v2.species(), Species::Wolf);
+    assert!((v2.effective_f0() - voice.effective_f0()).abs() < f32::EPSILON);
+    assert!((v2.effective_tract_scale() - voice.effective_tract_scale()).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_invalid_species_vocalization_rejected() {
+    let snake = CreatureVoice::new(Species::Snake);
+    assert!(snake.vocalize(&Vocalization::Howl, 44100.0, 1.0).is_err());
+
+    let cricket = CreatureVoice::new(Species::Cricket);
+    assert!(cricket.vocalize(&Vocalization::Roar, 44100.0, 1.0).is_err());
+
+    let wolf = CreatureVoice::new(Species::Wolf);
+    assert!(
+        wolf.vocalize(&Vocalization::Stridulate, 44100.0, 1.0)
+            .is_err()
+    );
+}
+
+#[test]
+fn test_species_valid_vocalizations() {
+    // Laryngeal species should support vocal calls
+    assert!(Species::Wolf.supports_vocalization(&Vocalization::Howl));
+    assert!(Species::Wolf.supports_vocalization(&Vocalization::Growl));
+    assert!(!Species::Wolf.supports_vocalization(&Vocalization::Stridulate));
+
+    // NoiseOnly should only support hiss/growl
+    assert!(Species::Snake.supports_vocalization(&Vocalization::Hiss));
+    assert!(!Species::Snake.supports_vocalization(&Vocalization::Howl));
+
+    // Stridulatory should support insect sounds
+    assert!(Species::Cricket.supports_vocalization(&Vocalization::Chirp));
+    assert!(!Species::Cricket.supports_vocalization(&Vocalization::Roar));
+}
+
+#[test]
+fn test_parameter_clamping() {
+    let voice = CreatureVoice::new(Species::Wolf)
+        .with_breathiness(5.0) // Over max
+        .with_size(-1.0) // Under min
+        .with_jitter(1.0) // Over max
+        .with_shimmer(1.0); // Over max
+
+    // Should all be clamped, not crash
+    let result = voice.vocalize(&Vocalization::Howl, 44100.0, 0.3);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_serde_roundtrip_species_params() {
+    let params = Species::Dragon.params();
+    let json = serde_json::to_string(&params).unwrap();
+    let p2: prani::species::SpeciesParams = serde_json::from_str(&json).unwrap();
+    assert!((p2.f0_default - params.f0_default).abs() < f32::EPSILON);
+    assert_eq!(p2.apparatus, params.apparatus);
+}
+
+#[test]
+fn test_serde_roundtrip_vocal_apparatus() {
+    use prani::species::VocalApparatus;
+    let apparatuses = [
+        VocalApparatus::Laryngeal,
+        VocalApparatus::Syringeal,
+        VocalApparatus::Stridulatory,
+        VocalApparatus::NoiseOnly,
+    ];
+    for a in &apparatuses {
+        let json = serde_json::to_string(a).unwrap();
+        let a2: VocalApparatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(*a, a2);
+    }
 }
 
 #[test]
