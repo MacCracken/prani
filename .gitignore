@@ -1,1 +1,13 @@
 /target
+Cargo.lock
+**/*.rs.bk
+*.pdb
+/coverage/
+*.csv
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.claude/
