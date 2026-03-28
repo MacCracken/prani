@@ -687,3 +687,253 @@ fn test_non_stationary_perturbation() {
     assert!(alarm.iter().all(|s| s.is_finite()));
     assert!(idle.iter().all(|s| s.is_finite()));
 }
+
+// --- v1.1.0 features ---
+
+#[test]
+fn test_vocal_effort_whisper_vs_shout() {
+    let whisper = CreatureVoice::new(Species::Wolf).with_vocal_effort(0.0);
+    let shout = CreatureVoice::new(Species::Wolf).with_vocal_effort(1.0);
+
+    let w_samples = whisper.vocalize(&Vocalization::Howl, 44100.0, 0.5).unwrap();
+    let s_samples = shout.vocalize(&Vocalization::Howl, 44100.0, 0.5).unwrap();
+
+    let w_energy: f32 = w_samples.iter().map(|s| s * s).sum();
+    let s_energy: f32 = s_samples.iter().map(|s| s * s).sum();
+    assert!(
+        s_energy > w_energy * 2.0,
+        "shout ({s_energy}) should be much louder than whisper ({w_energy})"
+    );
+}
+
+#[test]
+fn test_vocal_effort_default_is_normal() {
+    let voice = CreatureVoice::new(Species::Wolf);
+    assert!((voice.vocal_effort() - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_vocal_effort_set_mutably() {
+    let mut voice = CreatureVoice::new(Species::Wolf);
+    voice.set_vocal_effort(0.8);
+    assert!((voice.vocal_effort() - 0.8).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_emotion_state_default() {
+    let state = EmotionState::new();
+    assert!((state.valence() - 0.0).abs() < f32::EPSILON);
+    assert!((state.arousal() - 0.2).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_emotion_state_evaluate_high_arousal_negative() {
+    let state = EmotionState::with_values(-0.8, 0.9);
+    let output = state.evaluate();
+    assert_eq!(output.intent, CallIntent::Distress);
+    assert!(output.vocal_effort > 0.7);
+}
+
+#[test]
+fn test_emotion_state_evaluate_low_arousal_positive() {
+    let state = EmotionState::with_values(0.5, 0.1);
+    let output = state.evaluate();
+    assert_eq!(output.vocalization, Vocalization::Purr);
+    assert_eq!(output.intent, CallIntent::Idle);
+    assert!(output.vocal_effort < 0.4);
+}
+
+#[test]
+fn test_emotion_state_smooth_update() {
+    let mut state = EmotionState::with_values(0.0, 0.5).with_smoothing(0.5);
+    state.update(1.0, 1.0);
+    // After one step with 0.5 smoothing, should be halfway
+    assert!(state.valence() > 0.4 && state.valence() < 0.6);
+    assert!(state.arousal() > 0.7 && state.arousal() < 0.8);
+}
+
+#[test]
+fn test_emotion_state_drives_synthesis() {
+    let state = EmotionState::with_values(-0.5, 0.8);
+    let output = state.evaluate();
+    let voice = CreatureVoice::new(Species::Wolf).with_vocal_effort(output.vocal_effort);
+    let samples = voice
+        .vocalize_with_intent(&output.vocalization, output.intent, 44100.0, 0.5)
+        .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_serde_roundtrip_emotion_state() {
+    let state = EmotionState::with_values(0.3, 0.7);
+    let json = serde_json::to_string(&state).unwrap();
+    let s2: EmotionState = serde_json::from_str(&json).unwrap();
+    assert!((s2.valence() - 0.3).abs() < f32::EPSILON);
+    assert!((s2.arousal() - 0.7).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_lombard_effect() {
+    let mut quiet_voice = CreatureVoice::new(Species::Wolf).with_vocal_effort(0.3);
+    let mut noisy_voice = CreatureVoice::new(Species::Wolf).with_vocal_effort(0.3);
+
+    noisy_voice.apply_lombard_effect(80.0); // 80 dB SPL ambient
+    assert!(noisy_voice.vocal_effort() > quiet_voice.vocal_effort());
+
+    // Very quiet environment should not change effort
+    quiet_voice.apply_lombard_effect(30.0);
+    assert!((quiet_voice.vocal_effort() - 0.3).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_fatigue_accumulates() {
+    let mut fatigue = FatigueState::new();
+    assert!((fatigue.fatigue() - 0.0).abs() < f32::EPSILON);
+
+    // Simulate 30 seconds of calling
+    for _ in 0..30 {
+        fatigue.record_call(1.0, false);
+    }
+    assert!(fatigue.fatigue() > 0.3);
+
+    let mods = fatigue.modifiers();
+    assert!(mods.pitch_offset < 0.0); // pitch drifts down
+    assert!(mods.breathiness_delta > 0.0); // more breathy
+    assert!(mods.amplitude_scale < 1.0); // quieter
+}
+
+#[test]
+fn test_fatigue_recovers_with_rest() {
+    let mut fatigue = FatigueState::new();
+    for _ in 0..20 {
+        fatigue.record_call(1.0, false);
+    }
+    let fatigued = fatigue.fatigue();
+
+    fatigue.rest(10.0);
+    assert!(fatigue.fatigue() < fatigued);
+}
+
+#[test]
+fn test_habituation_alarm_calls() {
+    let mut fatigue = FatigueState::new();
+    // 5 unreinforced alarm calls
+    for _ in 0..5 {
+        fatigue.record_call(0.5, true);
+    }
+    assert!(fatigue.alarm_habituation() > 0.3);
+
+    let mods = fatigue.modifiers();
+    assert!(mods.amplitude_scale < 0.9); // habituated = quieter
+
+    // Reinforce the alarm
+    fatigue.reinforce_alarm();
+    assert!(fatigue.alarm_habituation() < 0.3); // reduced
+}
+
+#[test]
+fn test_serde_roundtrip_fatigue_state() {
+    let mut fatigue = FatigueState::new();
+    fatigue.record_call(5.0, true);
+    let json = serde_json::to_string(&fatigue).unwrap();
+    let f2: FatigueState = serde_json::from_str(&json).unwrap();
+    assert!((f2.fatigue() - fatigue.fatigue()).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_stream_produces_same_length_as_batch() {
+    use prani::stream::SynthStream;
+    let voice = CreatureVoice::new(Species::Wolf);
+    let batch = voice
+        .vocalize_with_intent(&Vocalization::Howl, CallIntent::Social, 44100.0, 0.5)
+        .unwrap();
+
+    let mut stream =
+        SynthStream::new(voice, Vocalization::Howl, CallIntent::Social, 44100.0, 0.5).unwrap();
+    let mut streamed = Vec::new();
+    let mut buf = vec![0.0f32; 512];
+    while !stream.is_finished() {
+        let n = stream.fill_buffer(&mut buf);
+        streamed.extend_from_slice(&buf[..n]);
+    }
+
+    // Stream and batch should produce the same number of samples
+    assert_eq!(streamed.len(), stream.total_samples());
+    assert!(streamed.iter().all(|s| s.is_finite()));
+    // Length should match batch (intent duration scaling may differ slightly)
+    assert_eq!(batch.len(), streamed.len());
+}
+
+#[test]
+fn test_stream_next_block() {
+    use prani::stream::SynthStream;
+    let voice = CreatureVoice::new(Species::Cat);
+    let mut stream =
+        SynthStream::new(voice, Vocalization::Purr, CallIntent::Idle, 44100.0, 0.3).unwrap();
+
+    let block = stream.next_block(256);
+    assert_eq!(block.len(), 256);
+    assert!(block.iter().all(|s| s.is_finite()));
+    assert!(!stream.is_finished());
+}
+
+#[test]
+fn test_stream_finishes() {
+    use prani::stream::SynthStream;
+    let voice = CreatureVoice::new(Species::Wolf);
+    let mut stream =
+        SynthStream::new(voice, Vocalization::Bark, CallIntent::Idle, 44100.0, 0.1).unwrap();
+
+    // Drain completely
+    while !stream.is_finished() {
+        stream.next_block(1024);
+    }
+    assert!(stream.is_finished());
+    assert_eq!(stream.fill_buffer(&mut [0.0; 64]), 0);
+}
+
+#[test]
+fn test_stream_invalid_vocalization_rejected() {
+    use prani::stream::SynthStream;
+    let voice = CreatureVoice::new(Species::Snake);
+    let result = SynthStream::new(voice, Vocalization::Howl, CallIntent::Idle, 44100.0, 1.0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_bridge_size_from_body_mass() {
+    use prani::bridge::size_from_body_mass;
+    let wolf_size = size_from_body_mass(30.0); // reference
+    assert!((wolf_size - 1.0).abs() < 0.01);
+
+    let mouse_size = size_from_body_mass(0.03);
+    assert!(mouse_size < 0.2);
+
+    let elephant_size = size_from_body_mass(5000.0);
+    assert!(elephant_size > 4.0);
+}
+
+#[test]
+fn test_bridge_intent_from_threat() {
+    use prani::bridge::intent_from_threat_level;
+    assert_eq!(intent_from_threat_level(0.0), CallIntent::Idle);
+    assert_eq!(intent_from_threat_level(0.5), CallIntent::Threat);
+    assert_eq!(intent_from_threat_level(0.9), CallIntent::Distress);
+}
+
+#[test]
+fn test_bridge_vocal_effort_from_arousal() {
+    use prani::bridge::vocal_effort_from_arousal;
+    let low = vocal_effort_from_arousal(0.0);
+    let high = vocal_effort_from_arousal(1.0);
+    assert!(low < 0.1);
+    assert!(high > 0.9);
+}
+
+#[test]
+fn test_bridge_lombard_boost() {
+    use prani::bridge::lombard_effort_boost;
+    assert!((lombard_effort_boost(30.0) - 0.0).abs() < f32::EPSILON); // quiet
+    assert!(lombard_effort_boost(80.0) > 0.1); // noisy
+}

@@ -29,10 +29,11 @@ serde_json = "1"
 
 [features]
 default = ["std", "naad-backend"]
-full = ["std", "naad-backend", "logging"]
+full = ["std", "naad-backend", "logging", "ffi"]
 std = ["serde/std", "svara/std", "thiserror/std", "tracing/std"]
 naad-backend = ["dep:naad", "std"]
 logging = ["dep:tracing-subscriber"]
+ffi = ["std"]
 
 [[bench]]
 name = "benchmarks"

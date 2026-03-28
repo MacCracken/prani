@@ -129,6 +129,64 @@ pub fn doppler_velocity_from_wind(wind_speed_ms: f64, angle_rad: f64) -> f32 {
     (wind_speed_ms * angle_rad.cos()) as f32
 }
 
+// ---------------------------------------------------------------------------
+// RTPC-style continuous parameters (what game AI systems drive)
+// ---------------------------------------------------------------------------
+
+/// Maps a valence value (−1.0 = negative, +1.0 = positive) to a pitch scale.
+///
+/// Positive valence (contentment, playfulness) raises pitch slightly.
+/// Negative valence (fear, aggression) lowers pitch.
+/// Designed for the emotion state machine's valence axis.
+#[must_use]
+pub fn pitch_scale_from_valence(valence: f64) -> f32 {
+    // ±15% pitch shift across the full valence range
+    (1.0 + valence * 0.15).clamp(0.7, 1.3) as f32
+}
+
+/// Maps arousal (0.0–1.0) to a vocal effort value (0.0–1.0).
+///
+/// Low arousal → whisper-level effort. High arousal → shout-level.
+/// This is the primary bridge between the emotion model and the
+/// vocal effort parameter on `CreatureVoice`.
+#[must_use]
+pub fn vocal_effort_from_arousal(arousal: f64) -> f32 {
+    // Sigmoid-ish: slow start, fast middle, plateaus near 1.0
+    let a = arousal.clamp(0.0, 1.0);
+    (3.0 * a * a - 2.0 * a * a * a) as f32
+}
+
+/// Maps an urgency value (0.0–1.0) to jitter and shimmer scale factors.
+///
+/// Returns `(jitter_scale, shimmer_scale)`. Higher urgency = more
+/// perturbation (vocal instability under stress).
+#[must_use]
+pub fn perturbation_from_urgency(urgency: f64) -> (f32, f32) {
+    let u = urgency.clamp(0.0, 1.0);
+    // Jitter scales 1.0–2.5x, shimmer 1.0–2.0x
+    let jitter_scale = (1.0 + u * 1.5) as f32;
+    let shimmer_scale = (1.0 + u * 1.0) as f32;
+    (jitter_scale, shimmer_scale)
+}
+
+/// Maps ambient noise SPL to a Lombard effect vocal effort boost.
+///
+/// The Lombard effect is an involuntary ~3 dB vocal increase per 10 dB
+/// ambient noise increase above a quiet baseline (~40 dB SPL).
+///
+/// Returns an additive effort boost (0.0–0.5) to add to the current
+/// vocal effort parameter.
+#[must_use]
+pub fn lombard_effort_boost(ambient_spl_db: f64) -> f32 {
+    let baseline = 40.0; // quiet environment
+    if ambient_spl_db <= baseline {
+        return 0.0;
+    }
+    // ~0.05 effort per 10 dB above baseline, capped at 0.5
+    let excess = ambient_spl_db - baseline;
+    (excess * 0.005).clamp(0.0, 0.5) as f32
+}
+
 /// Suggests a species from a fundamental frequency measurement.
 ///
 /// Useful when a bioacoustic detector provides an f0 and the caller

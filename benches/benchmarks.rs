@@ -119,6 +119,46 @@ fn bench_crocodilian_rumble(c: &mut Criterion) {
     });
 }
 
+fn bench_vocal_effort_shout(c: &mut Criterion) {
+    c.bench_function("wolf_howl_shout_1s", |b| {
+        let voice = CreatureVoice::new(Species::Wolf).with_vocal_effort(1.0);
+        b.iter(|| {
+            let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 1.0).unwrap();
+            black_box(samples);
+        });
+    });
+}
+
+fn bench_stream_wolf_howl(c: &mut Criterion) {
+    c.bench_function("stream_wolf_howl_1s", |b| {
+        let voice = CreatureVoice::new(Species::Wolf);
+        b.iter(|| {
+            let mut stream = prani::stream::SynthStream::new(
+                voice.clone(),
+                Vocalization::Howl,
+                CallIntent::Social,
+                44100.0,
+                1.0,
+            )
+            .unwrap();
+            let mut buf = vec![0.0f32; 512];
+            while !stream.is_finished() {
+                stream.fill_buffer(&mut buf);
+            }
+            black_box(buf);
+        });
+    });
+}
+
+fn bench_emotion_evaluate(c: &mut Criterion) {
+    c.bench_function("emotion_evaluate", |b| {
+        let state = EmotionState::with_values(-0.5, 0.8);
+        b.iter(|| {
+            let _ = black_box(state.evaluate());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_wolf_howl,
@@ -132,6 +172,9 @@ criterion_group!(
     bench_bee_buzz,
     bench_crow_screech,
     bench_crocodilian_rumble,
+    bench_vocal_effort_shout,
+    bench_stream_wolf_howl,
+    bench_emotion_evaluate,
 );
 
 criterion_main!(benches);

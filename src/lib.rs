@@ -41,7 +41,9 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `std` | Yes | Standard library support. Disable for `no_std` + `alloc` |
+//! | `naad-backend` | Yes | High-quality DSP via naad (implies `std`) |
 //! | `logging` | No | Structured logging via tracing-subscriber |
+//! | `ffi` | No | C FFI buffer-callback API for game middleware (implies `std`) |
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -49,20 +51,27 @@ extern crate alloc;
 
 pub mod bridge;
 pub(crate) mod dsp;
+pub mod emotion;
 pub mod error;
+pub mod fatigue;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 mod math;
 pub mod preset;
 pub(crate) mod rng;
 pub mod sequence;
 pub mod spatial;
 pub mod species;
+pub mod stream;
 pub mod tract;
 pub mod vocalization;
 pub mod voice;
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
+    pub use crate::emotion::{EmotionOutput, EmotionState};
     pub use crate::error::{PraniError, Result};
+    pub use crate::fatigue::{FatigueModifiers, FatigueState};
     pub use crate::preset::VoicePreset;
     pub use crate::sequence::{CallBout, CallPhrase};
     pub use crate::species::Species;
@@ -85,6 +94,10 @@ mod assert_traits {
         _assert_send_sync::<crate::vocalization::CallIntent>();
         _assert_send_sync::<crate::voice::CreatureVoice>();
         _assert_send_sync::<crate::preset::VoicePreset>();
+        _assert_send_sync::<crate::emotion::EmotionState>();
+        _assert_send_sync::<crate::emotion::EmotionOutput>();
+        _assert_send_sync::<crate::fatigue::FatigueState>();
+        _assert_send_sync::<crate::fatigue::FatigueModifiers>();
         _assert_send_sync::<crate::sequence::CallBout>();
         _assert_send_sync::<crate::sequence::CallPhrase>();
     }

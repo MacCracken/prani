@@ -1,16 +1,23 @@
 # Roadmap
 
-## v1.1.0 — Game Integration
+## v1.1.0 — Game Integration ✓ (2026-03-28)
 
 C FFI and real-time API for kiran/joshua and middleware (Wwise, FMOD, Godot).
 
-- C FFI buffer-callback API (fills `&mut [f32]` on demand — maps to Wwise source plugin, FMOD DSP, Godot `AudioStreamGenerator`)
-- RTPC-style continuous parameter interface (body size, arousal, valence, vocal effort, urgency — what game AI systems expect to drive)
-- Streaming synthesis iterator (pull-based, no full-buffer allocation)
-- Creature emotion state machine (valence/arousal model driving vocalization selection and parameter blending)
-- Lombard effect (involuntary vocal effort increase in response to ambient noise level)
-- Vocal effort parameter (continuous whisper-to-shout: modulates subglottal pressure, spectral slope, formant bandwidth, HNR)
-- Fatigue/habituation (prolonged calling shows pitch drift, increased breathiness; repeated alarm without threat reduces intensity)
+- ✓ C FFI buffer-callback API (`ffi` module, behind `ffi` feature gate — `prani_voice_create/destroy`, `prani_stream_start/fill/destroy`)
+- ✓ RTPC-style continuous parameter interface (`bridge` module — `vocal_effort_from_arousal`, `pitch_scale_from_valence`, `perturbation_from_urgency`, `lombard_effort_boost`, `size_from_body_mass`, `breathiness_from_arousal`)
+- ✓ Streaming synthesis iterator (`stream` module — `SynthStream::fill_buffer()`, `next_block()`)
+- ✓ Creature emotion state machine (`emotion` module — `EmotionState` valence/arousal with smooth transitions, 9-region vocalization mapping)
+- ✓ Lombard effect (`CreatureVoice::apply_lombard_effect`)
+- ✓ Vocal effort parameter (`CreatureVoice::with_vocal_effort` / `set_vocal_effort` — modulates amplitude, spectral tilt, breathiness)
+- ✓ Fatigue/habituation (`fatigue` module — pitch drift, breathiness, amplitude loss; alarm habituation with reinforcement)
+
+Also delivered (infrastructure, from garjan review):
+- ✓ `bridge` module — pure science-crate value conversions (no external deps)
+- ✓ `dsp` module — DC blocker on all synthesis paths, naad error mapping
+- ✓ Expanded `math.rs` — cos/exp/sqrt/powf with std/libm dual paths
+- ✓ naad dual code paths in `CreatureTract` (snake noise uses naad BiquadFilter when available)
+- ✓ Code quality fixes — removed unwrap, orphaned #[inline], added #[must_use]
 
 ## v1.2.0 — Species Expansion
 
