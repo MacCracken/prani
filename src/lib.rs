@@ -49,7 +49,10 @@ extern crate alloc;
 
 pub mod error;
 mod math;
+pub mod preset;
 pub(crate) mod rng;
+pub mod sequence;
+pub mod spatial;
 pub mod species;
 pub mod tract;
 pub mod vocalization;
@@ -58,6 +61,8 @@ pub mod voice;
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::error::{PraniError, Result};
+    pub use crate::preset::VoicePreset;
+    pub use crate::sequence::{CallBout, CallPhrase};
     pub use crate::species::Species;
     pub use crate::tract::CreatureTract;
     pub use crate::vocalization::{CallIntent, Vocalization};
@@ -77,5 +82,8 @@ mod assert_traits {
         _assert_send_sync::<crate::vocalization::Vocalization>();
         _assert_send_sync::<crate::vocalization::CallIntent>();
         _assert_send_sync::<crate::voice::CreatureVoice>();
+        _assert_send_sync::<crate::preset::VoicePreset>();
+        _assert_send_sync::<crate::sequence::CallBout>();
+        _assert_send_sync::<crate::sequence::CallPhrase>();
     }
 }

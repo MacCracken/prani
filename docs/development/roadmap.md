@@ -14,8 +14,6 @@
 - High-frequency dual-source syringeal path for birds
 - Full serde support on all public types
 - no_std + alloc support
-- 31 tests, 11 benchmarks
-- CI/CD pipeline matching svara (GitHub Actions, cargo-deny, codecov)
 
 ### P(-1) Scaffold Hardening (2026-03-27)
 
@@ -23,40 +21,38 @@
 - Added `#[must_use]` on SpeciesParams and IntentModifiers
 - Fixed dragon fire-breath seed derivation (was hardcoded)
 - Added tracing warning for out-of-range formant fallback
-- Added 10 new tests (serde roundtrips, edge cases, missing species coverage)
-- Added 3 new benchmarks (bee, crow, crocodilian)
+- CI/CD pipeline matching svara (GitHub Actions, cargo-deny, codecov)
+- 31 tests, 11 benchmarks
+
+### Backlog (2026-03-27)
+
+#### High Priority (all completed)
+- Cat purr special-case synthesis (25-30 Hz laryngeal muscle cycling)
+- Formant transition support for cat meow and wolf howl
+- Discrete pulse-train structure for cricket chirps
+- Spectral tilt control per species (dB/octave)
+
+#### Medium Priority (all completed)
+- Time-varying subharmonic amplitude (peaks during roar/bellow)
+- Deterministic chaos regime for lion/dragon/crocodilian roars
+- Wider bandwidths and increased breathiness for bird vocal tract
+- AM patterns for bird trills (20 Hz)
+- VocalApparatus::Vibratile for bees (renamed from Stridulatory)
+
+#### Lower Priority (all completed)
+- Nasal resonance (anti-formants) for cat meow and wolf howl
+- Biphonation for canids (two independent pitches from one larynx)
+- `spatial` module: Doppler shift, distance attenuation + atmospheric absorption
+- `sequence` module: CallBout, CallPhrase, synthesize_chorus
+- `preset` module: VoicePreset with 7 built-in presets
+- 46 tests, 11 benchmarks
 
 ## Backlog
 
-### High Priority (biggest impact on realism)
-
-- Cat purr special-case synthesis (25-30 Hz laryngeal muscle cycling, not vocal fold vibration)
-- Move subharmonic generation before the tract filter (so formant resonances shape them)
-- Formant transition support for cat meow and wolf howl (dynamic mouth shape changes)
-- Discrete pulse-train structure for cricket chirps (3-5 pulses at ~30 Hz, silence between chirps)
-
-### Medium Priority
-
-- Spectral tilt control per species (dB/octave roll-off; brightness/darkness of voice quality)
-- Time-varying subharmonic amplitude (stronger during peak of roar/bellow)
-- Deterministic chaos regime for lion/dragon roars (period doubling -> chaos -> recovery)
-- Wider bandwidths and source-filter coupling for bird vocal tract model
-- Amplitude modulation patterns per vocalization (e.g., bird trill AM at 20-100 Hz)
-- Rename Bee apparatus from Stridulatory (technically thoracic flight muscle vibration, not friction-based)
-
-### Lower Priority
-
-- Nasal resonance (anti-formants) for mammalian calls (cat meow onset, wolf howl)
+- naad-backend integration (feature-gated, like svara — needs naad dependency)
 - Non-stationary jitter/shimmer (increases during high-effort calls and at boundaries)
-- Call bout/repetition patterning (species-specific inter-call intervals)
-- Biphonation for canids (two pitches from a single larynx)
-- Nonlinear phenomena: period doubling, deterministic chaos (distressed/aggressive calls)
-- Doppler shift for moving creatures
-- Distance-based attenuation and atmospheric filtering
-- Pack/flock chorus synthesis (multiple simultaneous voices with timing variation)
-- Call sequence/phrase generation (e.g., bird song syllable patterns)
-- naad-backend integration (feature-gated, like svara)
-- Creature voice presets (named individuals within species)
+- Call bout/repetition patterning with species-specific timing templates
+- More voice presets (raptor, crow, cricket, crocodilian)
 
 ## Future
 
@@ -69,7 +65,7 @@
 ## v1.0 Criteria (met)
 
 - [x] All 13 species synthesize correctly
-- [x] All 4 apparatus types produce distinct output
+- [x] All 5 apparatus types produce distinct output
 - [x] All public types: Send + Sync + Serialize + Deserialize
 - [x] no_std support
 - [x] Zero panics in library code

@@ -10,7 +10,7 @@ use tracing::trace;
 
 use crate::error::Result;
 use crate::species::{Species, SpeciesParams};
-use crate::tract::CreatureTract;
+use crate::tract::{CreatureTract, SynthesisOptions};
 use crate::vocalization::{CallIntent, Vocalization};
 
 /// A creature's voice — species + individual variation.
@@ -155,7 +155,18 @@ impl CreatureVoice {
             "synthesizing creature vocalization"
         );
 
+        // Cat purr uses a special synthesis path (25-30 Hz laryngeal muscle cycling)
+        if *vocalization == Vocalization::Purr && self.species == Species::Cat {
+            return self.synthesize_cat_purr(sample_rate, num_samples, &modifiers);
+        }
+
         let mut tract = CreatureTract::new(&self.params, sample_rate);
+
+        // Build per-block synthesis options
+        let base_options = SynthesisOptions::default();
+
+        // Get formant transition contour (if applicable)
+        let formant_contour = formant_transition_contour(vocalization, self.species);
 
         // Synthesize with vocalization-specific pitch contour
         let contour = pitch_contour(vocalization, f0);
@@ -164,35 +175,64 @@ impl CreatureVoice {
         let mut rendered = 0;
         while rendered < num_samples {
             let block_len = block_size.min(num_samples - rendered);
-            let t = rendered as f32 / num_samples as f32;
+            let t = rendered as f32 / num_samples.max(1) as f32;
             let block_f0 = contour.f0_at(t);
-            let block = tract.synthesize(block_f0, block_len)?;
+
+            // Apply formant transition if this vocalization has one
+            if let Some(ref fc) = formant_contour {
+                let (target_f, target_b, blend) = fc.at(t);
+                let _ = tract.set_formant_blend(&target_f, &target_b, blend);
+            }
+
+            let block = tract.synthesize(block_f0, block_len, &base_options)?;
             samples.extend_from_slice(&block);
             rendered += block_len;
         }
 
-        // Add subharmonics for species that produce them (lions, dragons, crocodilians)
+        // Add subharmonics with time-varying amplitude for species that produce them.
+        // Amplitude peaks during the middle of the call (strongest during full roar).
+        // Added post-tract because svara's VocalTract formant filters attenuate
+        // frequencies far below F1.
         if matches!(
             self.species,
             Species::Lion | Species::Dragon | Species::Crocodilian
         ) {
-            let sub_f0 = f0 * 0.5; // Half-frequency subharmonic
-            let sub_amp = 0.3; // Subharmonic is quieter than fundamental
+            let sub_f0 = f0 * 0.5;
+            let mut chaos_rng =
+                crate::rng::Rng::new(self.params.resonance_seed().wrapping_add(0xCA05));
             for (i, sample) in samples.iter_mut().enumerate() {
-                let t = i as f32 / sample_rate;
-                *sample += crate::math::f32::sin(core::f32::consts::TAU * sub_f0 * t) * sub_amp;
+                let t_norm = i as f32 / num_samples.max(1) as f32;
+                let t_sec = i as f32 / sample_rate;
+
+                // Time-varying subharmonic: peaks at 0.3-0.7 of the call
+                let sub_env = if t_norm < 0.15 {
+                    t_norm / 0.15
+                } else if t_norm > 0.8 {
+                    (1.0 - t_norm) / 0.2
+                } else {
+                    1.0
+                };
+                let sub_amp = 0.4 * sub_env;
+                *sample += crate::math::f32::sin(core::f32::consts::TAU * sub_f0 * t_sec) * sub_amp;
+
+                // Deterministic chaos: noise modulated by subharmonic period.
+                // Adds roughness during peak intensity (period doubling -> chaos).
+                // Characteristic of lion roars cycling through tonal -> chaotic regimes.
+                if sub_env > 0.6 {
+                    let chaos_intensity = (sub_env - 0.6) / 0.4; // 0..1 during peak
+                    let chaos_noise = chaos_rng.next_f32() * 0.15 * chaos_intensity;
+                    *sample += chaos_noise;
+                }
             }
         }
 
         // Dragon fire-breath: mix broadband turbulent noise with the vocalization.
-        // Scales with breathiness and matches the roar/growl envelope.
         if self.species == Species::Dragon {
             let mut fire_rng =
                 crate::rng::Rng::new(self.params.resonance_seed().wrapping_add(0xF12E));
             let fire_amp = self.params.breathiness * 0.4;
             for (i, sample) in samples.iter_mut().enumerate() {
                 let t = i as f32 / num_samples.max(1) as f32;
-                // Fire noise ramps up during the middle of the call
                 let fire_env = if t < 0.2 {
                     t / 0.2
                 } else if t > 0.8 {
@@ -205,6 +245,49 @@ impl CreatureVoice {
             }
         }
 
+        // Biphonation for canids: add a second independent pitch from the same larynx.
+        // Documented in wolves and foxes. The second pitch is typically a non-harmonic
+        // interval (minor seventh or tritone), creating a distinctive two-toned quality.
+        if matches!(self.species, Species::Wolf | Species::Dog)
+            && matches!(vocalization, Vocalization::Howl | Vocalization::Whine)
+        {
+            let bipho_f0 = f0 * 1.78; // ~minor seventh interval
+            let bipho_amp = 0.15; // Subtle secondary pitch
+            for (i, sample) in samples.iter_mut().enumerate() {
+                let t = i as f32 / sample_rate;
+                let t_norm = i as f32 / num_samples.max(1) as f32;
+                // Biphonation appears in the middle section of the call
+                let bipho_env = if !(0.3..=0.8).contains(&t_norm) {
+                    0.0
+                } else {
+                    let mid = (t_norm - 0.3) / 0.5;
+                    if mid < 0.3 {
+                        mid / 0.3
+                    } else if mid > 0.7 {
+                        (1.0 - mid) / 0.3
+                    } else {
+                        1.0
+                    }
+                };
+                *sample += crate::math::f32::sin(core::f32::consts::TAU * bipho_f0 * t)
+                    * bipho_amp
+                    * bipho_env;
+            }
+        }
+
+        // Nasal resonance: apply anti-formant (spectral notch) during nasal phases.
+        // Cat meow starts nasal ("m"), wolf howl has nasal onset.
+        // Implemented as a notch at ~250 Hz (nasal anti-formant frequency).
+        if let Some(nasal_phase) = nasal_phase_fraction(vocalization, self.species) {
+            apply_nasal_antiformant(&mut samples, sample_rate, nasal_phase);
+        }
+
+        // Apply vocalization-specific AM patterns (bird trills, purr cycling)
+        apply_am_pattern(&mut samples, vocalization, sample_rate);
+
+        // Apply spectral tilt (darkens/brightens the overall timbre)
+        CreatureTract::apply_spectral_tilt(&mut samples, self.params.spectral_tilt, sample_rate);
+
         // Apply amplitude scaling from intent
         let amp = modifiers.amplitude_scale;
         for s in &mut samples {
@@ -213,6 +296,37 @@ impl CreatureVoice {
 
         // Apply amplitude envelope based on vocalization shape
         apply_vocalization_envelope(&mut samples, vocalization, sample_rate);
+
+        Ok(samples)
+    }
+
+    /// Synthesizes a cat purr using 25-30 Hz laryngeal muscle cycling.
+    ///
+    /// This is fundamentally different from normal vocal fold vibration.
+    /// The laryngeal muscles contract/relax at ~25 Hz, producing an asymmetric
+    /// waveform with formant-filtered resonance.
+    fn synthesize_cat_purr(
+        &self,
+        sample_rate: f32,
+        num_samples: usize,
+        modifiers: &crate::vocalization::IntentModifiers,
+    ) -> Result<Vec<f32>> {
+        let mut tract = CreatureTract::new(&self.params, sample_rate);
+
+        // Purr f0 is 25-30 Hz, independent of the species' vocal f0 range.
+        // Individual variation via size: larger cat = slightly lower purr.
+        let purr_f0 = (27.0 / self.size_scale).clamp(20.0, 35.0);
+
+        let mut samples = tract.synthesize_purr(num_samples, purr_f0)?;
+
+        // Apply amplitude scaling from intent
+        let amp = modifiers.amplitude_scale;
+        for s in &mut samples {
+            *s *= amp;
+        }
+
+        // Purr envelope: gentle fade-in/fade-out
+        apply_vocalization_envelope(&mut samples, &Vocalization::Purr, sample_rate);
 
         Ok(samples)
     }
@@ -275,6 +389,165 @@ fn pitch_contour(v: &Vocalization, base_f0: f32) -> PitchContour {
     PitchContour {
         base: base_f0,
         points,
+    }
+}
+
+/// Formant transition contour — defines how formants change during a vocalization.
+///
+/// Used for vocalizations where mouth shape changes over time (cat meow, wolf howl).
+struct FormantTransitionContour {
+    /// Keyframes: (time, target_formants_F1F2F3, target_bandwidths, blend_amount).
+    /// blend_amount = how far from species default toward the target at this keyframe.
+    keyframes: &'static [(f32, [f32; 3], [f32; 3], f32)],
+}
+
+impl FormantTransitionContour {
+    /// Returns the (target_formants, target_bandwidths, blend) at normalized time t.
+    fn at(&self, t: f32) -> ([f32; 3], [f32; 3], f32) {
+        let t = t.clamp(0.0, 1.0);
+        if self.keyframes.is_empty() {
+            return ([0.0; 3], [0.0; 3], 0.0);
+        }
+        for i in 0..self.keyframes.len() - 1 {
+            let (t0, f0, b0, bl0) = self.keyframes[i];
+            let (t1, f1, b1, bl1) = self.keyframes[i + 1];
+            if t >= t0 && t <= t1 {
+                let frac = if (t1 - t0).abs() < f32::EPSILON {
+                    0.0
+                } else {
+                    (t - t0) / (t1 - t0)
+                };
+                let f = [
+                    f0[0] + (f1[0] - f0[0]) * frac,
+                    f0[1] + (f1[1] - f0[1]) * frac,
+                    f0[2] + (f1[2] - f0[2]) * frac,
+                ];
+                let b = [
+                    b0[0] + (b1[0] - b0[0]) * frac,
+                    b0[1] + (b1[1] - b0[1]) * frac,
+                    b0[2] + (b1[2] - b0[2]) * frac,
+                ];
+                let bl = bl0 + (bl1 - bl0) * frac;
+                return (f, b, bl);
+            }
+        }
+        let last = self.keyframes.last().unwrap();
+        (last.1, last.2, last.3)
+    }
+}
+
+/// Returns a formant transition contour for vocalizations with dynamic mouth shape.
+fn formant_transition_contour(
+    v: &Vocalization,
+    species: Species,
+) -> Option<FormantTransitionContour> {
+    // Cat meow: "m" (nasal, closed) -> "e" (open) -> "ow" (closing)
+    // Formant targets represent the open-mouth position; blend controls transition.
+    static CAT_MEOW_HOWL: &[(f32, [f32; 3], [f32; 3], f32)] = &[
+        // Start: mouth mostly closed (nasal "m"), low F1
+        (0.0, [400.0, 2000.0, 3500.0], [150.0, 200.0, 250.0], 0.8),
+        // Mid: mouth open ("e"/"a"), high F1, wide formants
+        (0.4, [1000.0, 2800.0, 4500.0], [100.0, 130.0, 180.0], 1.0),
+        // End: mouth closing ("ow"), F1 drops back
+        (1.0, [500.0, 1800.0, 3800.0], [140.0, 180.0, 220.0], 0.6),
+    ];
+
+    // Wolf howl: gradual mouth opening then closing, subtle formant shift
+    static WOLF_HOWL: &[(f32, [f32; 3], [f32; 3], f32)] = &[
+        // Start: neutral
+        (0.0, [420.0, 1250.0, 2100.0], [100.0, 120.0, 150.0], 0.0),
+        // Peak: mouth slightly more open
+        (0.3, [500.0, 1400.0, 2300.0], [90.0, 110.0, 140.0], 0.6),
+        // Sustained
+        (0.7, [480.0, 1350.0, 2200.0], [95.0, 115.0, 145.0], 0.4),
+        // Close
+        (1.0, [400.0, 1200.0, 2000.0], [110.0, 130.0, 160.0], 0.3),
+    ];
+
+    match (v, species) {
+        (Vocalization::Howl | Vocalization::Whine, Species::Cat) => {
+            Some(FormantTransitionContour {
+                keyframes: CAT_MEOW_HOWL,
+            })
+        }
+        (Vocalization::Howl, Species::Wolf | Species::Dog) => Some(FormantTransitionContour {
+            keyframes: WOLF_HOWL,
+        }),
+        _ => None,
+    }
+}
+
+/// Returns the fraction of the call that is nasal (0.0-1.0 from start).
+/// None if no nasal phase applies.
+fn nasal_phase_fraction(v: &Vocalization, species: Species) -> Option<f32> {
+    match (v, species) {
+        // Cat meow: nasal "m" at the start (~20% of call)
+        (Vocalization::Howl | Vocalization::Whine, Species::Cat) => Some(0.2),
+        // Wolf howl: brief nasal onset (~10%)
+        (Vocalization::Howl, Species::Wolf | Species::Dog) => Some(0.1),
+        _ => None,
+    }
+}
+
+/// Applies a nasal anti-formant (notch filter) during the nasal phase of a call.
+///
+/// The notch at ~250 Hz simulates the coupling of the nasal cavity, which
+/// introduces a spectral zero (anti-resonance) characteristic of nasalized sounds.
+fn apply_nasal_antiformant(samples: &mut [f32], sample_rate: f32, nasal_fraction: f32) {
+    let nasal_len = (samples.len() as f32 * nasal_fraction) as usize;
+    if nasal_len == 0 {
+        return;
+    }
+
+    // Simple notch at 250 Hz using a second-order IIR
+    let notch_freq = 250.0;
+    let notch_bw = 80.0; // bandwidth of the notch
+    let r = 1.0 - (core::f32::consts::PI * notch_bw / sample_rate);
+    let r = r.clamp(0.5, 0.999);
+    let theta = core::f32::consts::TAU * notch_freq / sample_rate;
+    let cos_theta = crate::math::f32::sin(core::f32::consts::PI / 2.0 - theta); // cos via sin
+
+    // Notch filter: H(z) = (1 - 2cos(θ)z^-1 + z^-2) / (1 - 2r·cos(θ)z^-1 + r²z^-2)
+    let a1 = -2.0 * r * cos_theta;
+    let a2 = r * r;
+    let b1 = -2.0 * cos_theta;
+
+    let mut x1 = 0.0f32;
+    let mut x2 = 0.0f32;
+    let mut y1 = 0.0f32;
+    let mut y2 = 0.0f32;
+
+    for (i, sample) in samples.iter_mut().enumerate().take(nasal_len) {
+        let x0 = *sample;
+        let y0 = x0 + b1 * x1 + x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+
+        // Fade the notch effect: full at start, fading out by end of nasal phase
+        let fade = 1.0 - (i as f32 / nasal_len as f32);
+        *sample = *sample * (1.0 - fade) + y0 * fade;
+    }
+}
+
+/// Applies vocalization-specific amplitude modulation patterns.
+///
+/// Bird trills get rapid AM at species-typical rates.
+/// Purr gets 25 Hz AM cycling (if not handled by special purr path).
+#[inline]
+fn apply_am_pattern(samples: &mut [f32], vocalization: &Vocalization, sample_rate: f32) {
+    let am_rate = match vocalization {
+        // Bird trills: rapid AM at 15-30 Hz typical for songbird trills
+        Vocalization::Trill => 20.0,
+        _ => return,
+    };
+
+    for (i, sample) in samples.iter_mut().enumerate() {
+        let t = i as f32 / sample_rate;
+        // Sinusoidal AM: modulate between 0.3 and 1.0 (never fully silent)
+        let modulator = 0.65 + 0.35 * crate::math::f32::sin(core::f32::consts::TAU * am_rate * t);
+        *sample *= modulator;
     }
 }
 

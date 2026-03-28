@@ -62,6 +62,8 @@ pub enum VocalApparatus {
     Syringeal,
     /// Stridulation (insects). Friction-based, periodic but non-glottal.
     Stridulatory,
+    /// Vibratile (bees, flies). Thoracic flight muscle vibration through wings.
+    Vibratile,
     /// Noise-only (snakes, some insects). No periodic source.
     NoiseOnly,
 }
@@ -92,6 +94,10 @@ pub struct SpeciesParams {
     pub jitter: f32,
     /// Default shimmer (0.0-0.1).
     pub shimmer: f32,
+    /// Spectral tilt in dB/octave (negative = darker, 0 = neutral, positive = brighter).
+    /// Lion roars: steep roll-off (-6). Bird calls: relatively flat (-1).
+    #[serde(default)]
+    pub spectral_tilt: f32,
 }
 
 impl SpeciesParams {
@@ -125,6 +131,7 @@ impl Species {
                 breathiness: 0.05,
                 jitter: 0.015,
                 shimmer: 0.03,
+                spectral_tilt: -3.0,
             },
             Self::Dog => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -137,6 +144,7 @@ impl Species {
                 breathiness: 0.03,
                 jitter: 0.012,
                 shimmer: 0.025,
+                spectral_tilt: -2.0,
             },
             Self::Cat => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -149,6 +157,7 @@ impl Species {
                 breathiness: 0.08,
                 jitter: 0.02,
                 shimmer: 0.04,
+                spectral_tilt: -2.0,
             },
             Self::Lion => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -161,6 +170,7 @@ impl Species {
                 breathiness: 0.1,
                 jitter: 0.025,
                 shimmer: 0.05,
+                spectral_tilt: -6.0, // Steep roll-off, very dark
             },
             Self::Songbird => SpeciesParams {
                 apparatus: VocalApparatus::Syringeal,
@@ -169,10 +179,11 @@ impl Species {
                 f0_default: 3000.0,
                 tract_scale: 0.15,
                 formants: [3500.0, 7000.0, 10500.0], // ~2.5cm tract
-                bandwidths: [300.0, 500.0, 700.0],
+                bandwidths: [500.0, 800.0, 1100.0],  // Wider: birds have less defined formants
                 breathiness: 0.02,
                 jitter: 0.005,
                 shimmer: 0.01,
+                spectral_tilt: -1.0, // Relatively flat
             },
             Self::Crow => SpeciesParams {
                 apparatus: VocalApparatus::Syringeal,
@@ -181,10 +192,11 @@ impl Species {
                 f0_default: 800.0,
                 tract_scale: 0.3,
                 formants: [1400.0, 4200.0, 7000.0], // ~6cm tract
-                bandwidths: [200.0, 300.0, 500.0],
-                breathiness: 0.15,
+                bandwidths: [350.0, 500.0, 700.0],  // Wider for harsh corvid calls
+                breathiness: 0.18,                  // Notably harsh/noisy
                 jitter: 0.03,
                 shimmer: 0.05,
+                spectral_tilt: -2.0,
             },
             Self::Raptor => SpeciesParams {
                 apparatus: VocalApparatus::Syringeal,
@@ -193,10 +205,11 @@ impl Species {
                 f0_default: 2500.0,
                 tract_scale: 0.2,
                 formants: [2100.0, 5500.0, 8500.0], // ~4cm tract
-                bandwidths: [250.0, 400.0, 600.0],
+                bandwidths: [400.0, 600.0, 800.0],  // Wider for birds
                 breathiness: 0.1,
                 jitter: 0.01,
                 shimmer: 0.02,
+                spectral_tilt: -1.5,
             },
             Self::Snake => SpeciesParams {
                 apparatus: VocalApparatus::NoiseOnly,
@@ -209,6 +222,7 @@ impl Species {
                 breathiness: 1.0,
                 jitter: 0.0,
                 shimmer: 0.0,
+                spectral_tilt: 0.0,
             },
             Self::Crocodilian => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -221,6 +235,7 @@ impl Species {
                 breathiness: 0.15,
                 jitter: 0.03,
                 shimmer: 0.06,
+                spectral_tilt: -5.0, // Dark, low-frequency dominant
             },
             Self::Cricket => SpeciesParams {
                 apparatus: VocalApparatus::Stridulatory,
@@ -233,9 +248,10 @@ impl Species {
                 breathiness: 0.0,
                 jitter: 0.002,
                 shimmer: 0.005,
+                spectral_tilt: -1.0,
             },
             Self::Bee => SpeciesParams {
-                apparatus: VocalApparatus::Stridulatory,
+                apparatus: VocalApparatus::Vibratile,
                 f0_min: 200.0,
                 f0_max: 500.0,
                 f0_default: 300.0,
@@ -245,6 +261,7 @@ impl Species {
                 breathiness: 0.0,
                 jitter: 0.001,
                 shimmer: 0.003,
+                spectral_tilt: -1.0,
             },
             Self::Dragon => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -257,6 +274,7 @@ impl Species {
                 breathiness: 0.2,
                 jitter: 0.04,
                 shimmer: 0.08,
+                spectral_tilt: -4.0,
             },
             Self::Fantasy => SpeciesParams {
                 apparatus: VocalApparatus::Laryngeal,
@@ -269,6 +287,7 @@ impl Species {
                 breathiness: 0.05,
                 jitter: 0.015,
                 shimmer: 0.03,
+                spectral_tilt: -3.0,
             },
         }
     }
@@ -289,6 +308,10 @@ impl Species {
                     v,
                     Vocalization::Stridulate | Vocalization::Buzz | Vocalization::Chirp
                 )
+            }
+            VocalApparatus::Vibratile => {
+                // Wing vibration: buzz and chirp
+                matches!(v, Vocalization::Buzz | Vocalization::Chirp)
             }
             VocalApparatus::Laryngeal | VocalApparatus::Syringeal => {
                 // Laryngeal/syringeal can do most things, but not stridulate/buzz

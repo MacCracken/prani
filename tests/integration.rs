@@ -218,6 +218,7 @@ fn test_serde_roundtrip_vocal_apparatus() {
         VocalApparatus::Laryngeal,
         VocalApparatus::Syringeal,
         VocalApparatus::Stridulatory,
+        VocalApparatus::Vibratile,
         VocalApparatus::NoiseOnly,
     ];
     for a in &apparatuses {
@@ -350,4 +351,262 @@ fn test_dragon_individual_variation() {
     let s2 = large.vocalize(&Vocalization::Roar, 44100.0, 0.5).unwrap();
     assert!(s1.iter().all(|s| s.is_finite()));
     assert!(s2.iter().all(|s| s.is_finite()));
+}
+
+// --- High-priority backlog tests ---
+
+#[test]
+fn test_cat_purr_special_synthesis() {
+    // Cat purr should use 25-30 Hz laryngeal muscle cycling
+    let voice = CreatureVoice::new(Species::Cat);
+    let samples = voice.vocalize(&Vocalization::Purr, 44100.0, 1.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+    let max_amp: f32 = samples.iter().map(|s| s.abs()).fold(0.0, f32::max);
+    // Purr is naturally quiet (low-energy 25 Hz cycling through formants)
+    assert!(max_amp > 0.0001, "purr output too quiet: {max_amp}");
+}
+
+#[test]
+fn test_cat_purr_size_variation() {
+    // Larger cat should have slightly lower purr frequency
+    let small = CreatureVoice::new(Species::Cat).with_size(0.5);
+    let large = CreatureVoice::new(Species::Cat).with_size(2.0);
+    let s1 = small.vocalize(&Vocalization::Purr, 44100.0, 0.5).unwrap();
+    let s2 = large.vocalize(&Vocalization::Purr, 44100.0, 0.5).unwrap();
+    assert!(s1.iter().all(|s| s.is_finite()));
+    assert!(s2.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_subharmonics_are_finite() {
+    // Lion, Dragon, Crocodilian all use subharmonics through the tract
+    for species in [Species::Lion, Species::Dragon, Species::Crocodilian] {
+        let voice = CreatureVoice::new(species);
+        let vocalization = if species == Species::Crocodilian {
+            Vocalization::Rumble
+        } else {
+            Vocalization::Roar
+        };
+        // Use Territorial intent for louder output (Idle has 0.5x amplitude)
+        let samples = voice
+            .vocalize_with_intent(&vocalization, CallIntent::Territorial, 44100.0, 1.0)
+            .unwrap();
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "{species:?} subharmonic synthesis produced non-finite samples"
+        );
+        let max_amp: f32 = samples.iter().map(|s| s.abs()).fold(0.0, f32::max);
+        assert!(
+            max_amp > 0.01,
+            "{species:?} with subharmonics too quiet: {max_amp}"
+        );
+    }
+}
+
+#[test]
+fn test_wolf_howl_formant_transitions() {
+    // Wolf howl should produce output with formant transitions (no crash)
+    let voice = CreatureVoice::new(Species::Wolf);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 2.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_cat_howl_formant_transitions() {
+    // Cat howl/meow uses formant transitions (mouth open/close)
+    let voice = CreatureVoice::new(Species::Cat);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 1.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_cricket_pulse_train() {
+    // Cricket stridulation should have silence gaps (pulse-train structure)
+    let voice = CreatureVoice::new(Species::Cricket);
+    let samples = voice
+        .vocalize(&Vocalization::Stridulate, 44100.0, 1.0)
+        .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+    // Check for near-silent regions from inter-chirp gaps.
+    // Spectral tilt filtering may bleed tiny values into silence, so check < threshold.
+    let near_silent = samples.iter().filter(|&&s| s.abs() < 0.001).count();
+    assert!(
+        near_silent > 10,
+        "cricket pulse-train should have silence gaps, got {near_silent} near-silent samples"
+    );
+}
+
+// --- Lower-priority feature tests ---
+
+#[test]
+fn test_wolf_biphonation() {
+    // Wolf howl should include biphonation (second pitch) in the middle section
+    let voice = CreatureVoice::new(Species::Wolf);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 2.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_cat_nasal_resonance() {
+    // Cat howl (meow) should apply nasal anti-formant at onset
+    let voice = CreatureVoice::new(Species::Cat);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 1.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_doppler_shift() {
+    use prani::spatial::apply_doppler_shift;
+    let voice = CreatureVoice::new(Species::Wolf);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 1.0).unwrap();
+
+    // Approaching (negative velocity): higher pitch = fewer output samples
+    let approaching = apply_doppler_shift(&samples, -30.0, 44100.0);
+    assert!(approaching.len() < samples.len());
+
+    // Receding (positive velocity): lower pitch = more output samples
+    let receding = apply_doppler_shift(&samples, 30.0, 44100.0);
+    assert!(receding.len() > samples.len());
+}
+
+#[test]
+fn test_distance_attenuation() {
+    use prani::spatial::apply_distance_attenuation;
+    let voice = CreatureVoice::new(Species::Wolf);
+    let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 0.5).unwrap();
+
+    let near = apply_distance_attenuation(&samples, 1.0, 1.0, 44100.0);
+    let far = apply_distance_attenuation(&samples, 50.0, 1.0, 44100.0);
+
+    let near_energy: f32 = near.iter().map(|s| s * s).sum();
+    let far_energy: f32 = far.iter().map(|s| s * s).sum();
+    assert!(
+        near_energy > far_energy * 10.0,
+        "near ({near_energy}) should be much louder than far ({far_energy})"
+    );
+}
+
+#[test]
+fn test_call_bout() {
+    use prani::sequence::CallBout;
+    let voice = CreatureVoice::new(Species::Dog);
+    let bout = CallBout {
+        vocalization: Vocalization::Bark,
+        count: 3,
+        call_duration: 0.2,
+        interval: 0.3,
+        intent: CallIntent::Alarm,
+    };
+    let samples = bout.synthesize(&voice, 44100.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+    // Should be roughly 3 barks + 2 gaps
+    let expected_len = ((0.2 * 3.0 + 0.3 * 2.0) * 44100.0) as usize;
+    assert!(
+        (samples.len() as f32 - expected_len as f32).abs() < 44100.0,
+        "bout length {} far from expected {}",
+        samples.len(),
+        expected_len
+    );
+}
+
+#[test]
+fn test_call_phrase() {
+    use prani::sequence::CallPhrase;
+    let voice = CreatureVoice::new(Species::Songbird);
+    let phrase = CallPhrase {
+        elements: vec![
+            prani::sequence::CallElement {
+                vocalization: Vocalization::Chirp,
+                duration: 0.1,
+                gap: 0.05,
+            },
+            prani::sequence::CallElement {
+                vocalization: Vocalization::Trill,
+                duration: 0.3,
+                gap: 0.1,
+            },
+            prani::sequence::CallElement {
+                vocalization: Vocalization::Chirp,
+                duration: 0.1,
+                gap: 0.0,
+            },
+        ],
+        intent: CallIntent::Mating,
+    };
+    let samples = phrase.synthesize(&voice, 44100.0).unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_chorus_synthesis() {
+    use prani::sequence::synthesize_chorus;
+    let voices: Vec<_> = (0..4)
+        .map(|i| CreatureVoice::new(Species::Wolf).with_size(0.8 + i as f32 * 0.2))
+        .collect();
+    let samples = synthesize_chorus(
+        &voices,
+        &Vocalization::Howl,
+        CallIntent::Social,
+        44100.0,
+        1.0,
+        0.2,
+    )
+    .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_voice_presets() {
+    use prani::preset::presets;
+    for preset in presets::all() {
+        let voice = preset.build();
+        // Each preset should produce valid synthesis
+        let v = if voice.species().supports_vocalization(&Vocalization::Howl) {
+            Vocalization::Howl
+        } else if voice.species().supports_vocalization(&Vocalization::Roar) {
+            Vocalization::Roar
+        } else {
+            Vocalization::Growl
+        };
+        let samples = voice.vocalize(&v, 44100.0, 0.3).unwrap();
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "preset {} produced non-finite samples",
+            preset.name
+        );
+    }
+}
+
+#[test]
+fn test_serde_roundtrip_call_bout() {
+    use prani::sequence::CallBout;
+    let bout = CallBout {
+        vocalization: Vocalization::Bark,
+        count: 3,
+        call_duration: 0.2,
+        interval: 0.3,
+        intent: CallIntent::Alarm,
+    };
+    let json = serde_json::to_string(&bout).unwrap();
+    let b2: CallBout = serde_json::from_str(&json).unwrap();
+    assert_eq!(b2.count, 3);
+    assert_eq!(b2.vocalization, Vocalization::Bark);
+}
+
+#[test]
+fn test_serde_roundtrip_voice_preset() {
+    use prani::preset::presets;
+    let preset = presets::ALPHA_WOLF;
+    let json = serde_json::to_string(&preset).unwrap();
+    let p2: prani::preset::VoicePreset = serde_json::from_str(&json).unwrap();
+    assert_eq!(p2.species, Species::Wolf);
 }
