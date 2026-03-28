@@ -1,6 +1,6 @@
 [package]
 name = "prani"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
@@ -31,7 +31,7 @@ serde_json = "1"
 default = ["std", "naad-backend"]
 full = ["std", "naad-backend", "logging"]
 std = ["serde/std", "svara/std", "thiserror/std", "tracing/std"]
-naad-backend = ["dep:naad"]
+naad-backend = ["dep:naad", "std"]
 logging = ["dep:tracing-subscriber"]
 
 [[bench]]

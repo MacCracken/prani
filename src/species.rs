@@ -114,6 +114,7 @@ impl SpeciesParams {
 
 impl Species {
     /// Returns the default vocal parameters for this species.
+    #[must_use = "returns species parameters that should be used for synthesis"]
     pub fn params(self) -> SpeciesParams {
         // Formant frequencies derived from vocal tract length:
         // F_n ≈ (2n-1) * c / (4L), c=343 m/s

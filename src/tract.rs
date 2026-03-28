@@ -16,6 +16,7 @@ use svara::formant::{Formant, FormantFilter, VowelTarget};
 use svara::glottal::GlottalSource;
 use svara::tract::VocalTract;
 
+use crate::dsp::DcBlocker;
 use crate::error::Result;
 use crate::rng::Rng;
 use crate::species::{SpeciesParams, VocalApparatus};
@@ -36,6 +37,11 @@ pub struct CreatureTract {
     sample_rate: f32,
     /// Running phase accumulator for sample-accurate synthesis across blocks.
     phase: f32,
+    /// DC blocker applied to all synthesis output.
+    dc_blocker: DcBlocker,
+    /// naad bandpass filter for noise shaping (higher quality than manual IIR).
+    #[cfg(feature = "naad-backend")]
+    noise_filter: Option<naad::filter::BiquadFilter>,
 }
 
 impl CreatureTract {
@@ -58,12 +64,31 @@ impl CreatureTract {
             tracing::warn!(?e, "species formants out of range, using defaults");
         }
 
+        // When naad-backend is available, pre-build a bandpass filter for
+        // noise-only synthesis (snakes). Higher quality spectral shaping than
+        // the manual FormantFilter fallback.
+        #[cfg(feature = "naad-backend")]
+        let noise_filter = if params.apparatus == VocalApparatus::NoiseOnly {
+            naad::filter::BiquadFilter::new(
+                naad::filter::FilterType::BandPass,
+                sample_rate,
+                params.formants[0],
+                2.0,
+            )
+            .ok()
+        } else {
+            None
+        };
+
         Self {
             tract,
             params: params.clone(),
             rng: Rng::new(params.resonance_seed()),
             sample_rate,
             phase: 0.0,
+            dc_blocker: DcBlocker::new(),
+            #[cfg(feature = "naad-backend")]
+            noise_filter,
         }
     }
 
@@ -123,9 +148,12 @@ impl CreatureTract {
                 }
                 output.push(self.tract.process_sample(glottal_sample + sub));
             }
+            self.dc_blocker.process_buffer(&mut output);
             Ok(output)
         } else {
-            Ok(self.tract.synthesize(&mut glottal, num_samples))
+            let mut output = self.tract.synthesize(&mut glottal, num_samples);
+            self.dc_blocker.process_buffer(&mut output);
+            Ok(output)
         }
     }
 
@@ -143,7 +171,9 @@ impl CreatureTract {
             let ps = options.perturbation_scale.max(0.0);
             glottal.set_jitter((self.params.jitter * ps).min(0.05));
             glottal.set_shimmer((self.params.shimmer * ps).min(0.1));
-            Ok(self.tract.synthesize(&mut glottal, num_samples))
+            let mut output = self.tract.synthesize(&mut glottal, num_samples);
+            self.dc_blocker.process_buffer(&mut output);
+            Ok(output)
         } else {
             // High-frequency syringeal synthesis with dual-source capability.
             // The syrinx has two independent sound sources (left/right bronchus)
@@ -159,22 +189,41 @@ impl CreatureTract {
                 let excitation = (tone1 + tone2) * 0.5 * (1.0 - self.params.breathiness) + noise;
                 output.push(self.tract.process_sample(excitation));
             }
+            self.dc_blocker.process_buffer(&mut output);
             Ok(output)
         }
     }
 
     /// Noise-only synthesis: filtered broadband noise (snakes).
+    ///
+    /// When `naad-backend` is active, uses naad's `BiquadFilter` for higher-quality
+    /// spectral shaping. Falls back to svara's `FormantFilter` otherwise.
     fn synthesize_noise(&mut self, num_samples: usize) -> Result<Vec<f32>> {
+        let mut output = Vec::with_capacity(num_samples);
+
+        #[cfg(feature = "naad-backend")]
+        {
+            if let Some(ref mut filter) = self.noise_filter {
+                for _ in 0..num_samples {
+                    let noise = self.rng.next_f32() * 0.5;
+                    output.push(filter.process_sample(noise));
+                }
+                self.dc_blocker.process_buffer(&mut output);
+                return Ok(output);
+            }
+        }
+
+        // Fallback: svara FormantFilter
         let f = &self.params.formants;
         let b = &self.params.bandwidths;
         let formants = [Formant::new(f[0], b[0], 0.6), Formant::new(f[1], b[1], 0.3)];
         let mut filter = FormantFilter::new(&formants, self.sample_rate)
             .map_err(|e| crate::error::PraniError::SynthesisFailed(alloc::format!("{e}")))?;
-        let mut output = Vec::with_capacity(num_samples);
         for _ in 0..num_samples {
             let noise = self.rng.next_f32() * 0.5;
             output.push(filter.process_sample(noise));
         }
+        self.dc_blocker.process_buffer(&mut output);
         Ok(output)
     }
 
@@ -242,6 +291,7 @@ impl CreatureTract {
                 output.push((carrier + h2) * modulator * 0.25);
             }
         }
+        self.dc_blocker.process_buffer(&mut output);
         Ok(output)
     }
 
@@ -275,6 +325,7 @@ impl CreatureTract {
             // Sharp pulse excites the vocal tract, producing resonant harmonics
             output.push(self.tract.process_sample(excitation));
         }
+        self.dc_blocker.process_buffer(&mut output);
         Ok(output)
     }
 
@@ -339,6 +390,7 @@ impl CreatureTract {
                 0.5 + 0.5 * crate::math::f32::sin(core::f32::consts::TAU * mod_rate * t);
             output.push((carrier + h2) * modulator * 0.25);
         }
+        self.dc_blocker.process_buffer(&mut output);
         Ok(output)
     }
 
@@ -369,6 +421,7 @@ impl CreatureTract {
     pub fn reset(&mut self) {
         self.tract.reset();
         self.phase = 0.0;
+        self.dc_blocker.reset();
     }
 }
 

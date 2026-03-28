@@ -79,6 +79,7 @@ pub struct IntentModifiers {
 
 impl CallIntent {
     /// Returns the prosodic modifiers for this intent.
+    #[must_use = "returns intent modifiers that should be applied to synthesis"]
     pub fn modifiers(self) -> IntentModifiers {
         match self {
             Self::Alarm => IntentModifiers {

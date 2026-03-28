@@ -461,7 +461,12 @@ impl FormantTransitionContour {
                 return (f, b, bl);
             }
         }
-        let last = self.keyframes.last().unwrap();
+        // SAFETY: all static keyframe slices have at least one entry;
+        // the empty check above handles the degenerate case.
+        let last = match self.keyframes.last() {
+            Some(kf) => kf,
+            None => return ([0.0; 3], [0.0; 3], 0.0),
+        };
         (last.1, last.2, last.3)
     }
 }
@@ -561,11 +566,6 @@ fn apply_nasal_antiformant(samples: &mut [f32], sample_rate: f32, nasal_fraction
     }
 }
 
-/// Applies vocalization-specific amplitude modulation patterns.
-///
-/// Bird trills get rapid AM at species-typical rates.
-/// Purr gets 25 Hz AM cycling (if not handled by special purr path).
-#[inline]
 /// Returns a spectral tilt offset (dB/octave) for a given vocalization type.
 ///
 /// Layered on top of the species spectral tilt. Negative = darker.
@@ -587,6 +587,9 @@ fn vocalization_spectral_offset(v: &Vocalization) -> f32 {
     }
 }
 
+/// Applies vocalization-specific amplitude modulation patterns.
+///
+/// Bird trills get rapid AM at species-typical rates.
 fn apply_am_pattern(samples: &mut [f32], vocalization: &Vocalization, sample_rate: f32) {
     let am_rate = match vocalization {
         // Bird trills: rapid AM at 15-30 Hz typical for songbird trills

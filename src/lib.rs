@@ -47,6 +47,8 @@
 
 extern crate alloc;
 
+pub mod bridge;
+pub(crate) mod dsp;
 pub mod error;
 mod math;
 pub mod preset;

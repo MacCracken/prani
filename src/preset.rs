@@ -141,6 +141,7 @@ pub mod presets {
     };
 
     /// Returns all built-in presets.
+    #[must_use = "returns the list of all built-in voice presets"]
     pub fn all() -> &'static [VoicePreset] {
         &[
             ALPHA_WOLF,
