@@ -319,4 +319,107 @@ impl Species {
             }
         }
     }
+
+    /// Returns a typical call bout template for this species.
+    ///
+    /// Each species has a characteristic calling pattern: dogs bark in rapid
+    /// bursts, wolves howl with long pauses, crickets stridulate continuously
+    /// with inter-chirp gaps, etc.
+    #[must_use]
+    pub fn bout_template(self) -> crate::sequence::CallBout {
+        use crate::vocalization::{CallIntent, Vocalization};
+        match self {
+            Self::Wolf => crate::sequence::CallBout {
+                vocalization: Vocalization::Howl,
+                count: 3,
+                call_duration: 3.0,
+                interval: 2.0,
+                intent: CallIntent::Social,
+            },
+            Self::Dog => crate::sequence::CallBout {
+                vocalization: Vocalization::Bark,
+                count: 5,
+                call_duration: 0.15,
+                interval: 0.25,
+                intent: CallIntent::Alarm,
+            },
+            Self::Cat => crate::sequence::CallBout {
+                vocalization: Vocalization::Howl, // meow
+                count: 2,
+                call_duration: 0.6,
+                interval: 1.0,
+                intent: CallIntent::Social,
+            },
+            Self::Lion => crate::sequence::CallBout {
+                vocalization: Vocalization::Roar,
+                count: 4,
+                call_duration: 2.0,
+                interval: 1.5,
+                intent: CallIntent::Territorial,
+            },
+            Self::Songbird => crate::sequence::CallBout {
+                vocalization: Vocalization::Trill,
+                count: 6,
+                call_duration: 0.3,
+                interval: 0.15,
+                intent: CallIntent::Mating,
+            },
+            Self::Crow => crate::sequence::CallBout {
+                vocalization: Vocalization::Screech, // caw
+                count: 4,
+                call_duration: 0.2,
+                interval: 0.3,
+                intent: CallIntent::Alarm,
+            },
+            Self::Raptor => crate::sequence::CallBout {
+                vocalization: Vocalization::Screech,
+                count: 2,
+                call_duration: 0.8,
+                interval: 1.5,
+                intent: CallIntent::Territorial,
+            },
+            Self::Snake => crate::sequence::CallBout {
+                vocalization: Vocalization::Hiss,
+                count: 1,
+                call_duration: 1.5,
+                interval: 0.0,
+                intent: CallIntent::Threat,
+            },
+            Self::Crocodilian => crate::sequence::CallBout {
+                vocalization: Vocalization::Rumble,
+                count: 3,
+                call_duration: 2.5,
+                interval: 2.0,
+                intent: CallIntent::Territorial,
+            },
+            Self::Cricket => crate::sequence::CallBout {
+                vocalization: Vocalization::Stridulate,
+                count: 8,
+                call_duration: 0.5,
+                interval: 0.3,
+                intent: CallIntent::Mating,
+            },
+            Self::Bee => crate::sequence::CallBout {
+                vocalization: Vocalization::Buzz,
+                count: 1,
+                call_duration: 2.0,
+                interval: 0.0,
+                intent: CallIntent::Idle,
+            },
+            Self::Dragon => crate::sequence::CallBout {
+                vocalization: Vocalization::Roar,
+                count: 2,
+                call_duration: 3.0,
+                interval: 2.0,
+                intent: CallIntent::Threat,
+            },
+            Self::Fantasy => crate::sequence::CallBout {
+                vocalization: Vocalization::Growl,
+                count: 3,
+                call_duration: 1.0,
+                interval: 1.0,
+                intent: CallIntent::Idle,
+            },
+        }
+    }
 }

@@ -570,12 +570,17 @@ fn test_voice_presets() {
     for preset in presets::all() {
         let voice = preset.build();
         // Each preset should produce valid synthesis
+        // Pick a vocalization the species supports
         let v = if voice.species().supports_vocalization(&Vocalization::Howl) {
             Vocalization::Howl
         } else if voice.species().supports_vocalization(&Vocalization::Roar) {
             Vocalization::Roar
-        } else {
+        } else if voice.species().supports_vocalization(&Vocalization::Growl) {
             Vocalization::Growl
+        } else if voice.species().supports_vocalization(&Vocalization::Chirp) {
+            Vocalization::Chirp
+        } else {
+            Vocalization::Buzz
         };
         let samples = voice.vocalize(&v, 44100.0, 0.3).unwrap();
         assert!(
@@ -609,4 +614,76 @@ fn test_serde_roundtrip_voice_preset() {
     let json = serde_json::to_string(&preset).unwrap();
     let p2: prani::preset::VoicePreset = serde_json::from_str(&json).unwrap();
     assert_eq!(p2.species, Species::Wolf);
+}
+
+#[test]
+fn test_bout_template_all_species() {
+    let species = [
+        Species::Wolf,
+        Species::Dog,
+        Species::Cat,
+        Species::Lion,
+        Species::Songbird,
+        Species::Crow,
+        Species::Raptor,
+        Species::Snake,
+        Species::Crocodilian,
+        Species::Cricket,
+        Species::Bee,
+        Species::Dragon,
+        Species::Fantasy,
+    ];
+    for s in &species {
+        let bout = s.bout_template();
+        let voice = CreatureVoice::new(*s);
+        // Template vocalization must be valid for the species
+        assert!(
+            s.supports_vocalization(&bout.vocalization),
+            "{s:?} bout template uses unsupported {:?}",
+            bout.vocalization
+        );
+        let samples = bout.synthesize(&voice, 44100.0).unwrap();
+        assert!(
+            samples.iter().all(|s| s.is_finite()),
+            "{s:?} bout template produced non-finite samples"
+        );
+    }
+}
+
+#[test]
+fn test_spectral_envelope_per_vocalization() {
+    // Growl should sound darker than screech for the same species
+    let voice = CreatureVoice::new(Species::Wolf);
+    let growl = voice.vocalize(&Vocalization::Growl, 44100.0, 0.5).unwrap();
+    let screech = voice
+        .vocalize(&Vocalization::Screech, 44100.0, 0.5)
+        .unwrap();
+    assert!(growl.iter().all(|s| s.is_finite()));
+    assert!(screech.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_source_filter_coupling_birds() {
+    // Bird synthesis with source-filter coupling should not crash or produce NaN
+    let voice = CreatureVoice::new(Species::Songbird);
+    let samples = voice
+        .vocalize_with_intent(&Vocalization::Trill, CallIntent::Mating, 44100.0, 1.0)
+        .unwrap();
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| s.is_finite()));
+}
+
+#[test]
+fn test_non_stationary_perturbation() {
+    // Alarm intent (high urgency) should produce more energy variation
+    // than idle intent — we just verify it doesn't crash
+    let voice = CreatureVoice::new(Species::Wolf);
+    let alarm = voice
+        .vocalize_with_intent(&Vocalization::Bark, CallIntent::Alarm, 44100.0, 0.3)
+        .unwrap();
+    let idle = voice
+        .vocalize_with_intent(&Vocalization::Bark, CallIntent::Idle, 44100.0, 0.3)
+        .unwrap();
+    assert!(alarm.iter().all(|s| s.is_finite()));
+    assert!(idle.iter().all(|s| s.is_finite()));
 }

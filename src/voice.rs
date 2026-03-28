@@ -162,9 +162,6 @@ impl CreatureVoice {
 
         let mut tract = CreatureTract::new(&self.params, sample_rate);
 
-        // Build per-block synthesis options
-        let base_options = SynthesisOptions::default();
-
         // Get formant transition contour (if applicable)
         let formant_contour = formant_transition_contour(vocalization, self.species);
 
@@ -184,7 +181,34 @@ impl CreatureVoice {
                 let _ = tract.set_formant_blend(&target_f, &target_b, blend);
             }
 
-            let block = tract.synthesize(block_f0, block_len, &base_options)?;
+            // Source-filter coupling for birds: the syrinx actively tunes
+            // the vocal tract so F1 tracks near the current f0. We nudge
+            // the species' F1 toward block_f0 with 40% coupling strength.
+            if self.params.apparatus == crate::species::VocalApparatus::Syringeal {
+                let f = &self.params.formants;
+                let b = &self.params.bandwidths;
+                let coupled_f1 = f[0] + (block_f0 - f[0]) * 0.4;
+                let _ = tract.set_formant_blend(&[coupled_f1, f[1], f[2]], b, 1.0);
+            }
+
+            // Non-stationary perturbation: jitter/shimmer increase at call
+            // boundaries and during high-urgency calls.
+            // Base = 1.0, peaks at onset/offset (~1.5x), urgency adds up to 1x.
+            let boundary_boost = if t < 0.1 {
+                1.0 + (1.0 - t / 0.1) * 0.5
+            } else if t > 0.85 {
+                1.0 + (t - 0.85) / 0.15 * 0.5
+            } else {
+                1.0
+            };
+            let perturbation_scale = boundary_boost + modifiers.urgency;
+
+            let options = SynthesisOptions {
+                perturbation_scale,
+                ..SynthesisOptions::default()
+            };
+
+            let block = tract.synthesize(block_f0, block_len, &options)?;
             samples.extend_from_slice(&block);
             rendered += block_len;
         }
@@ -285,8 +309,14 @@ impl CreatureVoice {
         // Apply vocalization-specific AM patterns (bird trills, purr cycling)
         apply_am_pattern(&mut samples, vocalization, sample_rate);
 
-        // Apply spectral tilt (darkens/brightens the overall timbre)
-        CreatureTract::apply_spectral_tilt(&mut samples, self.params.spectral_tilt, sample_rate);
+        // Apply spectral tilt: species base + vocalization-specific adjustment.
+        // Growls/rumbles are darker, screeches/chirps are brighter.
+        let vocalization_tilt = vocalization_spectral_offset(vocalization);
+        CreatureTract::apply_spectral_tilt(
+            &mut samples,
+            self.params.spectral_tilt + vocalization_tilt,
+            sample_rate,
+        );
 
         // Apply amplitude scaling from intent
         let amp = modifiers.amplitude_scale;
@@ -536,6 +566,27 @@ fn apply_nasal_antiformant(samples: &mut [f32], sample_rate: f32, nasal_fraction
 /// Bird trills get rapid AM at species-typical rates.
 /// Purr gets 25 Hz AM cycling (if not handled by special purr path).
 #[inline]
+/// Returns a spectral tilt offset (dB/octave) for a given vocalization type.
+///
+/// Layered on top of the species spectral tilt. Negative = darker.
+#[must_use]
+fn vocalization_spectral_offset(v: &Vocalization) -> f32 {
+    match v {
+        // Growls and rumbles are darker
+        Vocalization::Growl | Vocalization::Rumble => -2.0,
+        // Roars have moderate darkness
+        Vocalization::Roar => -1.0,
+        // Screeches and chirps are brighter
+        Vocalization::Screech | Vocalization::Chirp => 1.5,
+        // Hisses are HF-heavy
+        Vocalization::Hiss => 2.0,
+        // Trills are slightly bright
+        Vocalization::Trill => 0.5,
+        // Purr, howl, bark, whine, yelp — neutral
+        _ => 0.0,
+    }
+}
+
 fn apply_am_pattern(samples: &mut [f32], vocalization: &Vocalization, sample_rate: f32) {
     let am_rate = match vocalization {
         // Bird trills: rapid AM at 15-30 Hz typical for songbird trills

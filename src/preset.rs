@@ -104,6 +104,42 @@ pub mod presets {
         breathiness: 0.15,
     };
 
+    /// Bald eagle — piercing screech.
+    pub const BALD_EAGLE: VoicePreset = VoicePreset {
+        name: Cow::Borrowed("Bald Eagle"),
+        species: Species::Raptor,
+        size: 1.2,
+        f0_offset: -200.0,
+        breathiness: 0.1,
+    };
+
+    /// Raven — deep, rough croak.
+    pub const RAVEN: VoicePreset = VoicePreset {
+        name: Cow::Borrowed("Raven"),
+        species: Species::Crow,
+        size: 1.3,
+        f0_offset: -100.0,
+        breathiness: 0.2,
+    };
+
+    /// Field cricket — steady chirping.
+    pub const FIELD_CRICKET: VoicePreset = VoicePreset {
+        name: Cow::Borrowed("Field Cricket"),
+        species: Species::Cricket,
+        size: 1.0,
+        f0_offset: 0.0,
+        breathiness: 0.0,
+    };
+
+    /// American alligator — deep bellow.
+    pub const ALLIGATOR: VoicePreset = VoicePreset {
+        name: Cow::Borrowed("American Alligator"),
+        species: Species::Crocodilian,
+        size: 1.5,
+        f0_offset: -10.0,
+        breathiness: 0.18,
+    };
+
     /// Returns all built-in presets.
     pub fn all() -> &'static [VoicePreset] {
         &[
@@ -114,6 +150,10 @@ pub mod presets {
             MALE_LION,
             ANCIENT_DRAGON,
             YOUNG_DRAGON,
+            BALD_EAGLE,
+            RAVEN,
+            FIELD_CRICKET,
+            ALLIGATOR,
         ]
     }
 }

@@ -102,8 +102,10 @@ impl CreatureTract {
         let clamped_f0 = f0.clamp(self.params.f0_min.max(20.0), self.params.f0_max.min(2000.0));
         let mut glottal = GlottalSource::new(clamped_f0, self.sample_rate)?;
         glottal.set_breathiness(self.params.breathiness);
-        glottal.set_jitter(self.params.jitter);
-        glottal.set_shimmer(self.params.shimmer);
+        // Non-stationary perturbation: scale jitter/shimmer by block intensity
+        let ps = options.perturbation_scale.max(0.0);
+        glottal.set_jitter((self.params.jitter * ps).min(0.05));
+        glottal.set_shimmer((self.params.shimmer * ps).min(0.1));
 
         if options.subharmonic_amp > 0.0 {
             // Inject subharmonics into excitation before tract filtering.
@@ -138,8 +140,9 @@ impl CreatureTract {
         if clamped_f0 <= 2000.0 {
             let mut glottal = GlottalSource::new(clamped_f0, self.sample_rate)?;
             glottal.set_breathiness(self.params.breathiness);
-            glottal.set_jitter(self.params.jitter);
-            glottal.set_shimmer(self.params.shimmer);
+            let ps = options.perturbation_scale.max(0.0);
+            glottal.set_jitter((self.params.jitter * ps).min(0.05));
+            glottal.set_shimmer((self.params.shimmer * ps).min(0.1));
             Ok(self.tract.synthesize(&mut glottal, num_samples))
         } else {
             // High-frequency syringeal synthesis with dual-source capability.
@@ -374,4 +377,7 @@ impl CreatureTract {
 pub struct SynthesisOptions {
     /// Subharmonic amplitude (0.0 = none). Injected into excitation before tract.
     pub subharmonic_amp: f32,
+    /// Perturbation intensity multiplier (0.0-2.0). Scales jitter/shimmer.
+    /// Driven by call urgency and position — higher at call boundaries and peaks.
+    pub perturbation_scale: f32,
 }

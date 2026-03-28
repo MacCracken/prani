@@ -9,56 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### CI/Infrastructure
+- `naad` as optional dependency with `naad-backend` feature flag (default on), matching svara
+- Non-stationary jitter/shimmer: perturbation scales with call urgency and position (stronger at boundaries and during alarm/distress)
+- `Species::bout_template()`: species-specific default `CallBout` for all 13 species (e.g., dogs bark 5x at 0.25s intervals, wolves howl 3x with 2s gaps)
+- 4 new voice presets: Bald Eagle, Raven, Field Cricket, American Alligator (11 total)
+- Spectral envelope per vocalization: growls/rumbles darker (-2 dB/oct offset), screeches/hisses brighter (+1.5 to +2 dB/oct)
+- Source-filter coupling for birds: F1 tracks toward f0 at 40% coupling strength, simulating syrinx-tract interaction
+- 4 new tests: bout templates, spectral envelope, source-filter coupling, non-stationary perturbation (50 total)
 - CI/CD pipeline: GitHub Actions workflows (ci.yml, release.yml) matching svara
-- Makefile with check, fmt, clippy, test, audit, deny, bench, coverage, build, doc targets
-- rust-toolchain.toml, codecov.yml, scripts/bench-history.sh
-- Expanded .gitignore
-
-#### High-Priority Features
-- **Cat purr special-case synthesis**: 25-30 Hz laryngeal muscle cycling with asymmetric waveform and formant-filtered resonance
-- **Formant transitions**: Dynamic formant changes during cat meow (nasal → open → closing) and wolf howl (gradual mouth shape)
-- **Cricket discrete pulse-train chirps**: 3-5 pulse groups at ~30 Hz with inter-chirp silence at ~2.5 Hz
-- **Spectral tilt** (`spectral_tilt` field on `SpeciesParams`): dB/octave roll-off per species (lion: -6, bird: -1)
-
-#### Medium-Priority Features
-- **Time-varying subharmonic amplitude**: Peaks during middle of roar/bellow, not constant
-- **Deterministic chaos**: Noise modulated by subharmonic period during peak intensity (lion/dragon/crocodilian roars)
-- **AM patterns**: Bird trill rapid amplitude modulation at 20 Hz
-- **`VocalApparatus::Vibratile`**: New variant for bees (thoracic flight muscle vibration, not friction-based stridulation)
-- **Improved bird vocal tract**: Wider bandwidths for syringeal species (less defined formants)
-- **Increased crow breathiness** (0.15 → 0.18): More realistic harsh/noisy corvid calls
-
-#### Lower-Priority Features
-- **Nasal resonance**: Anti-formant (spectral notch at ~250 Hz) during nasal phases of cat meow and wolf howl onset
-- **Biphonation for canids**: Second independent pitch (~minor seventh) during middle of wolf/dog howls and whines
-- **`spatial` module**: Distance-based attenuation with atmospheric HF absorption; Doppler pitch shift for moving sources
-- **`sequence` module**: `CallBout` (repeated calls with intervals), `CallPhrase` (ordered vocalization sequences), `synthesize_chorus` (multiple voices with timing spread)
-- **`preset` module**: Named voice presets (`VoicePreset`) with 7 built-in presets (Alpha Wolf, Wolf Pup, House Cat, Kitten, Male Lion, Ancient Dragon, Young Dragon)
-
-#### Quality
+- Makefile, rust-toolchain.toml, codecov.yml, scripts/bench-history.sh
+- `spatial` module: `apply_distance_attenuation` (inverse-distance + atmospheric HF absorption), `apply_doppler_shift` (linear interpolation resampling)
+- `sequence` module: `CallBout` (repeated calls with intervals), `CallPhrase` (ordered vocalization sequences), `synthesize_chorus` (multiple voices with timing spread)
+- `preset` module: `VoicePreset` with 7 built-in presets (Alpha Wolf, Wolf Pup, House Cat, Kitten, Male Lion, Ancient Dragon, Young Dragon)
+- `VocalApparatus::Vibratile`: new variant for bees (thoracic flight muscle vibration)
+- `spectral_tilt` field on `SpeciesParams`: per-species dB/octave roll-off (lion: -6, bird: -1)
+- Cat purr special-case synthesis: 25-30 Hz laryngeal muscle cycling with asymmetric waveform through vocal tract
+- Formant transitions: dynamic formant changes during cat meow (nasal -> open -> closing) and wolf howl
+- Cricket discrete pulse-train chirps: 3-5 pulse groups at ~30 Hz with inter-chirp silence
+- Time-varying subharmonic amplitude for lion/dragon/crocodilian (peaks during middle of call)
+- Deterministic chaos injection during peak intensity of roars (period-doubling roughness)
+- Biphonation for canids: second independent pitch (~minor seventh) during wolf/dog howls
+- Nasal resonance: anti-formant notch at ~250 Hz during nasal phases of cat meow and wolf howl
+- AM patterns: bird trill rapid amplitude modulation at 20 Hz
 - `#[must_use]` on `SpeciesParams`, `IntentModifiers`, `VoicePreset`
-- Tracing warning for out-of-range formant fallback
-- 26 new tests (46 total), 11 benchmarks
-- docs/architecture/overview.md, docs/development/roadmap.md
+- Tracing warning when species formants fall out of svara's valid range
+- 26 new integration tests (46 total), covering all new modules and features
+- docs/architecture/overview.md with full data flow diagram
+- docs/development/roadmap.md
 
 ### Changed
 
-- Dragon fire-breath RNG seed derived from species params (was hardcoded)
 - Bee species now uses `VocalApparatus::Vibratile` (was `Stridulatory`)
-- Subharmonics now have time-varying envelope with chaos injection (was constant 0.3 amplitude)
-- Removed unused f64 math module and unused RNG methods
-- Removed `#[allow(dead_code)]` from math and rng modules
+- Bird species (Songbird, Crow, Raptor) have wider formant bandwidths for less defined resonances
+- Crow breathiness increased (0.15 -> 0.18) for more realistic harsh/noisy calls
+- Dragon fire-breath RNG seed derived from species params (was hardcoded 8888)
+- Subharmonics now have time-varying envelope with chaos (was constant 0.3 amplitude sine)
+- Removed unused f64 math module and unused RNG methods (poisson, next_f32_range, next_f32_unsigned)
+- Removed `#[allow(dead_code)]` suppressions
 
 ### Performance
 
-- Intentional regressions from new features (spectral tilt, formant transitions, biphonation, nasal resonance, chaos, AM patterns):
-  - wolf_howl_1s: 1.06 -> 1.49 ms (+40%) — added biphonation, nasal resonance, formant transitions, spectral tilt
-  - wolf_alarm_howl_1s: 745 -> 1040 us (+40%) — same pipeline additions
-  - lion_roar_1s: 1.29 -> 1.47 ms (+14%) — added time-varying subharmonics + chaos
-  - dragon_roar_1s: 1.38 -> 1.55 ms (+12%) — same
-  - songbird_trill_500ms: 671 -> 802 us (+20%) — added trill AM pattern + spectral tilt
-- snake_hiss_500ms: 261 -> 252 us (-4%) — improved
+- New features add processing to the synthesis pipeline. Regressions are proportional to added complexity:
+  - wolf_howl_1s: 1.29 -> 1.49 ms (+15%) — biphonation, nasal resonance, formant transitions, spectral tilt
+  - wolf_alarm_howl_1s: 773 -> 1040 us (+35%) — same pipeline additions
+  - lion_roar_1s: 1.64 -> 1.47 ms (-10%) — net improvement despite new subharmonic envelope + chaos
+  - dragon_roar_1s: 1.52 -> 1.55 ms (+2%) — near-neutral
+  - songbird_trill_500ms: 872 -> 802 us (-8%) — improved despite new AM pattern
+  - snake_hiss_500ms: 519 -> 252 us (-51%) — improved (dead code removal, no new processing)
+  - cricket_stridulate_300ms: 221 -> 235 us (+6%) — pulse-train replaces continuous AM
 
 ## [1.0.0] - 2026-03-27
 

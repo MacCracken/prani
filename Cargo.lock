@@ -286,6 +286,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "naad"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b54f174ae4e702922967a9a25d8cea5eef7461d5d070fa2da4dd40e851f90d9"
+dependencies = [
+ "hisab",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -356,6 +368,7 @@ dependencies = [
  "criterion",
  "hisab",
  "libm",
+ "naad",
  "serde",
  "serde_json",
  "svara",
