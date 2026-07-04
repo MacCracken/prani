@@ -1,0 +1,49 @@
+# error.tcyr -- tests for src/error.cyr.
+# rust-old/src/error.rs had no #[test] blocks (its Display/serde behaviour is
+# exercised in tests/integration.rs). The parity-meaningful surface in the
+# Cyrius port is the integer codes + prani_from_svara mapping + finite test;
+# serde round-trip and Display-string tests are dropped (integer codes).
+
+include "src/error.cyr"
+
+alloc_init();
+
+var NAN_BITS = 0x7FF8000000000000;   # canonical quiet NaN
+
+# ================================================================
+test_group("error code identity");
+assert_eq(prani_is_err(PRANI_ERR_NONE), 0, "ERR_NONE is not an error");
+assert_eq(prani_is_err(PRANI_ERR_INVALID_TRACT), 1, "invalid tract is an error");
+assert_eq(prani_is_err(PRANI_ERR_INVALID_VOCALIZATION), 1, "invalid vocalization is an error");
+assert_eq(prani_is_err(PRANI_ERR_INVALID_SPECIES), 1, "invalid species is an error");
+assert_eq(prani_is_err(PRANI_ERR_SYNTHESIS_FAILED), 1, "synthesis failed is an error");
+assert_eq(prani_is_err(PRANI_ERR_SVARA), 1, "svara error is an error");
+
+# distinct codes (one per Rust variant)
+assert_neq(PRANI_ERR_INVALID_TRACT, PRANI_ERR_INVALID_VOCALIZATION, "codes distinct 1");
+assert_neq(PRANI_ERR_INVALID_SPECIES, PRANI_ERR_SYNTHESIS_FAILED, "codes distinct 2");
+assert_neq(PRANI_ERR_SYNTHESIS_FAILED, PRANI_ERR_SVARA, "codes distinct 3");
+
+# ================================================================
+test_group("err_name");
+assert_streq(prani_err_name(PRANI_ERR_NONE), "none", "none name");
+assert_streq(prani_err_name(PRANI_ERR_INVALID_TRACT), "invalid tract parameter", "tract name");
+assert_streq(prani_err_name(PRANI_ERR_SVARA), "svara error", "svara name");
+assert_streq(prani_err_name(999), "unknown error", "unknown fallback");
+
+# ================================================================
+test_group("from_svara (impl From<SvaraError>)");
+assert_eq(prani_from_svara(0), PRANI_ERR_NONE, "svara none -> none");
+assert_eq(prani_from_svara((0 - 1)), PRANI_ERR_SVARA, "svara invalid formant -> PRANI_ERR_SVARA");
+assert_eq(prani_from_svara((0 - 6)), PRANI_ERR_SVARA, "svara computation -> PRANI_ERR_SVARA");
+
+# ================================================================
+test_group("is_finite");
+assert_eq(prani_is_finite(f64_from(440)), 1, "440 is finite");
+assert_eq(prani_is_finite(0), 1, "0 is finite");
+assert_eq(prani_is_finite(NAN_BITS), 0, "NaN not finite");
+assert_eq(prani_is_finite(PRANI_POS_INF), 0, "+inf not finite");
+assert_eq(prani_is_finite(PRANI_NEG_INF), 0, "-inf not finite");
+
+var rc = assert_summary();
+syscall(60, rc);

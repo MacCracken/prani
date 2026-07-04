@@ -1,0 +1,147 @@
+# spatial.tcyr -- tests for src/spatial.cyr (distance attenuation + Doppler).
+# rust-old/src/spatial.rs had no #[test] blocks; behaviour lives in the Rust
+# integration tests. These lock f64 parity to the oracle algorithm via golden
+# values computed by hand (see the algorithm comments in spatial.cyr).
+#
+# Include order: error (base) then spatial. stdlib (vec/math/alloc) auto-resolves.
+
+include "src/error.cyr"
+include "src/spatial.cyr"
+
+alloc_init();
+
+# Small float tolerance (~1e-9) for per-sample recurrence / interpolation values
+# where operation ordering may differ by an ULP from the reference computation.
+var SP_TOL = 0x3E112E0BE826D695;   # 1e-9
+
+# ================================================================
+test_group("distance attenuation: gain == 1.0 at distance == reference");
+# distance == reference_distance => dist clamped to reference => gain = ref/ref = 1.0.
+# One-pole LPF still applies: for a single-sample input s, prev starts at 0 so
+# filtered = alpha*(s*gain - 0) = alpha*s. With distance=1, sr=48000:
+#   cutoff = 20000/(1+1*0.02) = 19607.843137254902
+#   rc = 1/(TAU*cutoff), dt = 1/48000, alpha = dt/(rc+dt) = 0.7196256964118001
+# Input s = 1.0 => output[0] = alpha (gain is exactly 1.0).
+var one = vec_new();
+vec_push(one, F64_ONE);                     # single sample = 1.0
+var d_att = spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, f64_from(48000));
+assert_eq(vec_len(d_att), 1, "length preserved (1 in, 1 out)");
+# output[0] == alpha == 0.7196256964118001 (proves gain == 1.0: s*gain == s).
+var alpha_expected = 0x3fe7072c77ee65a1;    # 0.7196256964118001
+assert_eq(f64_lt(f64_abs(f64_sub(vec_get(d_att, 0), alpha_expected)), SP_TOL), 1, "out[0] == alpha (gain==1.0)");
+
+# ================================================================
+test_group("distance attenuation: distance clamped up to reference");
+# distance BELOW reference clamps up to reference => still gain 1.0, same alpha.
+var one_b = vec_new();
+vec_push(one_b, F64_ONE);
+# distance = 0.5 (below reference 1.0) -> clamps to 1.0 -> identical result.
+var half = 0x3FE0000000000000;              # 0.5
+var d_clamp = spatial_apply_distance_attenuation(one_b, half, F64_ONE, f64_from(48000));
+assert_eq(f64_lt(f64_abs(f64_sub(vec_get(d_clamp, 0), alpha_expected)), SP_TOL), 1, "distance<ref clamps to ref (same as gain 1.0)");
+
+# ================================================================
+test_group("distance attenuation: gain falls off as 1/distance");
+# distance = 100, reference = 1 => gain = 1/100 = 0.01. Single sample s=1.0.
+# output[0] = alpha100 * (1*0.01) where alpha100 uses cutoff@100.
+# cutoff100 = max(20000/(1+100*0.02), 200) = max(20000/3, 200) = 6666.666...
+# The exact filtered value: assert it is strictly between 0 and the gain (0.01),
+# and strictly smaller than the near-field (distance 1) result -> far is quieter.
+var one_c = vec_new();
+vec_push(one_c, F64_ONE);
+var d_far = spatial_apply_distance_attenuation(one_c, f64_from(100), F64_ONE, f64_from(48000));
+var far0 = vec_get(d_far, 0);
+assert_eq(f64_gt(far0, 0), 1, "far output > 0");
+var gain100 = 0x3f847ae147ae147b;           # 0.01
+assert_eq(f64_lt(far0, gain100), 1, "far output < gain (0.01) after LPF");
+assert_eq(f64_lt(far0, vec_get(d_att, 0)), 1, "far (100m) quieter than near (1m)");
+
+# ================================================================
+test_group("distance attenuation: empty input -> empty output");
+var empty = vec_new();
+var d_empty = spatial_apply_distance_attenuation(empty, F64_ONE, F64_ONE, f64_from(48000));
+assert_eq(vec_len(d_empty), 0, "empty in -> empty out");
+
+# ================================================================
+test_group("distance attenuation: multi-sample ringing (prev feedback)");
+# Two samples of 1.0: out[0] = alpha; out[1] = alpha + alpha*(1 - alpha)
+#   = 0.9213902498874319. out[1] > out[0] (filter charging toward 1.0).
+var two = vec_new();
+vec_push(two, F64_ONE);
+vec_push(two, F64_ONE);
+var d_two = spatial_apply_distance_attenuation(two, F64_ONE, F64_ONE, f64_from(48000));
+assert_eq(vec_len(d_two), 2, "two in -> two out");
+var out1_expected = 0x3fed7c0767c3d54d;     # 0.9213902498874319
+assert_eq(f64_lt(f64_abs(f64_sub(vec_get(d_two, 1), out1_expected)), SP_TOL), 1, "out[1] charges toward 1.0");
+assert_eq(f64_gt(vec_get(d_two, 1), vec_get(d_two, 0)), 1, "out[1] > out[0] (charging)");
+
+# ================================================================
+test_group("doppler: v == 0 -> ratio 1 -> identity length + values");
+# ratio = 343/343 = 1.0; out_len = len; src = i exactly; frac = 0; s0 = samples[i].
+var s4 = vec_new();
+vec_push(s4, 0);
+vec_push(s4, f64_from(10));
+vec_push(s4, f64_from(20));
+vec_push(s4, f64_from(30));
+var dop0 = spatial_apply_doppler_shift(s4, 0, f64_from(48000));
+assert_eq(vec_len(dop0), 4, "v=0 -> same length (4)");
+assert_eq(vec_get(dop0, 0), 0, "dop0[0] == 0");
+assert_eq(vec_get(dop0, 1), f64_from(10), "dop0[1] == 10 (identity)");
+assert_eq(vec_get(dop0, 2), f64_from(20), "dop0[2] == 20 (identity)");
+assert_eq(vec_get(dop0, 3), f64_from(30), "dop0[3] == 30 (identity)");
+
+# ================================================================
+test_group("doppler: approaching (v<0) -> ratio>1 -> shorter output");
+# v = -100: ratio = 343/243 = 1.4115... ; out_len = (8/ratio) trunc = 5 < 8.
+var s8 = vec_new();
+var k = 0;
+while (k < 8) { vec_push(s8, F64_ONE); k = k + 1; }
+var dop_near = spatial_apply_doppler_shift(s8, f64_neg(f64_from(100)), f64_from(48000));
+assert_eq(vec_len(dop_near), 5, "approaching -> out_len 5 (< 8, higher pitch)");
+
+# ================================================================
+test_group("doppler: receding (v>0) -> ratio<1 -> longer output");
+# v = +343 clamps to +308.7: ratio = 343/651.7 = 0.5264... ; out_len = 8/ratio = 15.
+var s8b = vec_new();
+var k2 = 0;
+while (k2 < 8) { vec_push(s8b, F64_ONE); k2 = k2 + 1; }
+var dop_far = spatial_apply_doppler_shift(s8b, f64_from(343), f64_from(48000));
+assert_eq(vec_len(dop_far), 15, "receding (clamped) -> out_len 15 (> 8, lower pitch)");
+
+# ================================================================
+test_group("doppler: fractional interpolation (hand-computed)");
+# samples [0,10,20,30], velocity +100: ratio = 0.7742663656884876, out_len = 5.
+#   out[0] = 0.0
+#   out[1]: src=0.774..., idx=0, frac=0.774..., s0=0,s1=10 -> 7.742663656884876
+#   out[2]: src=1.548..., idx=1, frac=0.548..., s0=10,s1=20 -> 15.485327313769751
+var s4b = vec_new();
+vec_push(s4b, 0);
+vec_push(s4b, f64_from(10));
+vec_push(s4b, f64_from(20));
+vec_push(s4b, f64_from(30));
+var dop_i = spatial_apply_doppler_shift(s4b, f64_from(100), f64_from(48000));
+assert_eq(vec_len(dop_i), 5, "v=+100 -> out_len 5");
+assert_eq(vec_get(dop_i, 0), 0, "interp out[0] == 0.0 (exact)");
+var i1 = 0x401ef87cd258fe44;                 # 7.742663656884876
+assert_eq(f64_lt(f64_abs(f64_sub(vec_get(dop_i, 1), i1)), SP_TOL), 1, "interp out[1] ~ 7.7426636569");
+var i2 = 0x402ef87cd258fe44;                 # 15.485327313769751
+assert_eq(f64_lt(f64_abs(f64_sub(vec_get(dop_i, 2), i2)), SP_TOL), 1, "interp out[2] ~ 15.485327314");
+
+# ================================================================
+test_group("doppler: tail reads past end fall to 0 (s1 guard)");
+# Single-sample buffer, v=0 -> out_len 1; idx=0<1 -> s0=samples[0]; idx+1=1 !< 1
+# -> s1=0; frac=0 -> out[0] = s0 = 5.0. Guards the idx+1 bounds check.
+var s1v = vec_new();
+vec_push(s1v, f64_from(5));
+var dop_tail = spatial_apply_doppler_shift(s1v, 0, f64_from(48000));
+assert_eq(vec_len(dop_tail), 1, "single sample -> out_len 1");
+assert_eq(vec_get(dop_tail, 0), f64_from(5), "out[0] == s0 (s1 guarded to 0, frac 0)");
+
+# ================================================================
+test_group("doppler: empty input -> empty output");
+var e2 = vec_new();
+var dop_e = spatial_apply_doppler_shift(e2, 0, f64_from(48000));
+assert_eq(vec_len(dop_e), 0, "empty in -> empty out");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,191 @@
+# ffi.cyr -- C buffer-callback API for game-engine middleware.
+# Ports rust-old/src/ffi.rs. Provides the create/configure/stream/fill surface a
+# host (Wwise source plugin, FMOD DSP callback, Godot AudioStreamGenerator) drives
+# to synthesize creature voices on demand.
+#
+# Requires (from the build/test unit, in dependency order): stdlib alloc/vec/math,
+# hisab, goonj, naad, svara, error.cyr, rng.cyr, dsp.cyr, vocalization.cyr,
+# sequence.cyr, species.cyr, bridge.cyr, tract.cyr, voice.cyr, stream.cyr. Module
+# files carry no `include` lines -- the entry orders them.
+#
+# NAMING (flat-namespace prefix): every top-level fn here is `prani_ffi_`-prefixed
+# (the audit's naming contract). The Rust surface used the bare `prani_*` names;
+# the port disambiguates from the rest of the flat namespace with the `ffi` infix.
+#
+# ================================================================
+# ABI ADAPTATION (deviation from the oracle -- documented per brief)
+# ================================================================
+# Rust's ffi.rs is `#[no_mangle] extern "C"` with raw pointers and
+# Box::into_raw / Box::from_raw. None of that C-ABI machinery translates to
+# Cyrius, so the LOGIC is ported with Cyrius conventions:
+#
+#   * Handles = heap pointers. A `PraniVoice` / `PraniStream` opaque pointer maps
+#     directly to the CreatureVoice / SynthStream heap ptr that crvoice_new /
+#     stream_new already return. There is no separate Box wrapper.
+#   * "null" = 0. Rust returned core::ptr::null_mut() on failure and null-checked
+#     with `is_null()` / `as_ref()` / `as_mut()`; here that is `== 0` / `!= 0`.
+#   * Audio buffers = stdlib vec handles (not raw `*mut f32` + length). The caller
+#     passes a pre-sized vec; stream_fill_buffer bounds by vec_len internally. The
+#     `buffer_len` parameter is retained for signature parity with the C surface
+#     (callers that pass a length), but the vec's own length is the real bound.
+#   * destroy = no-op null-check. Cyrius uses an arena allocator: there is no
+#     per-object free, so Rust's `drop(Box::from_raw(handle))` collapses to a
+#     null-check-only no-op. The functions are kept so the C lifecycle contract
+#     (create/destroy pairing) still type-checks for callers.
+#   * stream_start SHARES the voice handle instead of cloning it. Rust did
+#     `SynthStream::new(voice.clone(), ...)`; SynthStream only READS the voice
+#     (effective_f0 / vocal_effort / species snapshots taken in stream_new), so
+#     sharing the pointer is safe and avoids a deep copy. (Deviation.)
+#
+# INDICES: the Species / Vocalization / CallIntent discriminants ARE their FFI
+# indices (0-based, contiguous), so the Rust `match index { .. }` mapping is a
+# plain range check. Out of range -> -1 (the None sentinel; valid indices are all
+# >= 0). Integers are i64; comparisons return 1/0; f64 args pass through.
+
+# ================================================================
+# Index mapping helpers (ports species_from_index / vocalization_from_index /
+# intent_from_index). The discriminant equals the index, so each is a range
+# check returning the index on success or -1 (None) on out-of-range.
+# ================================================================
+
+# species_from_index(index) -- 0..=12 -> that species discriminant, else -1.
+# 0=Wolf,1=Dog,2=Cat,3=Lion,4=Songbird,5=Crow,6=Raptor,7=Snake,8=Crocodilian,
+# 9=Cricket,10=Bee,11=Dragon,12=Fantasy.
+#must_use
+fn prani_ffi_species_from_index(index) {
+    if (index < 0) { return (0 - 1); }
+    if (index > 12) { return (0 - 1); }
+    return index;
+}
+
+# vocalization_from_index(index) -- 0..=13 -> that vocalization discriminant,
+# else -1. 0=Howl,1=Bark,2=Growl,3=Roar,4=Hiss,5=Chirp,6=Trill,7=Whine,8=Rumble,
+# 9=Purr,10=Yelp,11=Screech,12=Stridulate,13=Buzz.
+#must_use
+fn prani_ffi_vocalization_from_index(index) {
+    if (index < 0) { return (0 - 1); }
+    if (index > 13) { return (0 - 1); }
+    return index;
+}
+
+# intent_from_index(index) -- 0..=6 -> that intent discriminant, else -1.
+# 0=Alarm,1=Territorial,2=Mating,3=Distress,4=Idle,5=Threat,6=Social.
+#must_use
+fn prani_ffi_intent_from_index(index) {
+    if (index < 0) { return (0 - 1); }
+    if (index > 6) { return (0 - 1); }
+    return index;
+}
+
+# ================================================================
+# Voice lifecycle (ports prani_voice_create / prani_voice_destroy).
+# ================================================================
+
+# voice_create(species_index) -- new CreatureVoice for the species index, or 0
+# (null) when the index is out of range. Handle = the CreatureVoice heap ptr.
+#must_use
+fn prani_ffi_voice_create(species_index) {
+    var species = prani_ffi_species_from_index(species_index);
+    if (species < 0) { return 0; }
+    return crvoice_new(species);
+}
+
+# voice_destroy(handle) -- no-op (arena allocator: no per-object free). Kept for
+# C lifecycle parity; only null-checks. Ports the Rust drop(Box::from_raw).
+fn prani_ffi_voice_destroy(handle) {
+    if (handle != 0) {
+        # arena allocator -- nothing to free.
+    }
+    return 0;
+}
+
+# ================================================================
+# Voice RTPC setters (port prani_voice_set_effort / set_size / apply_lombard).
+# Each null-checks the handle (Rust `if let Some(voice) = handle.as_mut()`).
+# ================================================================
+
+# voice_set_effort(handle, effort) -- real-time vocal-effort update
+# (0.0 whisper .. 0.5 normal .. 1.0 shout). crvoice_set_vocal_effort clamps.
+fn prani_ffi_voice_set_effort(handle, effort) {
+    if (handle != 0) {
+        crvoice_set_vocal_effort(handle, effort);
+    }
+    return 0;
+}
+
+# voice_set_size(handle, size) -- individual size scale. The oracle rebuilds the
+# voice (`*voice = CreatureVoice::new(species).with_size(size)`) because size
+# affects several params. Cyrius has no move/assign of a whole struct, so build a
+# FRESH voice with crvoice_with_size(crvoice_new(species), size) and copy its five
+# fields into the existing handle -- the handle stays valid (same ptr).
+fn prani_ffi_voice_set_size(handle, size) {
+    if (handle != 0) {
+        var fresh = crvoice_with_size(crvoice_new(crvoice_species(handle)), size);
+        CreatureVoice_set_species(handle, CreatureVoice_species(fresh));
+        CreatureVoice_set_params(handle, CreatureVoice_params(fresh));
+        CreatureVoice_set_f0_offset(handle, CreatureVoice_f0_offset(fresh));
+        CreatureVoice_set_size_scale(handle, CreatureVoice_size_scale(fresh));
+        CreatureVoice_set_vocal_effort(handle, CreatureVoice_vocal_effort(fresh));
+    }
+    return 0;
+}
+
+# voice_apply_lombard(handle, ambient_spl_db) -- involuntary effort boost in
+# ambient noise (Lombard effect). crvoice_apply_lombard_effect clamps to [0,1].
+fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
+    if (handle != 0) {
+        crvoice_apply_lombard_effect(handle, ambient_spl_db);
+    }
+    return 0;
+}
+
+# ================================================================
+# Stream lifecycle (ports prani_stream_start / stream_fill / stream_is_finished /
+# stream_destroy).
+# ================================================================
+
+# stream_start(voice_handle, voc_index, intent_index, sample_rate, duration) --
+# start a synthesis stream. Returns the SynthStream handle, or 0 (null) on any
+# error: null voice, out-of-range voc/intent index, or an unsupported
+# vocalization for the species (stream_new -> negative error). Ports
+# prani_stream_start (shares the voice ptr instead of cloning -- see ABI note).
+#must_use
+fn prani_ffi_stream_start(voice_handle, voc_index, intent_index, sample_rate, duration) {
+    if (voice_handle == 0) { return 0; }
+    var voc = prani_ffi_vocalization_from_index(voc_index);
+    if (voc < 0) { return 0; }
+    var intent = prani_ffi_intent_from_index(intent_index);
+    if (intent < 0) { return 0; }
+    var stream = stream_new(voice_handle, voc, intent, sample_rate, duration);
+    if (prani_is_err(stream) == 1) { return 0; }
+    return stream;
+}
+
+# stream_fill(stream_handle, buffer, buffer_len) -- fill the caller's vec with the
+# next audio samples; returns the count written (0 when finished or on null args).
+# `buffer` is a vec handle; `buffer_len` is retained for C signature parity but the
+# vec's own length is the bound (stream_fill_buffer uses vec_len internally).
+# Ports prani_stream_fill.
+fn prani_ffi_stream_fill(stream_handle, buffer, buffer_len) {
+    if (stream_handle == 0) { return 0; }
+    if (buffer == 0) { return 0; }
+    if (buffer_len == 0) { return 0; }
+    return stream_fill_buffer(stream_handle, buffer);
+}
+
+# stream_is_finished(stream_handle) -- 1 if finished (or null handle), else 0.
+# Ports prani_stream_is_finished (null -> 1, matching the Rust None arm).
+#must_use
+fn prani_ffi_stream_is_finished(stream_handle) {
+    if (stream_handle == 0) { return 1; }
+    return stream_is_finished(stream_handle);
+}
+
+# stream_destroy(stream_handle) -- no-op (arena allocator: no per-object free).
+# Kept for C lifecycle parity; only null-checks. Ports drop(Box::from_raw).
+fn prani_ffi_stream_destroy(stream_handle) {
+    if (stream_handle != 0) {
+        # arena allocator -- nothing to free.
+    }
+    return 0;
+}

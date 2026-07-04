@@ -1,0 +1,452 @@
+# io.cyr — file I/O library
+# Usage: include "lib/io.cyr"
+# Wraps Linux syscalls for file operations.
+#
+# Routes through lib/syscalls.cyr's per-arch sys_* wrappers, NOT
+# literal x86_64 syscall numbers (0/1/2/3 mean io_setup/io_destroy
+# on aarch64 — silent misroute). See CHANGELOG [5.5.18].
+include "lib/syscalls.cyr"
+# Result-returning *_r variants below; see CHANGELOG [5.8.30].
+include "lib/result.cyr"
+
+# v5.8.30 — IoError variants. Bare-variant enum so each name folds
+# to a const int at compile time. Tag-name prefix `Io` keeps these
+# out of the way of any consumer-side enum collisions. Returned as
+# the `Err` payload of `Result<T, IoError>` from the *_r fns below.
+# Mapping is intentionally coarse for v5.8.30: NotFound = ENOENT (2),
+# AccessDenied = EACCES (13), BadFd = EBADF (9), IoFailed = EIO (5),
+# IoOther absorbs everything else (including positive-fd-but-EINTR
+# style transient failures). The kernel's raw errno can be retrieved
+# from `Err`'s payload only when IoOther fires; the common cases get
+# named variants. Per `Migration policy` in roadmap §v5.8.28-32: the
+# original int-returning `file_*` fns stay callable through v5.8.x
+# for back-compat; v6.0.0 closeout removes them.
+enum IoError {
+    IoNotFound;
+    IoAccessDenied;
+    IoBadFd;
+    IoFailed;
+    IoOther;
+}
+
+# Open flags. On EVERY non-agnos target lib/syscalls.cyr's per-arch peer already
+# defines O_* with the CORRECT per-target values — and Darwin's differ from Linux's
+# (O_CREAT 0x200 vs 64, O_TRUNC 0x400 vs 512, O_APPEND 0x8 vs 1024). io.cyr is
+# included AFTER syscalls.cyr, so redefining O_* here used to OVERRIDE the Darwin
+# values with Linux ones (last-def-wins) → file writes silently failed on
+# arm64-macOS (issue 2026-06-17). So we DON'T define them on non-agnos. Only agnos
+# needs them: its peer exposes AO_* (different bits) and file_open bridges O_*→AO_*
+# below using these neutral Linux-shaped masks — so agnos owns the O_* here.
+#ifdef CYRIUS_TARGET_AGNOS
+var O_RDONLY = 0;
+var O_WRONLY = 1;
+var O_RDWR = 2;
+var O_CREAT = 64;
+var O_TRUNC = 512;
+var O_APPEND = 1024;
+# v6.2.23: O_EXCL completes the neutral O_* set so agnos-bound consumers that
+# reference it compile (sigil 3.9.0's luks_write_keyfile — Audit F-3 — uses
+# O_WRONLY|O_CREAT|O_TRUNC|O_EXCL). agnos has no exclusive-create AO_* bit, so
+# file_open below does NOT map it (the exclusive semantic degrades to a plain
+# create on agnos); bit 128 is clear of file_open's bridge masks (3/64/512/1024).
+var O_EXCL = 128;
+#endif
+
+# flock modes
+var LOCK_SH = 1;
+var LOCK_EX = 2;
+var LOCK_UN = 8;
+var LOCK_NB = 4;
+
+# File descriptors
+var STDIN = 0;
+var STDOUT = 1;
+var STDERR = 2;
+
+# Open a file with given flags and mode, return fd.
+#
+# v6.0.55: agnos's sys_open is (name, namelen, ao_flags) — NOT the Linux
+# (path, O_flags, mode) shape — and its AO_* bits differ from O_* (AO_CREAT
+# 0x100 vs O_CREAT 64, etc.). Passing Linux args straight through lands the
+# O_flags value in `namelen` and the mode in `ao_flags` → a silent ABI
+# miscompile (no ud2) that breaks every file op. The agnos branch computes
+# namelen = strlen(path) and maps O_* → AO_*. All io.cyr open sites funnel
+# through here so the bridge applies once. See CHANGELOG [6.0.55].
+fn file_open(path: cstring, flags, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var namelen = 0;
+    while (load8(path + namelen) != 0) { namelen = namelen + 1; }
+    var ao = 0;
+    if ((flags & 3) != 0) { ao = ao | 0x1; }       # O_WRONLY/O_RDWR -> AO_WRONLY (O_RDONLY=0)
+    if ((flags & 64) != 0) { ao = ao | 0x100; }    # O_CREAT  -> AO_CREAT
+    if ((flags & 512) != 0) { ao = ao | 0x200; }   # O_TRUNC  -> AO_TRUNC
+    if ((flags & 1024) != 0) { ao = ao | 0x400; }  # O_APPEND -> AO_APPEND
+    return sys_open(path, namelen, ao);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_open(path, flags, mode);
+    #endif
+}
+
+# ── v6.2.26: portable length-carrying syscall wrapper set ──────────────────
+# The agnos ABI bridge promoted as a named set so callers never hand-roll the
+# raw `sys_*`. agnos `sys_*` carry an explicit byte length + reorder flags, so a
+# raw Linux-shaped `sys_open(path, O_RDONLY, 0)` lands O_RDONLY in `namelen` → a
+# silent ABI miscompile (no ud2) that breaks every file op off Linux. These
+# bridge once; the cyrlint `xsys` rule (informational) nudges raw sites here.
+# See 2026-06-18-stdlib-native-agnos-abi-fs.md. (The `#ifdef` per-target split
+# must wrap the platform-specific BLOCK — an early `return` does NOT stop the
+# compiler type-checking code that follows it; see the v6.2.25 audit_walk note.)
+
+# Open a regular file (namelen-bridged via file_open). 0644 default create mode
+# (ignored on agnos). Directory opens (AO_DIRECTORY) stay in fs.cyr's dir_list.
+fn xopen(path, flags): i64 {
+    return file_open(path, flags, 0x1A4);
+}
+
+# Unlink a path. agnos is length-carrying: (path, pathlen).
+fn xunlink(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var an = 0;
+    while (load8(path + an) != 0) { an = an + 1; }
+    return sys_unlink(path, an);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return -1;   # Windows: no POSIX unlink (DeleteFileW — not wired; no consumer)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_unlink(path);
+    #endif
+    #endif
+}
+
+# stat a path into `buf`. agnos is length-carrying: (path, pathlen, statbuf).
+fn xstat(path, buf): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var sn = 0;
+    while (load8(path + sn) != 0) { sn = sn + 1; }
+    return sys_stat(path, sn, buf);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return -1;   # Windows: no POSIX stat (GetFileAttributesExW — not wired; no consumer)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_stat(path, buf);
+    #endif
+    #endif
+}
+
+# Read directory entries into `buf` (raw bytes; caller parses the per-target
+# dirent record — agnos §4.2 differs structurally from Linux dirent64). agnos
+# getdents #29 (3-arg) / Linux+macOS getdents64 217 (4th `basep` arg ignored on
+# Linux, used by macOS getdirentries). Windows has no getdents — use dir_list.
+fn xgetdents(fd, buf, n): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_getdents(fd, buf, n);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return -1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    var basep[8];
+    store64(&basep, 0);
+    return syscall(SYS_GETDENTS64, fd, buf, n, &basep);
+    #endif
+    #endif
+}
+
+# Reposition the fd offset (whence 0=SET / 1=CUR / 2=END). SYS_LSEEK is carried
+# in every syscall peer (Linux #8, aarch64 #62, macos #8, agnos #58), so this is
+# portable as written — no per-target branch needed.
+fn xlseek(fd, off, whence): i64 {
+    return syscall(SYS_LSEEK, fd, off, whence);
+}
+
+# Advisory whole-file lock (op: LOCK_SH=1 / LOCK_EX=2 / LOCK_UN=8, +LOCK_NB=4).
+# Unlike lseek, flock's number is NOT carried uniformly in the peers (only the
+# agnos peer exposes SYS_FLOCK), so the per-target number is centralized here —
+# a caller using xflock can never hand-roll a Linux #73 that traps off-Linux
+# (the agnos-ABI footgun this wrapper set exists to end). Windows has no flock.
+fn xflock(fd, op): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_flock(fd, op);                  # agnos kernel #59 (inode-keyed advisory)
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return -1;                                 # Windows: no flock (LockFileEx — not wired)
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    return syscall(92, fd, op);                # BSD flock
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    #ifndef CYRIUS_TARGET_MACOS
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(73, fd, op);                # Linux x86_64 flock
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(32, fd, op);                # Linux aarch64 (generic unistd) flock
+    #endif
+    #endif
+    #endif
+    #endif
+}
+
+# Close a file descriptor
+fn file_close(fd): i64 {
+    return sys_close(fd);
+}
+
+# Read up to len bytes from fd into buf
+fn file_read(fd, buf, len): i64 {
+    return sys_read(fd, buf, len);
+}
+
+# Write len bytes from buf to fd
+fn file_write(fd, buf, len): i64 {
+    return sys_write(fd, buf, len);
+}
+
+# Read entire file into buffer. Returns bytes read.
+fn file_read_all(path, buf, maxlen): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return fd; }
+    var total: i64 = 0;
+    var rgo: i64 = 1;
+    while (rgo == 1) {
+        var n = file_read(fd, buf + total, maxlen - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= maxlen) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    return total;
+}
+
+# Write buffer to file. Returns bytes written or error.
+fn file_write_all(path, buf, len): i64 {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    var written = file_write(fd, buf, len);
+    file_close(fd);
+    return written;
+}
+
+# File-lock helpers — portable via xflock, which centralizes the per-target
+# flock number (agnos #59 / macOS BSD #92 / Linux x86 #73 / aarch64 #32; Windows
+# unsupported → -1). These were CYRIUS_TARGET_LINUX-only + raw `syscall(73)`
+# (CHANGELOG [5.5.16]: 73 is flock only on x86-Linux), so they were undefined →
+# ud2/SIGILL stubs on agnos + macOS, AND wrong-numbered on aarch64-Linux. That
+# trapped descent's persist_init at boot on agnos (libro FileStore →
+# file_append_locked). Routing through xflock fixes all four targets at once.
+# NOTE on agnos: flock there is advisory + NON-blocking (a contended LOCK_EX
+# returns -1, no kernel wait); single-process consumers see no contention, and a
+# blocking poll-spin is the caller's job if it ever runs multi-process.
+# (issue 2026-06-21-agnos-io-flock-helpers.md.)
+
+# Exclusive file lock (blocking on Linux/macOS; non-blocking on agnos — see note).
+fn file_lock(fd): i64 {
+    return xflock(fd, LOCK_EX);
+}
+
+# Release file lock.
+fn file_unlock(fd): i64 {
+    return xflock(fd, LOCK_UN);
+}
+
+# Non-blocking exclusive lock. Returns 0 on success, -1 if already locked.
+fn file_trylock(fd): i64 {
+    return xflock(fd, LOCK_EX | LOCK_NB);
+}
+
+# Shared (read) lock. Multiple readers, no writers.
+fn file_lock_shared(fd): i64 {
+    return xflock(fd, LOCK_SH);
+}
+
+# Append data to a file under an exclusive lock. Linux/macOS use kernel-atomic
+# O_APPEND (robust even against non-cooperating writers); agnos's kernel does NOT
+# honor AO_APPEND yet (agnos syscall.cyr:614 "AO_APPEND TODO"), so there the
+# LOCK_EX hold makes an explicit SEEK_END (xlseek #58) + write atomic instead.
+fn file_append_locked(path, buf, len): i64 {
+    var flags = O_WRONLY | O_CREAT;
+    #ifndef CYRIUS_TARGET_AGNOS
+    flags = flags | O_APPEND;
+    #endif
+    var fd = file_open(path, flags, 0x1A4);
+    if (fd < 0) { return fd; }
+    file_lock(fd);
+    #ifdef CYRIUS_TARGET_AGNOS
+    xlseek(fd, 0, 2);                  # SEEK_END — agnos AO_APPEND is a kernel TODO
+    #endif
+    var n = file_write(fd, buf, len);
+    file_unlock(fd);
+    file_close(fd);
+    return n;
+}
+
+# Check if file exists (try to open read-only)
+fn file_exists(path): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    file_close(fd);
+    return 1;
+}
+
+# Write string to stdout
+fn print(msg, len): i64 {
+    file_write(STDOUT, msg, len);
+    return 0;
+}
+
+# Write string to stderr
+fn eprint(msg, len): i64 {
+    file_write(STDERR, msg, len);
+    return 0;
+}
+
+# ================================================================
+# v5.8.30 — Result-returning variants (`_r` suffix)
+# ================================================================
+# Each *_r variant calls the underlying sys_* fn and wraps the
+# result in Ok / Err per the IoError mapping above. The `?`
+# propagation operator (v5.8.29) makes chaining painless:
+#
+#   var fd = file_open_r(path, 0, 0)?;
+#   var n  = file_read_r(fd, &buf, 8192)?;
+#   file_close_r(fd);
+#
+# Existing int-returning fns (`file_open` etc.) stay unchanged for
+# back-compat; new code should prefer the `_r` variants.
+
+# Map a negative kernel-style return into the closest IoError
+# variant. `errn` is the POSITIVE errno (the caller passes
+# `0 - sys_open_result`).
+fn _io_errno_to_iorr(errn): i64 {
+    if (errn == 2)  { return IoNotFound; }
+    if (errn == 13) { return IoAccessDenied; }
+    if (errn == 9)  { return IoBadFd; }
+    if (errn == 5)  { return IoFailed; }
+    return IoOther;
+}
+
+# Result variant of file_open. On success: Ok(fd); on failure:
+# Err(IoError variant for the underlying errno).
+fn file_open_r(path: cstring, flags, mode): Result {
+    var fd = file_open(path, flags, mode);   # via the agnos AO_*/namelen bridge
+    if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
+    return Ok(fd);
+}
+
+# Result variant of file_close. Kernel close(2) almost never fails
+# on a valid fd, but if it does, we surface it.
+fn file_close_r(fd): Result {
+    var rc = sys_close(fd);
+    if (rc < 0) { return Err(_io_errno_to_iorr(0 - rc)); }
+    return Ok(rc);
+}
+
+# Result variant of file_read. On success: Ok(bytes_read); on
+# failure: Err. Note that 0 bytes read at EOF is Ok(0), not Err.
+fn file_read_r(fd, buf, len): Result {
+    var n = sys_read(fd, buf, len);
+    if (n < 0) { return Err(_io_errno_to_iorr(0 - n)); }
+    return Ok(n);
+}
+
+# Result variant of file_write. On success: Ok(bytes_written).
+# Short writes (n < len) are still Ok — caller may need to loop.
+fn file_write_r(fd, buf, len): Result {
+    var n = sys_write(fd, buf, len);
+    if (n < 0) { return Err(_io_errno_to_iorr(0 - n)); }
+    return Ok(n);
+}
+
+# Result variant of file_read_all. Opens the file, reads up to
+# maxlen bytes, closes. Open failure surfaces as Err with the
+# corresponding IoError variant; read failure mid-stream returns
+# whatever was read up to that point as Ok.
+fn file_read_all_r(path, buf, maxlen): Result {
+    var fd = file_open(path, 0, 0);          # via the agnos AO_*/namelen bridge
+    if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, maxlen - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= maxlen) { rgo = 0; }
+        }
+    }
+    sys_close(fd);
+    return Ok(total);
+}
+
+# Result variant of file_write_all. Opens with O_WRONLY|O_CREAT|
+# O_TRUNC, writes, closes. Open failure → Err; write failure →
+# Err with errno mapping.
+fn file_write_all_r(path, buf, len): Result {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);   # via the agnos bridge
+    if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
+    var n = sys_write(fd, buf, len);
+    sys_close(fd);
+    if (n < 0) { return Err(_io_errno_to_iorr(0 - n)); }
+    return Ok(n);
+}
+
+# Read environment variable by name. Returns pointer to value or 0 if not found.
+# Reads from /proc/self/environ (null-separated KEY=VALUE pairs).
+fn getenv(name): i64 {
+    # agnos has no /proc/self/environ; the kernel stages envp on the exec init
+    # stack (agnos 1.43.2). Delegate to args_agnos.cyr's _agnos_getenv, which
+    # reads the r15-parked init rsp (forward fn ref — io.cyr precedes args in
+    # the stdlib include order). See ABI §4.6. v6.0.87.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return _agnos_getenv(name);
+    #endif
+    # The /proc/self/environ reader (and its 8 KB var buf) must stay out of the
+    # agnos frame entirely: a function-local var[] in a statically-dead region
+    # after the early agnos return still reserves stack at the prologue, and
+    # agnos hands ring-3 only ~12 KB of init stack — an 8 KB phantom frame
+    # overflows it (agnoshi_147 #PF). See CHANGELOG [6.1.12].
+    #ifndef CYRIUS_TARGET_AGNOS
+    var buf[8192];
+    var fd = file_open("/proc/self/environ", 0, 0);
+    if (fd < 0) { return 0; }
+    var n = file_read(fd, &buf, 8192);
+    file_close(fd);
+    if (n <= 0) { return 0; }
+    var nlen = strlen(name);
+    var pos = 0;
+    var eq = 0;
+    var ci = 0;
+    while (pos < n) {
+        # Check if this entry starts with name=
+        eq = 1;
+        ci = 0;
+        while (ci < nlen) {
+            if (load8(&buf + pos + ci) != load8(name + ci)) { eq = 0; break; }
+            ci = ci + 1;
+        }
+        if (eq == 1) { if (load8(&buf + pos + nlen) == 61) {
+                # Found: return pointer to value (copy to heap for safety)
+                var vstart = pos + nlen + 1;
+                var vlen = 0;
+                while (vstart + vlen < n && load8(&buf + vstart + vlen) != 0) { vlen = vlen + 1; }
+                var result = alloc(vlen + 1);
+                memcpy(result, &buf + vstart, vlen);
+                store8(result + vlen, 0);
+                return result;
+            } }
+        # Skip to next null terminator
+        while (pos < n) { if (load8(&buf + pos) == 0) { break; } pos = pos + 1; }
+        pos = pos + 1;
+    }
+    return 0;
+    #endif
+}

@@ -1,0 +1,177 @@
+# preset.cyr -- named voice presets: specific individuals within a species.
+# Ports rust-old/src/preset.rs. A VoicePreset is a ready-made CreatureVoice
+# configuration for a recognizable individual character (e.g. a large alpha
+# wolf vs. a small pup). preset_build() turns a preset into a CreatureVoice via
+# the crvoice_* builder chain (new -> with_size -> with_f0_offset ->
+# with_breathiness), matching the oracle's builder order exactly.
+#
+# Requires (from the build/test unit, in dependency order): stdlib alloc/vec,
+# error.cyr, rng.cyr, dsp.cyr, vocalization.cyr, sequence.cyr, species.cyr,
+# bridge.cyr, tract.cyr, voice.cyr (svara/naad/hisab dep bundles first). Module
+# files carry no `include` lines -- the entry orders them.
+#
+# NAMING (flat-namespace prefix): struct VoicePreset, every top-level fn is
+# `preset_`-prefixed. The 11 Rust `const` presets become zero-arg constructor
+# fns (Cyrius has no compile-time struct consts), each allocating and filling a
+# fresh VoicePreset with the oracle's verbatim field values.
+#
+# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
+# widening is forced). Integer literals via f64_from(n) (negatives via
+# f64_neg(f64_from(n))); non-integer literals via the module-top IEEE-754 hex
+# constants below (decimals in comments), one constant per distinct value.
+#
+# NAME FIELD: Rust's `name: Cow<'static, str>` is a display string. Cyrius has
+# no string type in this ABI, so the `name` field is stored as 0 (the display
+# name lives only in the fn identifier / oracle). preset_build ignores it.
+# serde dropped.
+
+# ================================================================
+# Non-integer literal constants (IEEE-754 hex; decimals in comments).
+# One constant per distinct preset field value.
+# ================================================================
+# size values (non-integer)
+var PR_P_1_4  = 0x3ff6666666666666;   # 1.4  Alpha Wolf size
+var PR_P_0_4  = 0x3fd999999999999a;   # 0.4  Wolf Pup / Kitten size
+var PR_P_1_3  = 0x3ff4cccccccccccd;   # 1.3  Male Lion / Raven size
+var PR_P_0_8  = 0x3fe999999999999a;   # 0.8  Young Dragon size
+var PR_P_1_2  = 0x3ff3333333333333;   # 1.2  Bald Eagle size
+var PR_P_1_5  = 0x3ff8000000000000;   # 1.5  American Alligator size
+
+# breathiness values (non-integer)
+var PR_P_0_03 = 0x3f9eb851eb851eb8;   # 0.03  Alpha Wolf breathiness
+var PR_P_0_12 = 0x3fbeb851eb851eb8;   # 0.12  Wolf Pup / Male Lion breathiness
+var PR_P_0_08 = 0x3fb47ae147ae147b;   # 0.08  House Cat breathiness
+var PR_P_0_15 = 0x3fc3333333333333;   # 0.15  Kitten / Young Dragon breathiness
+var PR_P_0_25 = 0x3fd0000000000000;   # 0.25  Ancient Dragon breathiness
+var PR_P_0_1  = 0x3fb999999999999a;   # 0.1   Bald Eagle breathiness
+var PR_P_0_2  = 0x3fc999999999999a;   # 0.2   Raven breathiness
+var PR_P_0_18 = 0x3fc70a3d70a3d70a;   # 0.18  American Alligator breathiness
+
+# ================================================================
+# VoicePreset -- a named creature voice preset.
+#   name        : display name (stored as 0 -- no string ABI; see file top)
+#   species     : PRANI_SP_* constant
+#   size        : size scale
+#   f0_offset   : f0 offset from species default (Hz)
+#   breathiness : breathiness override
+# serde dropped (no serde).
+# ================================================================
+#derive(accessors)
+struct VoicePreset {
+    name; species; size; f0_offset; breathiness;
+}
+
+# Internal builder -- fills every field in declaration order.
+#must_use
+fn preset_make(species, size, f0_offset, breathiness) {
+    var self = alloc(sizeof(VoicePreset));
+    VoicePreset_set_name(self, 0);
+    VoicePreset_set_species(self, species);
+    VoicePreset_set_size(self, size);
+    VoicePreset_set_f0_offset(self, f0_offset);
+    VoicePreset_set_breathiness(self, breathiness);
+    return self;
+}
+
+# build(self) -- VoicePreset::build. Creates a CreatureVoice from this preset via
+# the crvoice_* builder chain, matching the oracle order:
+#   new(species).with_size(size).with_f0_offset(f0_offset).with_breathiness(br)
+#must_use
+fn preset_build(self) {
+    return crvoice_with_breathiness(
+        crvoice_with_f0_offset(
+            crvoice_with_size(
+                crvoice_new(VoicePreset_species(self)),
+                VoicePreset_size(self)),
+            VoicePreset_f0_offset(self)),
+        VoicePreset_breathiness(self));
+}
+
+# ================================================================
+# Built-in voice presets (Rust `const`s -> zero-arg constructor fns). Field
+# values transcribed VERBATIM from the oracle static table.
+# ================================================================
+
+# Large alpha wolf -- deep, resonant howl. (Wolf, 1.4, -80.0, 0.03)
+#must_use
+fn preset_alpha_wolf() {
+    return preset_make(PRANI_SP_WOLF, PR_P_1_4, f64_neg(f64_from(80)), PR_P_0_03);
+}
+
+# Wolf pup -- high-pitched, breathy. (Wolf, 0.4, 200.0, 0.12)
+#must_use
+fn preset_wolf_pup() {
+    return preset_make(PRANI_SP_WOLF, PR_P_0_4, f64_from(200), PR_P_0_12);
+}
+
+# House cat -- typical domestic cat. (Cat, 1.0, 0.0, 0.08)
+#must_use
+fn preset_house_cat() {
+    return preset_make(PRANI_SP_CAT, F64_ONE, 0, PR_P_0_08);
+}
+
+# Kitten -- small, high-pitched. (Cat, 0.4, 150.0, 0.15)
+#must_use
+fn preset_kitten() {
+    return preset_make(PRANI_SP_CAT, PR_P_0_4, f64_from(150), PR_P_0_15);
+}
+
+# Male lion -- deep, powerful roar. (Lion, 1.3, -15.0, 0.12)
+#must_use
+fn preset_male_lion() {
+    return preset_make(PRANI_SP_LION, PR_P_1_3, f64_neg(f64_from(15)), PR_P_0_12);
+}
+
+# Ancient dragon -- massive, earth-shaking. (Dragon, 4.0, -30.0, 0.25)
+#must_use
+fn preset_ancient_dragon() {
+    return preset_make(PRANI_SP_DRAGON, f64_from(4), f64_neg(f64_from(30)), PR_P_0_25);
+}
+
+# Young dragon -- smaller, higher. (Dragon, 0.8, 50.0, 0.15)
+#must_use
+fn preset_young_dragon() {
+    return preset_make(PRANI_SP_DRAGON, PR_P_0_8, f64_from(50), PR_P_0_15);
+}
+
+# Bald eagle -- piercing screech. (Raptor, 1.2, -200.0, 0.1)
+#must_use
+fn preset_bald_eagle() {
+    return preset_make(PRANI_SP_RAPTOR, PR_P_1_2, f64_neg(f64_from(200)), PR_P_0_1);
+}
+
+# Raven -- deep, rough croak. (Crow, 1.3, -100.0, 0.2)
+#must_use
+fn preset_raven() {
+    return preset_make(PRANI_SP_CROW, PR_P_1_3, f64_neg(f64_from(100)), PR_P_0_2);
+}
+
+# Field cricket -- steady chirping. (Cricket, 1.0, 0.0, 0.0)
+#must_use
+fn preset_field_cricket() {
+    return preset_make(PRANI_SP_CRICKET, F64_ONE, 0, 0);
+}
+
+# American alligator -- deep bellow. (Crocodilian, 1.5, -10.0, 0.18)
+#must_use
+fn preset_alligator() {
+    return preset_make(PRANI_SP_CROCODILIAN, PR_P_1_5, f64_neg(f64_from(10)), PR_P_0_18);
+}
+
+# all() -- returns a vec of all 11 built-in presets, in oracle order.
+#must_use
+fn preset_all() {
+    var v = vec_new();
+    vec_push(v, preset_alpha_wolf());
+    vec_push(v, preset_wolf_pup());
+    vec_push(v, preset_house_cat());
+    vec_push(v, preset_kitten());
+    vec_push(v, preset_male_lion());
+    vec_push(v, preset_ancient_dragon());
+    vec_push(v, preset_young_dragon());
+    vec_push(v, preset_bald_eagle());
+    vec_push(v, preset_raven());
+    vec_push(v, preset_field_cricket());
+    vec_push(v, preset_alligator());
+    return v;
+}

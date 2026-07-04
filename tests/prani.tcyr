@@ -1,0 +1,70 @@
+# prani.tcyr -- bundle integration test.
+# Unlike the per-module suites (which include src/*.cyr), this validates the
+# assembled `dist/prani.cyr` bundle exactly as a downstream consumer sees it:
+# the lib deps + the single concatenated bundle, exercised across layers. Proves
+# the bundle exposes every layer's symbols coherently in one flat namespace.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+alloc_init();
+
+var SR = f64_from(8000);
+var DUR = 0x3FA999999999999A;   # 0.05 s
+
+# ================================================================
+test_group("bundle: L0/L1 constants + tables");
+assert_eq(PRANI_VOC_COUNT, 14, "14 vocalizations");
+assert_eq(PRANI_SP_COUNT, 13, "13 species");
+assert_eq(prani_is_err(PRANI_ERR_INVALID_VOCALIZATION), 1, "error code negative");
+
+# ================================================================
+test_group("bundle: species -> bridge -> emotion");
+var wp = species_params(PRANI_SP_WOLF);
+assert_eq(SpeciesParams_f0_default(wp), f64_from(400), "Wolf f0_default 400");
+assert_eq(bridge_species_from_f0(f64_from(3500)), PRANI_SP_CRICKET, "3500 Hz -> Cricket");
+var em = emotion_with_values(0x3FE0000000000000, 0x3FE6666666666666);   # (0.5,0.7)
+var out = emotion_evaluate(em);
+assert_eq(prani_is_finite(PrEmotionOut_pitch_scale(out)), 1, "emotion output finite");
+
+# ================================================================
+test_group("bundle: full synthesis (voice -> tract -> svara)");
+var wolf = crvoice_new(PRANI_SP_WOLF);
+var howl = crvoice_vocalize(wolf, PRANI_VOC_HOWL, SR, DUR);
+assert_eq(prani_is_err(howl), 0, "wolf howl synthesizes");
+assert_eq(vec_len(howl), 400, "400 samples (0.05 s @ 8 kHz)");
+var i = 0;
+var finite = 1;
+while (i < vec_len(howl)) { if (prani_is_finite(vec_get(howl, i)) == 0) { finite = 0; } i = i + 1; }
+assert_eq(finite, 1, "all howl samples finite");
+# unsupported: snake cannot howl
+var snake = crvoice_new(PRANI_SP_SNAKE);
+assert_eq(prani_is_err(crvoice_vocalize(snake, PRANI_VOC_HOWL, SR, DUR)), 1, "snake howl rejected");
+
+# ================================================================
+test_group("bundle: preset -> voice");
+var alpha = preset_build(preset_alpha_wolf());
+assert_eq(crvoice_species(alpha), PRANI_SP_WOLF, "alpha wolf preset -> Wolf");
+
+# ================================================================
+test_group("bundle: sequence chorus (multi-voice)");
+var voices = vec_new();
+vec_push(voices, crvoice_new(PRANI_SP_WOLF));
+vec_push(voices, crvoice_new(PRANI_SP_WOLF));
+var chorus = sequence_synthesize_chorus(voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, DUR, DUR);
+assert_eq(prani_is_err(chorus), 0, "chorus synthesizes");
+assert_eq(vec_len(chorus), 1200, "chorus length base 400 + 2*400 spread");
+
+# ================================================================
+test_group("bundle: ffi surface");
+assert_neq(prani_ffi_voice_create(0), 0, "ffi voice_create(Wolf) non-null");
+assert_eq(prani_ffi_voice_create(99), 0, "ffi voice_create(99) null");
+assert_eq(prani_ffi_species_from_index(13), (0 - 1), "ffi species index 13 -> -1");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,239 @@
+# emotion.cyr -- creature emotion state machine (valence/arousal model).
+# Ports rust-old/src/emotion.rs: EmotionState (valence x arousal x smoothing)
+# + EmotionOutput (the synthesis params derived from a state). Maps the 2D
+# emotion space to a Vocalization + CallIntent + continuous modulation
+# (vocal effort, pitch scale, breathiness delta).
+#
+# Requires (from the build/test unit, in order): error.cyr, vocalization.cyr
+# (PRANI_VOC_* / PRANI_INTENT_* consts) + stdlib alloc/math. This file has no
+# `include` lines.
+#
+# f32 -> f64 throughout. Non-integer literals -> module-top hex constants
+# (IEEE-754 bit patterns, decimals in comments). Zone enums (ValenceZone,
+# ArousalZone) were private Rust enums -> local integer var consts. serde /
+# Display tests dropped (no serde, integer codes).
+
+# ================================================================
+# Float constants (IEEE-754 hex bit patterns; decimals in comments).
+# ================================================================
+var PRE_NEG_1_0  = 0xbff0000000000000;   # -1.0  (valence clamp lo)
+var PRE_1_0      = 0x3ff0000000000000;   #  1.0  (valence/arousal clamp hi; pitch base)
+var PRE_0_0      = 0x0000000000000000;   #  0.0  (arousal clamp lo; neutral valence; no breath)
+var PRE_0_95     = 0x3fee666666666666;   #  0.95 (smoothing clamp hi)
+var PRE_0_2      = 0x3fc999999999999a;   #  0.2  (default arousal; effort base; breath lo thresh)
+var PRE_0_1      = 0x3fb999999999999a;   #  0.1  (default smoothing)
+var PRE_0_7      = 0x3fe6666666666666;   #  0.7  (arousal->effort gain)
+var PRE_0_15     = 0x3fc3333333333333;   #  0.15 (valence->pitch gain)
+var PRE_0_8      = 0x3fe999999999999a;   #  0.8  (breath hi thresh)
+var PRE_0_75     = 0x3fe8000000000000;   #  0.75 (breath hi gain)
+var PRE_0_5      = 0x3fe0000000000000;   #  0.5  (breath lo gain; zone bound +/-0.5)
+var PRE_0_33     = 0x3fd51eb851eb851f;   #  0.33 (arousal Low<->Mid bound)
+var PRE_0_66     = 0x3fe51eb851eb851f;   #  0.66 (arousal Mid<->High bound)
+var PRE_NEG_0_2  = 0xbfc999999999999a;   # -0.2  (valence Negative<->Neutral bound)
+var PRE_NEG_0_5  = 0xbfe0000000000000;   # -0.5  (screech vs bark bound)
+var PRE_NEG_0_7  = 0xbfe6666666666666;   # -0.7  (distress vs alarm bound)
+
+# ================================================================
+# ValenceZone / ArousalZone -- private Rust enums used only inside the
+# select_* match arms. Discriminant == declaration order (0-based).
+# ================================================================
+var PRE_VZ_NEGATIVE = 0;
+var PRE_VZ_NEUTRAL  = 1;
+var PRE_VZ_POSITIVE = 2;
+
+var PRE_AZ_LOW  = 0;
+var PRE_AZ_MID  = 1;
+var PRE_AZ_HIGH = 2;
+
+# ================================================================
+# EmotionState -- a creature's emotional state in valence/arousal space.
+#   valence   : -1.0 (aversive) .. +1.0 (appetitive)
+#   arousal   :  0.0 (calm)     .. 1.0 (excited)
+#   smoothing : transition smoothing factor (0.0 instant .. 0.95 sluggish)
+# Distinct struct name (PrEmotion) so accessors don't collide with svara/naad.
+# ================================================================
+#derive(accessors)
+struct PrEmotion { valence; arousal; smoothing; }
+
+# new() -- neutral point (idle, calm): valence 0.0, arousal 0.2, smoothing 0.1.
+# Also serves as Default (impl Default -> Self::new()).
+#must_use
+fn emotion_new() {
+    var self = alloc(sizeof(PrEmotion));
+    PrEmotion_set_valence(self, PRE_0_0);
+    PrEmotion_set_arousal(self, PRE_0_2);
+    PrEmotion_set_smoothing(self, PRE_0_1);
+    return self;
+}
+
+# with_values(valence, arousal) -- specific initial values, clamped; smoothing 0.1.
+#must_use
+fn emotion_with_values(valence, arousal) {
+    var self = alloc(sizeof(PrEmotion));
+    PrEmotion_set_valence(self, f64_clamp(valence, PRE_NEG_1_0, PRE_1_0));
+    PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
+    PrEmotion_set_smoothing(self, PRE_0_1);
+    return self;
+}
+
+# with_smoothing(self, smoothing) -- sets smoothing clamped to [0.0, 0.95].
+# Rust consumed+returned self (builder); the Cyrius port mutates in place and
+# returns the same handle.
+#must_use
+fn emotion_with_smoothing(self, smoothing) {
+    PrEmotion_set_smoothing(self, f64_clamp(smoothing, PRE_0_0, PRE_0_95));
+    return self;
+}
+
+# valence(self) -- current valence.
+#must_use
+fn emotion_valence(self) {
+    return PrEmotion_valence(self);
+}
+
+# arousal(self) -- current arousal.
+#must_use
+fn emotion_arousal(self) {
+    return PrEmotion_arousal(self);
+}
+
+# update(self, target_valence, target_arousal) -- exponential decay toward the
+# clamped target at rate `smoothing`. Call once per frame/tick.
+#   valence = valence*s + tv*(1-s);  arousal = arousal*s + ta*(1-s)
+fn emotion_update(self, target_valence, target_arousal) {
+    var tv = f64_clamp(target_valence, PRE_NEG_1_0, PRE_1_0);
+    var ta = f64_clamp(target_arousal, PRE_0_0, PRE_1_0);
+    var s = PrEmotion_smoothing(self);
+    var one_minus_s = f64_sub(PRE_1_0, s);
+    PrEmotion_set_valence(self, f64_add(f64_mul(PrEmotion_valence(self), s), f64_mul(tv, one_minus_s)));
+    PrEmotion_set_arousal(self, f64_add(f64_mul(PrEmotion_arousal(self), s), f64_mul(ta, one_minus_s)));
+}
+
+# set(self, valence, arousal) -- direct (no smoothing), clamped.
+fn emotion_set(self, valence, arousal) {
+    PrEmotion_set_valence(self, f64_clamp(valence, PRE_NEG_1_0, PRE_1_0));
+    PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
+}
+
+# valence_zone(self) -- Negative if valence < -0.2, Positive if > 0.2, else Neutral.
+#must_use
+fn emotion_valence_zone(self) {
+    var v = PrEmotion_valence(self);
+    if (f64_lt(v, PRE_NEG_0_2)) { return PRE_VZ_NEGATIVE; }
+    if (f64_gt(v, PRE_0_2))     { return PRE_VZ_POSITIVE; }
+    return PRE_VZ_NEUTRAL;
+}
+
+# arousal_zone(self) -- Low if arousal < 0.33, High if > 0.66, else Mid.
+#must_use
+fn emotion_arousal_zone(self) {
+    var a = PrEmotion_arousal(self);
+    if (f64_lt(a, PRE_0_33)) { return PRE_AZ_LOW; }
+    if (f64_gt(a, PRE_0_66)) { return PRE_AZ_HIGH; }
+    return PRE_AZ_MID;
+}
+
+# select_vocalization(self) -- most appropriate Vocalization for the current
+# (valence_zone, arousal_zone). Verbatim from the Rust match arms.
+#must_use
+fn emotion_select_vocalization(self) {
+    var vz = emotion_valence_zone(self);
+    var az = emotion_arousal_zone(self);
+    var v = PrEmotion_valence(self);
+
+    # High arousal, negative valence -> alarm/threat sounds
+    if (vz == PRE_VZ_NEGATIVE) {
+        if (az == PRE_AZ_HIGH) {
+            if (f64_lt(v, PRE_NEG_0_5)) { return PRANI_VOC_SCREECH; }
+            return PRANI_VOC_BARK;
+        }
+        # Low arousal, negative -> sullen; Mid arousal, negative -> threat
+        return PRANI_VOC_GROWL;
+    }
+    if (vz == PRE_VZ_POSITIVE) {
+        # High arousal, positive valence -> excited sounds
+        if (az == PRE_AZ_HIGH) {
+            if (f64_gt(v, PRE_0_5)) { return PRANI_VOC_TRILL; }
+            return PRANI_VOC_CHIRP;
+        }
+        # Low arousal, positive -> content
+        if (az == PRE_AZ_LOW) { return PRANI_VOC_PURR; }
+        # Mid arousal, positive -> social
+        return PRANI_VOC_HOWL;
+    }
+    # Neutral valence
+    if (az == PRE_AZ_HIGH) { return PRANI_VOC_BARK; }    # high arousal, neutral -> alert
+    if (az == PRE_AZ_LOW)  { return PRANI_VOC_RUMBLE; }  # low arousal, neutral -> idle rumble
+    return PRANI_VOC_WHINE;                              # mid arousal, neutral -> idle
+}
+
+# select_intent(self) -- CallIntent for the current (valence_zone, arousal_zone).
+# Verbatim from the Rust match arms.
+#must_use
+fn emotion_select_intent(self) {
+    var vz = emotion_valence_zone(self);
+    var az = emotion_arousal_zone(self);
+    var v = PrEmotion_valence(self);
+
+    if (vz == PRE_VZ_NEGATIVE) {
+        if (az == PRE_AZ_HIGH) {
+            if (f64_lt(v, PRE_NEG_0_7)) { return PRANI_INTENT_DISTRESS; }
+            return PRANI_INTENT_ALARM;
+        }
+        # Low arousal, negative -> Threat; Mid arousal, negative -> Threat
+        return PRANI_INTENT_THREAT;
+    }
+    if (vz == PRE_VZ_POSITIVE) {
+        if (az == PRE_AZ_HIGH) { return PRANI_INTENT_MATING; }  # high, positive -> Mating
+        if (az == PRE_AZ_LOW)  { return PRANI_INTENT_IDLE; }    # low, positive -> Idle
+        return PRANI_INTENT_SOCIAL;                             # mid, positive -> Social
+    }
+    # Neutral valence
+    if (az == PRE_AZ_HIGH) { return PRANI_INTENT_ALARM; }  # high, neutral -> Alarm
+    if (az == PRE_AZ_LOW)  { return PRANI_INTENT_IDLE; }   # low, neutral -> Idle
+    return PRANI_INTENT_SOCIAL;                            # mid, neutral -> Social
+}
+
+# ================================================================
+# EmotionOutput -- synthesis params derived from an EmotionState.
+#   vocalization      : suggested Vocalization (PRANI_VOC_* code)
+#   intent            : behavioral CallIntent (PRANI_INTENT_* code)
+#   vocal_effort      : 0.0-1.0, from arousal
+#   pitch_scale       : pitch multiplier, from valence
+#   breathiness_delta : additive breathiness, from arousal extremes
+# Distinct struct name (PrEmotionOut) to avoid accessor collisions.
+# ================================================================
+#derive(accessors)
+struct PrEmotionOut { vocalization; intent; vocal_effort; pitch_scale; breathiness_delta; }
+
+# evaluate(self) -- core mapping from the 2D emotion space to concrete
+# vocalization choices and parameter values. Returns a fresh PrEmotionOut.
+#must_use
+fn emotion_evaluate(self) {
+    var out = alloc(sizeof(PrEmotionOut));
+    PrEmotionOut_set_vocalization(out, emotion_select_vocalization(self));
+    PrEmotionOut_set_intent(out, emotion_select_intent(self));
+
+    var arousal = PrEmotion_arousal(self);
+    var valence = PrEmotion_valence(self);
+
+    # Vocal effort driven primarily by arousal: 0.2 + arousal*0.7
+    PrEmotionOut_set_vocal_effort(out, f64_add(PRE_0_2, f64_mul(arousal, PRE_0_7)));
+
+    # Pitch scale from valence: 1.0 + valence*0.15
+    PrEmotionOut_set_pitch_scale(out, f64_add(PRE_1_0, f64_mul(valence, PRE_0_15)));
+
+    # Breathiness rises at arousal extremes.
+    var breath = PRE_0_0;
+    if (f64_gt(arousal, PRE_0_8)) {
+        # up to +0.15 at max arousal: (arousal - 0.8) * 0.75
+        breath = f64_mul(f64_sub(arousal, PRE_0_8), PRE_0_75);
+    } else {
+        if (f64_lt(arousal, PRE_0_2)) {
+            # up to +0.1 at min arousal: (0.2 - arousal) * 0.5
+            breath = f64_mul(f64_sub(PRE_0_2, arousal), PRE_0_5);
+        }
+    }
+    PrEmotionOut_set_breathiness_delta(out, breath);
+    return out;
+}

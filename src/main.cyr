@@ -1,0 +1,47 @@
+# prani — Cyrius port smoke entry.
+#
+# Builds the whole library (the dist bundle + its consumer deps) into one
+# binary and runs a tiny cross-layer smoke, proving `dist/prani.cyr` compiles
+# and links as an executable. Consumers include `dist/prani.cyr` the same way.
+# Library modules live in src/*.cyr (validated per-module via tests/*.tcyr);
+# this entry is not what those suites include.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+fn main() {
+    alloc_init();
+
+    # A fresh Wolf voice → a short howl (0.05 s @ 8 kHz); every sample finite.
+    var voice = crvoice_new(PRANI_SP_WOLF);
+    if (prani_is_err(voice) == 1) {
+        println("prani: voice init failed");
+        return 1;
+    }
+    var samples = crvoice_vocalize(voice, PRANI_VOC_HOWL, f64_from(8000), 0x3FA999999999999A);   # 0.05 s
+    if (prani_is_err(samples) == 1) {
+        println("prani: vocalize failed");
+        return 1;
+    }
+    var n = vec_len(samples);
+    var i = 0;
+    var ok = 0;
+    while (i < n) {
+        if (prani_is_finite(vec_get(samples, i)) == 1) { ok = ok + 1; }
+        i = i + 1;
+    }
+    if ((n > 0) & (ok == n)) {
+        println("prani (Cyrius port) — smoke OK");
+        return 0;
+    }
+    println("prani: smoke FAILED");
+    return 1;
+}
+
+var r = main();
+syscall(60, r);

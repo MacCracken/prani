@@ -1,0 +1,224 @@
+# tract.tcyr -- tests for src/tract.cyr (ports rust-old/src/tract.rs).
+#
+# Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
+# prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
+# sequence -> species -> tract). The prani modules carry no `include` lines --
+# this entry orders them. sequence.cyr is pulled in only for the CallBout struct
+# species_bout_template references; its synthesize methods forward-reference
+# crvoice_* (voice.cyr, not included) which are UNREACHABLE here, so undefined-fn
+# WARNINGS for crvoice_* are EXPECTED and fine (not link errors).
+#
+# PARITY APPROACH: exact svara-internal bit parity vs the f32 Rust oracle is not
+# attainable -- f32->f64 widening diverges through svara's own DSP (glottal pulse
+# shaping, formant biquads, DC blocker). So instead of golden sample values we
+# assert STRUCTURAL parity: each apparatus path returns a NON-error vec of the
+# expected length (num_samples) with ALL samples finite; determinism (same
+# params+seed+input -> identical output); the pure-arithmetic paths
+# (apply_spectral_tilt one-pole, reset) against hand-computed f64 results.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/tract.cyr"
+
+# test constants (IEEE-754 hex)
+var T_SR       = 0x40e5888000000000;   # 44100.0 sample rate
+var T_TILT_N6  = 0xc018000000000000;   # -6.0 dB/oct
+var T_0_5      = 0x3fe0000000000000;   # 0.5
+var T_0_25     = 0x3fd0000000000000;   # 0.25
+var T_0_125    = 0x3fc0000000000000;   # 0.125
+var T_220      = 0x406b800000000000;   # 220.0
+var T_2500     = 0x40a3880000000000;   # 2500.0 (unused sentinel; see below)
+var T_TOL_1EM6 = 0x3eb0c6f7a0b5ed8d;   # 1e-6
+
+alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# all_finite(vec) -- 1 iff every element passes prani_is_finite.
+#must_use
+fn t_all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (prani_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# vecs_equal(a, b) -- 1 iff same length and bit-identical elements.
+#must_use
+fn t_vecs_equal(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var n = vec_len(a);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# approx(a, b, eps) -- |a-b| < eps.
+#must_use
+fn t_approx(a, b, eps) {
+    return f64_lt(f64_abs(f64_sub(a, b)), eps);
+}
+
+# ================================================================
+test_group("laryngeal -- non-error vec, length, finite (wolf)");
+var wolf = species_params(PRANI_SP_WOLF);
+var ct_wolf = crtract_new(wolf, T_SR);
+var opts = crtract_options_default();
+var out_l = crtract_synthesize(ct_wolf, T_220, 64, opts);
+assert_eq(prani_is_err(out_l), 0, "laryngeal returns non-error vec ptr");
+assert_eq(vec_len(out_l), 64, "laryngeal length == num_samples (64)");
+assert_eq(t_all_finite(out_l), 1, "laryngeal all samples finite");
+
+# ================================================================
+test_group("laryngeal subharmonic path -- non-error, finite, phase advances");
+var ct_wolf2 = crtract_new(wolf, T_SR);
+var opts_sub = crtract_options_new(T_0_25, T_0_5);   # subharmonic_amp=0.25, ps=0.5
+assert_eq(CreatureTract_phase(ct_wolf2), 0, "phase starts at 0");
+var out_sub = crtract_synthesize(ct_wolf2, T_220, 128, opts_sub);
+assert_eq(prani_is_err(out_sub), 0, "subharmonic path non-error");
+assert_eq(vec_len(out_sub), 128, "subharmonic length 128");
+assert_eq(t_all_finite(out_sub), 1, "subharmonic all finite");
+assert_neq(CreatureTract_phase(ct_wolf2), 0, "subharmonic path advanced phase");
+
+# ================================================================
+test_group("syringeal low-freq (<=2000) -- glottal path (songbird @ 1500)");
+var bird = species_params(PRANI_SP_SONGBIRD);
+var ct_bird = crtract_new(bird, T_SR);
+# songbird f0 range 1000-8000; 1500 clamps in-range and <=2000 -> glottal path
+var out_syr_lo = crtract_synthesize(ct_bird, f64_from(1500), 64, opts);
+assert_eq(prani_is_err(out_syr_lo), 0, "syringeal low-freq non-error");
+assert_eq(vec_len(out_syr_lo), 64, "syringeal low-freq length 64");
+assert_eq(t_all_finite(out_syr_lo), 1, "syringeal low-freq all finite");
+
+# ================================================================
+test_group("syringeal high-freq (>2000) -- dual-source path (songbird @ 3000)");
+var ct_bird2 = crtract_new(bird, T_SR);
+var out_syr_hi = crtract_synthesize(ct_bird2, f64_from(3000), 96, opts);
+assert_eq(prani_is_err(out_syr_hi), 0, "syringeal high-freq non-error");
+assert_eq(vec_len(out_syr_hi), 96, "syringeal high-freq length 96");
+assert_eq(t_all_finite(out_syr_hi), 1, "syringeal high-freq all finite");
+
+# ================================================================
+test_group("noise -- naad bandpass path (snake)");
+var snake = species_params(PRANI_SP_SNAKE);
+var ct_snake = crtract_new(snake, T_SR);
+# noise_filter must be present (NoiseOnly pre-builds the naad bandpass)
+assert_neq(CreatureTract_noise_filter(ct_snake), 0, "snake has a noise_filter");
+var out_noise = crtract_synthesize(ct_snake, f64_from(0), 80, opts);
+assert_eq(prani_is_err(out_noise), 0, "noise path non-error");
+assert_eq(vec_len(out_noise), 80, "noise length 80");
+assert_eq(t_all_finite(out_noise), 1, "noise all finite");
+
+# ================================================================
+test_group("stridulatory high-carrier chirps (cricket, f0 > 1000)");
+var cricket = species_params(PRANI_SP_CRICKET);
+var ct_cricket = crtract_new(cricket, T_SR);
+# cricket f0 range 3000-8000 -> f0 > 1000 -> discrete pulse-train chirps
+var out_strid = crtract_synthesize(ct_cricket, f64_from(4500), 128, opts);
+assert_eq(prani_is_err(out_strid), 0, "stridulatory non-error");
+assert_eq(vec_len(out_strid), 128, "stridulatory length 128");
+assert_eq(t_all_finite(out_strid), 1, "stridulatory all finite");
+# at i=0: t=0 -> carrier=sin(0)=0, h2=0 -> signal=0; syllable_frac=0 < 0.1 ->
+# pulse_env = 0/0.1 = 0 -> sample = 0. Exact.
+assert_eq(vec_get(out_strid, 0), 0, "stridulatory sample[0] == 0 (t=0, env=0)");
+
+# ================================================================
+test_group("stridulatory low-carrier via direct call (bee-style, f0 <= 1000)");
+# Drive the stridulatory low branch directly with f0 <= 1000 (bee params use the
+# VIBRATILE apparatus, so call the stridulatory synth explicitly for coverage).
+var ct_cricket2 = crtract_new(cricket, T_SR);
+var out_strid_lo = crtract_synthesize_stridulatory(ct_cricket2, T_220, 64, opts);
+assert_eq(prani_is_err(out_strid_lo), 0, "stridulatory low-carrier non-error");
+assert_eq(vec_len(out_strid_lo), 64, "stridulatory low-carrier length 64");
+assert_eq(t_all_finite(out_strid_lo), 1, "stridulatory low-carrier all finite");
+
+# ================================================================
+test_group("vibratile -- continuous wing-beat AM (bee)");
+var bee = species_params(PRANI_SP_BEE);
+var ct_bee = crtract_new(bee, T_SR);
+var out_vib = crtract_synthesize(ct_bee, f64_from(300), 64, opts);
+assert_eq(prani_is_err(out_vib), 0, "vibratile non-error");
+assert_eq(vec_len(out_vib), 64, "vibratile length 64");
+assert_eq(t_all_finite(out_vib), 1, "vibratile all finite");
+# at i=0: t=0 -> carrier=0, h2=0, modulator=0.5+0.5*sin(0)=0.5 -> (0)*0.5*0.25=0
+assert_eq(vec_get(out_vib, 0), 0, "vibratile sample[0] == 0 (t=0)");
+
+# ================================================================
+test_group("synthesize_purr -- non-error, finite, phase advances");
+var cat = species_params(PRANI_SP_CAT);
+var ct_cat = crtract_new(cat, T_SR);
+var out_purr = crtract_synthesize_purr(ct_cat, 100, f64_from(25));
+assert_eq(prani_is_err(out_purr), 0, "purr non-error");
+assert_eq(vec_len(out_purr), 100, "purr length 100");
+assert_eq(t_all_finite(out_purr), 1, "purr all finite");
+
+# ================================================================
+test_group("determinism -- same params+seed+input -> identical output");
+# Two fresh tracts from the same species params draw from the same resonance
+# seed, so their synthesis must be bit-identical.
+var ct_a = crtract_new(species_params(PRANI_SP_WOLF), T_SR);
+var ct_b = crtract_new(species_params(PRANI_SP_WOLF), T_SR);
+var out_a = crtract_synthesize(ct_a, T_220, 64, crtract_options_default());
+var out_b = crtract_synthesize(ct_b, T_220, 64, crtract_options_default());
+assert_eq(t_vecs_equal(out_a, out_b), 1, "laryngeal deterministic (bit-identical)");
+# noise path leans on the rng directly -- also deterministic across fresh tracts.
+var ct_sa = crtract_new(species_params(PRANI_SP_SNAKE), T_SR);
+var ct_sb = crtract_new(species_params(PRANI_SP_SNAKE), T_SR);
+var out_sa = crtract_synthesize(ct_sa, f64_from(0), 48, opts);
+var out_sb = crtract_synthesize(ct_sb, f64_from(0), 48, opts);
+assert_eq(t_vecs_equal(out_sa, out_sb), 1, "noise deterministic (bit-identical)");
+
+# ================================================================
+test_group("apply_spectral_tilt -- hand-computed one-pole (tilt=-6 -> a=0.5)");
+# a = clamp(-(-6)/12, 0, 0.85) = 0.5; one_minus_a = 0.5. Input [1,0,0]:
+#   y0 = 0.5*1 + 0.5*0 = 0.5
+#   y1 = 0.5*0 + 0.5*0.5 = 0.25
+#   y2 = 0.5*0 + 0.5*0.25 = 0.125
+# All exactly representable in f64.
+var buf = vec_new();
+vec_push(buf, F64_ONE);
+vec_push(buf, 0);
+vec_push(buf, 0);
+crtract_apply_spectral_tilt(buf, T_TILT_N6, T_SR);
+assert_eq(vec_get(buf, 0), T_0_5, "tilt y[0] == 0.5");
+assert_eq(vec_get(buf, 1), T_0_25, "tilt y[1] == 0.25");
+assert_eq(vec_get(buf, 2), T_0_125, "tilt y[2] == 0.125");
+
+# neutral tilt (|tilt_db| < 0.1) is a no-op -- buffer unchanged.
+var buf2 = vec_new();
+vec_push(buf2, F64_ONE);
+vec_push(buf2, T_0_5);
+crtract_apply_spectral_tilt(buf2, 0, T_SR);
+assert_eq(vec_get(buf2, 0), F64_ONE, "neutral tilt leaves x[0] unchanged");
+assert_eq(vec_get(buf2, 1), T_0_5, "neutral tilt leaves x[1] unchanged");
+
+# ================================================================
+test_group("reset -- clears phase");
+var ct_r = crtract_new(species_params(PRANI_SP_WOLF), T_SR);
+# advance phase via the subharmonic path
+crtract_synthesize(ct_r, T_220, 32, crtract_options_new(T_0_25, T_0_5));
+assert_neq(CreatureTract_phase(ct_r), 0, "phase advanced before reset");
+crtract_reset(ct_r);
+assert_eq(CreatureTract_phase(ct_r), 0, "reset clears phase to 0");
+
+# ================================================================
+test_group("options -- default is (0, 0)");
+var od = crtract_options_default();
+assert_eq(SynthesisOptions_subharmonic_amp(od), 0, "default subharmonic_amp 0");
+assert_eq(SynthesisOptions_perturbation_scale(od), 0, "default perturbation_scale 0");
+
+var rc = assert_summary();
+syscall(60, rc);

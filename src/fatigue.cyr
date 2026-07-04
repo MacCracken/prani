@@ -1,0 +1,181 @@
+# fatigue.cyr -- vocal fatigue + call-habituation system.
+# Ports rust-old/src/fatigue.rs: the `FatigueState` accumulator and its derived
+# `FatigueModifiers` (pitch drift, breathiness, amplitude, jitter). Tracks a
+# creature's calling history and degrades synthesis realistically:
+#   - Fatigue accumulates with calling time, recovers during silence.
+#   - Alarm habituation rises with unreinforced alarms ("cried wolf"), decays
+#     slowly during rest, and is reset on reinforcement.
+#
+# Requires (from the build/test unit): error.cyr + stdlib alloc/math. The
+# module file itself has no `include` lines.
+#
+# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
+# widening is forced and improves precision). Non-integer literals -> module-top
+# IEEE-754 hex constants (decimal in comment). Integer floats via f64_from.
+# `.clamp(0,1)` -> f64_clamp(x,0,F64_ONE); `.max(0)` -> f64_max(x,0).
+#
+# serde/Display tests dropped (no serde; state is five f64/int slots).
+
+# ================================================================
+# Rate + scale constants (IEEE-754 hex bit patterns; decimals in comments).
+# ================================================================
+var PR_FAT_FATIGUE_RATE     = 0x3f8eb851eb851eb8;   # 0.015  per second of calling
+var PR_FAT_HAB_STEP         = 0x3fb999999999999a;   # 0.1    per unreinforced alarm
+var PR_FAT_RECOVERY_RATE    = 0x3fb1eb851eb851ec;   # 0.07   fatigue recovery per second rest
+var PR_FAT_HAB_DECAY        = 0x3f978d4fdf3b645a;   # 0.023  habituation decay per second rest
+var PR_FAT_HAB_REINFORCE    = 0x3fd3333333333333;   # 0.3    habituation drop on reinforcement
+var PR_FAT_BOUT_RESET_SECS  = 0x4014000000000000;   # 5.0    rest > 5s resets bout tracking
+
+var PR_FAT_PITCH_DROP_HZ    = 0x4034000000000000;   # 20.0   max downward pitch drift (Hz)
+var PR_FAT_BREATH_MAX       = 0x3fc999999999999a;   # 0.2    max breathiness delta
+var PR_FAT_AMP_FATIGUE_MAX  = 0x3fd999999999999a;   # 0.4    fatigue amplitude reduction span
+var PR_FAT_AMP_HAB_MAX      = 0x3fe0000000000000;   # 0.5    habituation amplitude reduction span
+var PR_FAT_JITTER_SPAN      = 0x3ff8000000000000;   # 1.5    fatigue jitter increase span
+
+# ================================================================
+# FatigueState -- tracks vocal fatigue and call habituation.
+#   fatigue           : accumulated fatigue (0.0 fresh .. 1.0 exhausted)
+#   alarm_habituation : alarm/threat habituation (0.0 full response .. 1.0 habituated)
+#   bout_calling_time : total calling time in the current bout (seconds)
+#   alarm_count       : unreinforced alarm calls in the current window (u32)
+#   alarm_reinforced  : whether the last alarm was reinforced (0/1 bool)
+# ================================================================
+#derive(accessors)
+struct FatigueState { fatigue; alarm_habituation; bout_calling_time; alarm_count; alarm_reinforced; }
+
+# new() -- fresh (non-fatigued) state. Also serves as Default::default().
+#must_use
+fn fatigue_new() {
+    var self = alloc(sizeof(FatigueState));
+    FatigueState_set_fatigue(self, 0);
+    FatigueState_set_alarm_habituation(self, 0);
+    FatigueState_set_bout_calling_time(self, 0);
+    FatigueState_set_alarm_count(self, 0);
+    FatigueState_set_alarm_reinforced(self, 0);
+    return self;
+}
+
+# fatigue() -- current fatigue level (0.0-1.0). Accessor-style getter.
+#must_use
+fn fatigue_fatigue(self) {
+    return FatigueState_fatigue(self);
+}
+
+# alarm_habituation() -- current alarm habituation level (0.0-1.0).
+#must_use
+fn fatigue_alarm_habituation(self) {
+    return FatigueState_alarm_habituation(self);
+}
+
+# record_call(duration, is_alarm) -- record that a call was produced.
+#   duration : call duration in seconds (f64)
+#   is_alarm : 1 if this was an alarm/threat call, 0 otherwise
+# Fatigue accumulates by duration*rate (clamped to [0,1]). Alarm calls bump the
+# unreinforced-alarm count and, when not reinforced, raise habituation by 0.1.
+fn fatigue_record_call(self, duration, is_alarm) {
+    # bout_calling_time += duration
+    FatigueState_set_bout_calling_time(self, f64_add(FatigueState_bout_calling_time(self), duration));
+
+    # fatigue = (fatigue + duration * fatigue_rate).clamp(0.0, 1.0)
+    var f = f64_add(FatigueState_fatigue(self), f64_mul(duration, PR_FAT_FATIGUE_RATE));
+    FatigueState_set_fatigue(self, f64_clamp(f, 0, F64_ONE));
+
+    if (is_alarm != 0) {
+        # alarm_count += 1
+        FatigueState_set_alarm_count(self, FatigueState_alarm_count(self) + 1);
+        # if !alarm_reinforced { habituation = (habituation + 0.1).clamp(0,1) }
+        if (FatigueState_alarm_reinforced(self) == 0) {
+            var h = f64_add(FatigueState_alarm_habituation(self), PR_FAT_HAB_STEP);
+            FatigueState_set_alarm_habituation(self, f64_clamp(h, 0, F64_ONE));
+        }
+    }
+}
+
+# rest(duration) -- record a period of rest (silence).
+#   duration : rest duration in seconds (f64)
+# Fatigue recovers at 0.07/s (floored at 0), habituation decays at 0.023/s
+# (floored at 0), and rest longer than 5s resets bout tracking.
+fn fatigue_rest(self, duration) {
+    # fatigue = (fatigue - duration * recovery_rate).max(0.0)
+    var f = f64_sub(FatigueState_fatigue(self), f64_mul(duration, PR_FAT_RECOVERY_RATE));
+    FatigueState_set_fatigue(self, f64_max(f, 0));
+
+    # alarm_habituation = (alarm_habituation - duration * habituation_decay).max(0.0)
+    var h = f64_sub(FatigueState_alarm_habituation(self), f64_mul(duration, PR_FAT_HAB_DECAY));
+    FatigueState_set_alarm_habituation(self, f64_max(h, 0));
+
+    # if duration > 5.0 { bout_calling_time = 0.0 }
+    if (f64_gt(duration, PR_FAT_BOUT_RESET_SECS) == 1) {
+        FatigueState_set_bout_calling_time(self, 0);
+    }
+}
+
+# reinforce_alarm() -- the last alarm's threat was real. Sets the reinforced
+# flag, drops habituation by 0.3 (floored at 0), and resets the alarm count.
+fn fatigue_reinforce_alarm(self) {
+    FatigueState_set_alarm_reinforced(self, 1);
+    var h = f64_sub(FatigueState_alarm_habituation(self), PR_FAT_HAB_REINFORCE);
+    FatigueState_set_alarm_habituation(self, f64_max(h, 0));
+    FatigueState_set_alarm_count(self, 0);
+}
+
+# clear_reinforcement() -- reset the reinforcement flag (start of a new bout).
+fn fatigue_clear_reinforcement(self) {
+    FatigueState_set_alarm_reinforced(self, 0);
+}
+
+# reset() -- clear all fatigue and habituation state (== *self = new()).
+fn fatigue_reset(self) {
+    FatigueState_set_fatigue(self, 0);
+    FatigueState_set_alarm_habituation(self, 0);
+    FatigueState_set_bout_calling_time(self, 0);
+    FatigueState_set_alarm_count(self, 0);
+    FatigueState_set_alarm_reinforced(self, 0);
+}
+
+# ================================================================
+# FatigueModifiers -- synthesis modifiers derived from the fatigue state.
+#   pitch_offset      : pitch drift in Hz (negative = downward from fatigue)
+#   breathiness_delta : additive breathiness increase (0.0 = no change)
+#   amplitude_scale   : amplitude multiplier (1.0 normal, <1.0 fatigued/habituated)
+#   jitter_scale      : jitter multiplier (1.0 normal, >1.0 fatigued)
+# ================================================================
+#derive(accessors)
+struct FatigueModifiers { pitch_offset; breathiness_delta; amplitude_scale; jitter_scale; }
+
+#must_use
+fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) {
+    var m = alloc(sizeof(FatigueModifiers));
+    FatigueModifiers_set_pitch_offset(m, pitch_offset);
+    FatigueModifiers_set_breathiness_delta(m, breathiness_delta);
+    FatigueModifiers_set_amplitude_scale(m, amplitude_scale);
+    FatigueModifiers_set_jitter_scale(m, jitter_scale);
+    return m;
+}
+
+# modifiers() -- current fatigue/habituation modifiers.
+#   pitch_offset      = -fatigue * 20.0            (up to -20 Hz at full fatigue)
+#   breathiness_delta =  fatigue * 0.2             (up to +0.2 at full fatigue)
+#   amplitude_scale   = (1 - fatigue*0.4) * (1 - habituation*0.5)
+#   jitter_scale      = 1 + fatigue * 1.5
+#must_use
+fn fatigue_modifiers(self) {
+    var fat = FatigueState_fatigue(self);
+    var hab = FatigueState_alarm_habituation(self);
+
+    # pitch_offset = -fatigue * 20.0
+    var pitch_offset = f64_neg(f64_mul(fat, PR_FAT_PITCH_DROP_HZ));
+
+    # breathiness_delta = fatigue * 0.2
+    var breathiness_delta = f64_mul(fat, PR_FAT_BREATH_MAX);
+
+    # amplitude_scale = (1 - fatigue*0.4) * (1 - habituation*0.5)
+    var fatigue_amp = f64_sub(F64_ONE, f64_mul(fat, PR_FAT_AMP_FATIGUE_MAX));
+    var habituation_amp = f64_sub(F64_ONE, f64_mul(hab, PR_FAT_AMP_HAB_MAX));
+    var amplitude_scale = f64_mul(fatigue_amp, habituation_amp);
+
+    # jitter_scale = 1 + fatigue * 1.5
+    var jitter_scale = f64_add(F64_ONE, f64_mul(fat, PR_FAT_JITTER_SPAN));
+
+    return fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale);
+}

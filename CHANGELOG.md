@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - Cyrius port
+
+Complete rewrite from Rust to **Cyrius**. prani's Rust line shipped through 1.1.0;
+the language port is a major break, so it lands as 2.0.0. The 3,527-line Rust
+source is frozen at `rust-old/` as the parity oracle — every Cyrius module is
+cross-checked against it function-for-function. Per-module ledger in
+[`docs/development/port-audit.md`](docs/development/port-audit.md).
+
+### Breaking
+
+- **Language**: Rust crate → Cyrius library (`.cyr`). Consumers no longer add a
+  `[dependencies] prani = …` Cargo entry; they include the `dist/prani.cyr`
+  distlib bundle and resolve svara/naad/hisab/goonj/sakshi from their own
+  `cyrius.cyml` (same pattern svara/naad use). No C ABI stability guarantee
+  carried over — the `ffi` surface is re-expressed in Cyrius conventions.
+- **Error handling**: the `PraniError` enum → integer codes (`PRANI_ERR_*`);
+  fallible functions return `PRANI_ERR_NONE`/negative codes; `Result`/`Option`
+  → code or sentinel returns (vec pointer on success, negative on error; `-1`
+  for absent). `svara::error::SvaraError` mapping → `prani_from_svara`.
+- **API shape**: methods → free functions (`CreatureVoice::vocalize` →
+  `crvoice_vocalize`, etc.); enums → integer constants (`Species::Wolf` →
+  `PRANI_SP_WOLF`); structs via `#derive(accessors)`. See the naming contract in
+  the port audit.
+
+### Changed
+
+- Toolchain pinned via `cyrius.cyml [package].cyrius` (6.3.45). Build with
+  `cyrius build src/main.cyr build/prani`; test a suite with
+  `cyrius test tests/<mod>.tcyr`.
+- **All 15 modules ported** (L0 → FFI): error, rng, dsp, spatial, vocalization,
+  fatigue, emotion, sequence, species, bridge, tract, voice, preset, stream, ffi.
+  (`math.rs`'s thin f32 transcendental wrappers fold into direct `f64_*` builtin
+  + ganita calls; `lib.rs` carried no independent logic.)
+- **f32 → f64** throughout (svara/naad/hisab are f64-only; widening is forced and
+  improves precision). Test tolerances loosened where bit-exactness through
+  svara's DSP isn't meaningful.
+- **Dependencies**: svara (glottal/formant/vocal-tract), naad (biquad filters),
+  hisab (`ease_in_out_smooth`), goonj, sakshi consumed as Cyrius distlib bundles.
+  `serde`/`thiserror`/`tracing`/`libm`/`criterion` dropped (`Vec` → stdlib `vec`;
+  no serde in Cyrius; transcendentals via ganita builtins).
+
+### Added
+
+- **Parity test suites**: one `tests/<mod>.tcyr` per module — **627 assertions
+  across 15 suites, all green** — cross-checked against the frozen Rust oracle
+  (serde round-trip + Display-string tests dropped).
+- **`dist/prani.cyr`** distlib bundle (15 modules, 3,760 lines, dependency-ordered,
+  one flat namespace; cross-module symbol collisions audited to zero across every
+  fn/struct/const). Consumers supply stdlib + svara + naad + hisab + goonj +
+  sakshi. `src/main.cyr` smoke-builds and links the bundle (a Wolf howl end-to-end).
+- **`resonance_seed` parity**: the 13 species seeds (an f32-bit-pattern hash in
+  the oracle) are precomputed and stored, exactly matching Rust's
+  `f32::to_bits`-based values (independently re-derived).
+- **Hot-path benchmarks** (`cyrius bench tests/prani.bcyr`): DC blocker
+  19 ns/sample, PCG32 15 ns/sample, `emotion_evaluate` 83 ns/frame, full Wolf-howl
+  synthesis 227 µs (≈ 220× realtime, whole svara/naad stack). See
+  [`docs/benchmarks.md`](docs/benchmarks.md).
+
+### Removed
+
+- `serde` derives + all serde round-trip tests (no serde in Cyrius).
+- `thiserror`, `tracing`, `tracing-subscriber`, `libm`, `criterion` dependencies;
+  the Cargo `std`/`naad-backend`/`logging`/`ffi` feature flags (Cyrius uses
+  `cyrius.cyml` dep resolution instead).
+
 ## [1.1.0] - 2026-03-28
 
 ### Added

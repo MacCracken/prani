@@ -1,0 +1,190 @@
+# fatigue.tcyr -- tests for src/fatigue.cyr (FatigueState + FatigueModifiers).
+# rust-old/src/fatigue.rs had no #[test] blocks; parity is locked to the
+# accumulation / recovery curves + modifier derivation. Expected values are
+# hand-computed from the f64 port's algorithm (f32->f64 per the port audit):
+#   record_call(d,false): fatigue += d*0.015, clamped [0,1]
+#   record_call(d,true) & !reinforced: habituation += 0.1, clamped [0,1]
+#   rest(d): fatigue -= d*0.07 (max 0); habituation -= d*0.023 (max 0); d>5 zeroes bout
+#   reinforce_alarm: reinforced=1; habituation -= 0.3 (max 0); alarm_count=0
+#   modifiers(): pitch=-f*20; breath=f*0.2; amp=(1-f*0.4)*(1-h*0.5); jitter=1+f*1.5
+# serde/Display tests dropped (no serde; integer codes).
+
+include "src/error.cyr"
+include "src/fatigue.cyr"
+
+alloc_init();
+
+var TOL = 0x3E80000000000000;   # ~1.19e-7 (PRANI_EPSILON), for -0.0 / near-zero checks
+
+# ================================================================
+test_group("new() -- fresh state");
+var s = fatigue_new();
+assert_eq(fatigue_fatigue(s), 0, "fresh fatigue == 0");
+assert_eq(fatigue_alarm_habituation(s), 0, "fresh habituation == 0");
+assert_eq(FatigueState_bout_calling_time(s), 0, "fresh bout time == 0");
+assert_eq(FatigueState_alarm_count(s), 0, "fresh alarm count == 0");
+assert_eq(FatigueState_alarm_reinforced(s), 0, "fresh not reinforced");
+
+# ================================================================
+test_group("record_call(10, false) -- fatigue accumulation");
+# fatigue = 0 + 10*0.015 = 0.15 (bit-exact in f64)
+fatigue_record_call(s, f64_from(10), 0);
+assert_eq(fatigue_fatigue(s), 0x3fc3333333333333, "fatigue == 0.15");
+assert_eq(FatigueState_bout_calling_time(s), 0x4024000000000000, "bout time == 10.0");
+assert_eq(fatigue_alarm_habituation(s), 0, "non-alarm leaves habituation at 0");
+assert_eq(FatigueState_alarm_count(s), 0, "non-alarm leaves alarm count at 0");
+
+# ================================================================
+test_group("record_call fatigue clamps at 1.0");
+var big = fatigue_new();
+# 100s * 0.015 = 1.5 -> clamp to 1.0
+fatigue_record_call(big, f64_from(100), 0);
+assert_eq(fatigue_fatigue(big), 0x3ff0000000000000, "fatigue clamps to 1.0");
+
+# ================================================================
+test_group("record_call(_, true) -- habituation + alarm count");
+var al = fatigue_new();
+fatigue_record_call(al, f64_from(1), 1);   # 1st unreinforced alarm
+assert_eq(fatigue_alarm_habituation(al), 0x3fb999999999999a, "habituation == 0.1 after 1 alarm");
+assert_eq(FatigueState_alarm_count(al), 1, "alarm count == 1");
+fatigue_record_call(al, f64_from(1), 1);   # 2nd
+fatigue_record_call(al, f64_from(1), 1);   # 3rd -> 0.30000000000000004
+assert_eq(fatigue_alarm_habituation(al), 0x3fd3333333333334, "habituation == ~0.3 after 3 alarms");
+assert_eq(FatigueState_alarm_count(al), 3, "alarm count == 3");
+
+# ================================================================
+test_group("reinforced alarm does NOT raise habituation");
+var rf = fatigue_new();
+fatigue_reinforce_alarm(rf);               # sets reinforced flag (hab stays 0)
+assert_eq(FatigueState_alarm_reinforced(rf), 1, "reinforced flag set");
+fatigue_record_call(rf, f64_from(1), 1);   # alarm while reinforced
+assert_eq(fatigue_alarm_habituation(rf), 0, "habituation stays 0 when reinforced");
+assert_eq(FatigueState_alarm_count(rf), 1, "alarm still counted");
+
+# ================================================================
+test_group("rest() -- fatigue recovery + habituation decay");
+var r = fatigue_new();
+fatigue_record_call(r, f64_from(10), 0);   # fatigue = 0.15
+# rest(2): fatigue = 0.15 - 2*0.07 = 0.15 - 0.14 = 0.009999999999999981
+fatigue_rest(r, f64_from(2));
+assert_eq(fatigue_fatigue(r), 0x3f847ae147ae1470, "fatigue == 0.15 - 0.14 (f64)");
+
+# fatigue floors at 0 on long rest
+var r2 = fatigue_new();
+fatigue_record_call(r2, f64_from(10), 0);  # 0.15
+fatigue_rest(r2, f64_from(100));           # 0.15 - 7.0 -> max(0)
+assert_eq(fatigue_fatigue(r2), 0, "fatigue floors at 0");
+assert_eq(fatigue_alarm_habituation(r2), 0, "habituation floors at 0");
+
+# habituation decays on rest
+var r3 = fatigue_new();
+fatigue_record_call(r3, f64_from(1), 1);
+fatigue_record_call(r3, f64_from(1), 1);
+fatigue_record_call(r3, f64_from(1), 1);   # hab = 0.30000000000000004
+fatigue_rest(r3, f64_from(1));             # hab -= 0.023 = 0.277
+assert_eq(fatigue_alarm_habituation(r3), 0x3fd1ba5e353f7cee, "habituation decays by 0.023");
+
+# ================================================================
+test_group("rest > 5s resets bout tracking");
+var bt = fatigue_new();
+fatigue_record_call(bt, f64_from(10), 0);
+assert_eq(FatigueState_bout_calling_time(bt), 0x4024000000000000, "bout time 10.0 before rest");
+fatigue_rest(bt, f64_from(6));             # > 5s -> bout reset
+assert_eq(FatigueState_bout_calling_time(bt), 0, "bout time reset after >5s rest");
+
+# rest <= 5s does NOT reset bout
+var bt2 = fatigue_new();
+fatigue_record_call(bt2, f64_from(10), 0);
+fatigue_rest(bt2, f64_from(5));            # == 5s, not > 5s
+assert_eq(FatigueState_bout_calling_time(bt2), 0x4024000000000000, "bout time kept at exactly 5s rest");
+
+# ================================================================
+test_group("reinforce_alarm() -- drops habituation, resets count");
+var re = fatigue_new();
+fatigue_record_call(re, f64_from(1), 1);
+fatigue_record_call(re, f64_from(1), 1);
+fatigue_record_call(re, f64_from(1), 1);   # hab ~0.3, count 3
+fatigue_reinforce_alarm(re);               # hab -= 0.3 -> ~0 (max 0), count 0, reinforced
+# 0.30000000000000004 - 0.3 = 5.55e-17 (tiny positive), not exactly 0
+assert_eq(f64_lt(fatigue_alarm_habituation(re), TOL), 1, "habituation near 0 after reinforce");
+assert_eq(FatigueState_alarm_count(re), 0, "alarm count reset to 0");
+assert_eq(FatigueState_alarm_reinforced(re), 1, "reinforced flag set");
+
+# reinforce floors at 0 when habituation already small
+var re2 = fatigue_new();
+fatigue_record_call(re2, f64_from(1), 1);  # hab 0.1
+fatigue_reinforce_alarm(re2);              # 0.1 - 0.3 -> max(0) = 0
+assert_eq(fatigue_alarm_habituation(re2), 0, "habituation floors at 0 on reinforce");
+
+# ================================================================
+test_group("clear_reinforcement() -- resets flag");
+var cr = fatigue_new();
+fatigue_reinforce_alarm(cr);
+assert_eq(FatigueState_alarm_reinforced(cr), 1, "reinforced before clear");
+fatigue_clear_reinforcement(cr);
+assert_eq(FatigueState_alarm_reinforced(cr), 0, "cleared after clear_reinforcement");
+# after clearing, a new unreinforced alarm raises habituation again
+fatigue_record_call(cr, f64_from(1), 1);
+assert_eq(fatigue_alarm_habituation(cr), 0x3fb999999999999a, "habituation rises after clear+alarm");
+
+# ================================================================
+test_group("modifiers() -- fresh state (identity-ish)");
+var fresh = fatigue_new();
+var m0 = fatigue_modifiers(fresh);
+# pitch = -0*20 = -0.0 (bit-differs from +0.0); check magnitude
+assert_eq(f64_lt(f64_abs(FatigueModifiers_pitch_offset(m0)), TOL), 1, "fresh pitch ~ 0");
+assert_eq(FatigueModifiers_breathiness_delta(m0), 0, "fresh breathiness == 0");
+assert_eq(FatigueModifiers_amplitude_scale(m0), 0x3ff0000000000000, "fresh amplitude == 1.0");
+assert_eq(FatigueModifiers_jitter_scale(m0), 0x3ff0000000000000, "fresh jitter == 1.0");
+
+# ================================================================
+test_group("modifiers() -- at fatigue 0.15");
+var f15 = fatigue_new();
+fatigue_record_call(f15, f64_from(10), 0);   # fatigue = 0.15
+var m1 = fatigue_modifiers(f15);
+# pitch = -0.15*20 = -3.0
+assert_eq(FatigueModifiers_pitch_offset(m1), 0xc008000000000000, "pitch == -3.0");
+# breathiness = 0.15*0.2 = 0.03
+assert_eq(FatigueModifiers_breathiness_delta(m1), 0x3f9eb851eb851eb8, "breathiness == 0.03");
+# amplitude = (1-0.15*0.4)*(1-0*0.5) = 0.94
+assert_eq(FatigueModifiers_amplitude_scale(m1), 0x3fee147ae147ae14, "amplitude == 0.94");
+# jitter = 1 + 0.15*1.5 = 1.225
+assert_eq(FatigueModifiers_jitter_scale(m1), 0x3ff399999999999a, "jitter == 1.225");
+
+# ================================================================
+test_group("modifiers() -- habituation cuts amplitude");
+var mh = fatigue_new();
+fatigue_record_call(mh, f64_from(1), 1);     # fatigue = 0.015, hab = 0.1
+var m2 = fatigue_modifiers(mh);
+# amp = (1 - 0.015*0.4) * (1 - 0.1*0.5); fatigue tiny so ~0.994*0.95
+# assert amplitude strictly below the hab-only 0.95 (fatigue also present)
+assert_eq(f64_lt(FatigueModifiers_amplitude_scale(m2), 0x3fee666666666666), 1, "amp below 0.95 (fatigue+hab both cut)");
+assert_eq(f64_lt(FatigueModifiers_amplitude_scale(m2), F64_ONE), 1, "amp below 1.0");
+
+# ================================================================
+test_group("modifiers() -- full fatigue extremes");
+var full = fatigue_new();
+fatigue_record_call(full, f64_from(100), 0); # fatigue clamps to 1.0
+var m3 = fatigue_modifiers(full);
+# pitch = -1.0*20 = -20.0
+assert_eq(FatigueModifiers_pitch_offset(m3), 0xc034000000000000, "full pitch == -20.0");
+# breathiness = 1.0*0.2 = 0.2
+assert_eq(FatigueModifiers_breathiness_delta(m3), 0x3fc999999999999a, "full breathiness == 0.2");
+# amplitude = (1-0.4)*(1-0) = 0.6
+assert_eq(FatigueModifiers_amplitude_scale(m3), 0x3fe3333333333333, "full amplitude == 0.6");
+# jitter = 1 + 1.5 = 2.5
+assert_eq(FatigueModifiers_jitter_scale(m3), 0x4004000000000000, "full jitter == 2.5");
+
+# ================================================================
+test_group("reset() -- clears all state");
+var rs = fatigue_new();
+fatigue_record_call(rs, f64_from(10), 1);
+fatigue_reset(rs);
+assert_eq(fatigue_fatigue(rs), 0, "reset fatigue == 0");
+assert_eq(fatigue_alarm_habituation(rs), 0, "reset habituation == 0");
+assert_eq(FatigueState_bout_calling_time(rs), 0, "reset bout time == 0");
+assert_eq(FatigueState_alarm_count(rs), 0, "reset alarm count == 0");
+assert_eq(FatigueState_alarm_reinforced(rs), 0, "reset reinforced == 0");
+
+var rc = assert_summary();
+syscall(60, rc);

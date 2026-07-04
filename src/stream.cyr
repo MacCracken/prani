@@ -1,0 +1,358 @@
+# stream.cyr -- pull-based streaming synthesis.
+# Ports rust-old/src/stream.rs. A SynthStream wraps a CreatureVoice and yields
+# audio blocks on demand, avoiding the full-buffer allocation of
+# crvoice_vocalize. Suitable for real-time audio callbacks where the block size
+# is determined by the host (Wwise, FMOD, Godot, JACK).
+#
+# Requires (from the build/test unit, in dependency order): stdlib alloc/vec/
+# math, hisab, goonj, naad, svara, error.cyr, rng.cyr, dsp.cyr, vocalization.cyr,
+# sequence.cyr, species.cyr, bridge.cyr, tract.cyr, voice.cyr. Module files carry
+# no `include` lines -- the entry orders them.
+#
+# NAMING (flat-namespace prefix): every top-level fn here is `stream_`-prefixed.
+# The spectral-offset helper is REUSED from voice.cyr
+# (crvoice_vocalization_spectral_offset) -- NOT redefined here (Rust duplicated
+# it as a private fn to keep stream.rs self-contained; the flat-namespace port
+# shares the single definition).
+#
+# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
+# widening is forced). Integer literals via f64_from(n); non-integer literals via
+# the module-top IEEE-754 hex constants below (decimals in comments).
+#
+# RESULT convention: stream_new returns a SynthStream heap ptr (large positive)
+# on success, or a NEGATIVE PRANI_ERR_INVALID_VOCALIZATION when the species
+# cannot produce the requested vocalization.
+#
+# tract field: lazily initialized. Starts as 0 (== None sentinel); the first
+# stream_fill_buffer builds it via crtract_new (Option::get_or_insert_with).
+#
+# EQUIVALENT-RESULT SIMPLIFICATION (fill_buffer): the Rust code copies the fresh
+# synthesized block into buffer[..to_render], THEN applies the spectral-tilt
+# lowpass and per-sample amplitude to buffer[..to_render]. Since the tilt filter
+# and amplitude scale are pointwise/sequential over exactly the same to_render
+# fresh samples (buffer beyond to_render is untouched by both, and the block's
+# leading to_render samples are identical to what gets copied), applying tilt+amp
+# to the BLOCK vec first and then copying block[0..to_render] into
+# buffer[0..to_render] yields bit-identical results. The port does the latter so
+# the tilt/amp helpers operate on the whole block vec (crtract_apply_spectral_tilt
+# runs over the full vec, but only the first to_render slots are copied out).
+#
+# PARITY: exact svara-internal bit parity vs the f32 oracle is not attainable
+# (f32->f64 diverges through svara's DSP reached via crtract_synthesize). Tests
+# assert structural + parity-meaningful properties (total_samples / rejection /
+# fill_buffer accounting / is_finished flip / next_block sizes exact;
+# finiteness for the svara-dependent output; pitch_contour_at exact where
+# closed-form). serde and Display tests dropped.
+
+# ================================================================
+# Non-integer literal constants (IEEE-754 hex; decimals in comments).
+# ================================================================
+var PR_ST_0_3   = 0x3fd3333333333333;   # 0.3   effort_amp base
+var PR_ST_1_2   = 0x3ff3333333333333;   # 1.2   effort_amp multiplier
+var PR_ST_0_5   = 0x3fe0000000000000;   # 0.5   effort_tilt center / boundary boost gain
+var PR_ST_6_0   = 0x4018000000000000;   # 6.0   effort_tilt multiplier
+var PR_ST_0_1   = 0x3fb999999999999a;   # 0.1   attack boundary fraction
+var PR_ST_0_85  = 0x3feb333333333333;   # 0.85  release boundary fraction
+var PR_ST_0_15  = 0x3fc3333333333333;   # 0.15  release boundary span
+# purr f0 clamp: purr_f0 = clamp(27.0 / 1.0, 20.0, 35.0)
+var PR_ST_27_0  = 0x403b000000000000;   # 27.0  purr laryngeal cycle f0
+var PR_ST_20_0  = 0x4034000000000000;   # 20.0  purr clamp low
+var PR_ST_35_0  = 0x4041800000000000;   # 35.0  purr clamp high
+# pitch-contour table multipliers (transcribed verbatim from the oracle).
+var PR_ST_0_8   = 0x3fe999999999999a;   # 0.8
+var PR_ST_1_3   = 0x3ff4cccccccccccd;   # 1.3
+var PR_ST_0_6   = 0x3fe3333333333333;   # 0.6
+var PR_ST_0_7   = 0x3fe6666666666666;   # 0.7
+var PR_ST_0_9   = 0x3feccccccccccccd;   # 0.9
+var PR_ST_1_4   = 0x3ff6666666666666;   # 1.4
+var PR_ST_1_6   = 0x3ff999999999999a;   # 1.6
+var PR_ST_1_5   = 0x3ff8000000000000;   # 1.5
+var PR_ST_0_25  = 0x3fd0000000000000;   # 0.25
+var PR_ST_1_1   = 0x3ff199999999999a;   # 1.1
+var PR_ST_0_75  = 0x3fe8000000000000;   # 0.75
+
+# ================================================================
+# SynthStream -- a pull-based streaming synthesizer. Produces audio block-by-
+# block without allocating the full output buffer up front.
+#   voice           : CreatureVoice ptr producing this stream
+#   vocalization    : PRANI_VOC_* being synthesized
+#   intent          : PRANI_INTENT_* behavioral intent
+#   sample_rate     : sample rate (Hz)
+#   total_samples   : total samples to produce
+#   samples_rendered: samples produced so far
+#   tract           : CreatureTract ptr, or 0 (== None; lazily built)
+#   f0              : pitch-contour base f0 (after intent modifiers)
+#   amplitude_scale : intent amplitude multiplier snapshot
+#   effort_amp      : vocal-effort amplitude scale
+#   spectral_tilt   : combined spectral tilt (species + voc + effort)
+#   is_cat_purr     : 1 if this is a cat purr (special path), else 0
+# serde dropped (integer/pointer state).
+# ================================================================
+#derive(accessors)
+struct SynthStream {
+    voice; vocalization; intent; sample_rate; total_samples;
+    samples_rendered; tract; f0; amplitude_scale; effort_amp;
+    spectral_tilt; is_cat_purr;
+}
+
+# new(voice, voc, intent, sample_rate, duration) -- SynthStream::new. Does not
+# allocate the full output; audio is produced incrementally via
+# stream_fill_buffer / stream_next_block.
+#
+# Returns a SynthStream ptr on success, or a NEGATIVE
+# PRANI_ERR_INVALID_VOCALIZATION if the species cannot produce the vocalization.
+#must_use
+fn stream_new(voice, voc, intent, sample_rate, duration) {
+    var species = crvoice_species(voice);
+    if (species_supports_vocalization(species, voc) == 0) {
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
+
+    var modifiers = prani_intent_modifiers(intent);
+    var f0 = f64_mul(crvoice_effective_f0(voice), IntentModifiers_pitch_scale(modifiers));
+    var effective_duration = f64_mul(duration, IntentModifiers_duration_scale(modifiers));
+    # total_samples = (effective_duration * sample_rate) as usize
+    var total_samples = f64_to(f64_mul(effective_duration, sample_rate));
+
+    var effort = crvoice_vocal_effort(voice);
+    var effort_amp = f64_add(PR_ST_0_3, f64_mul(effort, PR_ST_1_2));
+    var effort_tilt_offset = f64_mul(f64_sub(effort, PR_ST_0_5), PR_ST_6_0);
+    var vocalization_tilt = crvoice_vocalization_spectral_offset(voc);
+    var species_params = species_params(species);
+    var spectral_tilt = f64_add(
+        f64_add(SpeciesParams_spectral_tilt(species_params), vocalization_tilt),
+        effort_tilt_offset);
+
+    var is_cat_purr = 0;
+    if (voc == PRANI_VOC_PURR) {
+        if (species == PRANI_SP_CAT) { is_cat_purr = 1; }
+    }
+
+    var self = alloc(sizeof(SynthStream));
+    SynthStream_set_voice(self, voice);
+    SynthStream_set_vocalization(self, voc);
+    SynthStream_set_intent(self, intent);
+    SynthStream_set_sample_rate(self, sample_rate);
+    SynthStream_set_total_samples(self, total_samples);
+    SynthStream_set_samples_rendered(self, 0);
+    SynthStream_set_tract(self, 0);
+    SynthStream_set_f0(self, f0);
+    SynthStream_set_amplitude_scale(self, IntentModifiers_amplitude_scale(modifiers));
+    SynthStream_set_effort_amp(self, effort_amp);
+    SynthStream_set_spectral_tilt(self, spectral_tilt);
+    SynthStream_set_is_cat_purr(self, is_cat_purr);
+    return self;
+}
+
+# is_finished(self) -- 1 when all samples have been produced, else 0.
+#must_use
+fn stream_is_finished(self) {
+    if (SynthStream_samples_rendered(self) >= SynthStream_total_samples(self)) { return 1; }
+    return 0;
+}
+
+# total_samples(self) -- total samples the stream will produce.
+#must_use
+fn stream_total_samples(self) {
+    return SynthStream_total_samples(self);
+}
+
+# samples_rendered(self) -- samples produced so far.
+#must_use
+fn stream_samples_rendered(self) {
+    return SynthStream_samples_rendered(self);
+}
+
+# fill_buffer(self, buffer) -- fill the provided vec with audio samples. Returns
+# the number of samples actually written (may be < vec_len at end of stream).
+#
+# `buffer` is a vec handle (mutated in place). See the module header's
+# EQUIVALENT-RESULT SIMPLIFICATION note: tilt+amp are applied to the freshly
+# synthesized BLOCK vec, then block[0..to_render] is copied into
+# buffer[0..to_render] -- bit-identical to Rust's copy-then-process-buffer.
+fn stream_fill_buffer(self, buffer) {
+    if (stream_is_finished(self) == 1) { return 0; }
+
+    var total = SynthStream_total_samples(self);
+    var rendered = SynthStream_samples_rendered(self);
+    var remaining = total - rendered;
+    var to_render = vec_len(buffer);
+    if (remaining < to_render) { to_render = remaining; }   # buffer.len().min(remaining)
+
+    # ensure the tract is initialized (Option::get_or_insert_with)
+    var tract = SynthStream_tract(self);
+    if (tract == 0) {
+        var params = species_params(crvoice_species(SynthStream_voice(self)));
+        tract = crtract_new(params, SynthStream_sample_rate(self));
+        SynthStream_set_tract(self, tract);
+    }
+
+    var block = 0;
+    var have_block = 0;
+    if (SynthStream_is_cat_purr(self) == 1) {
+        # cat purr special path. purr_f0 = clamp(27/1.0, 20, 35) (size baked in).
+        var purr_f0 = f64_clamp(PR_ST_27_0, PR_ST_20_0, PR_ST_35_0);
+        block = crtract_synthesize_purr(tract, to_render, purr_f0);
+        have_block = 1;   # synthesize_purr never fails
+    } else {
+        # standard synthesis with pitch contour
+        var total_max = total;
+        if (total_max < 1) { total_max = 1; }   # total_samples.max(1)
+        var t = f64_div(f64_from(rendered), f64_from(total_max));
+        var contour = stream_pitch_contour_at(SynthStream_vocalization(self), SynthStream_f0(self), t);
+
+        var modifiers = prani_intent_modifiers(SynthStream_intent(self));
+        var boundary_boost = F64_ONE;
+        if (f64_lt(t, PR_ST_0_1) == 1) {
+            # 1 + (1 - t/0.1) * 0.5
+            boundary_boost = f64_add(F64_ONE,
+                f64_mul(f64_sub(F64_ONE, f64_div(t, PR_ST_0_1)), PR_ST_0_5));
+        } elif (f64_gt(t, PR_ST_0_85) == 1) {
+            # 1 + (t - 0.85)/0.15 * 0.5
+            boundary_boost = f64_add(F64_ONE,
+                f64_mul(f64_div(f64_sub(t, PR_ST_0_85), PR_ST_0_15), PR_ST_0_5));
+        }
+        var perturbation_scale = f64_add(boundary_boost, IntentModifiers_urgency(modifiers));
+
+        var options = crtract_options_new(0, perturbation_scale);
+        block = crtract_synthesize(tract, contour, to_render, options);
+        # Rust used `if let Ok(block)` -- skip the copy on synthesis error.
+        if (prani_is_err(block) == 0) { have_block = 1; }
+    }
+
+    if (have_block == 1) {
+        # apply spectral tilt to the block (in place over the full block vec).
+        crtract_apply_spectral_tilt(block, SynthStream_spectral_tilt(self),
+            SynthStream_sample_rate(self));
+        # apply amplitude: amp = amplitude_scale * effort_amp.
+        var amp = f64_mul(SynthStream_amplitude_scale(self), SynthStream_effort_amp(self));
+        var bi = 0;
+        while (bi < to_render) {
+            var y = f64_mul(vec_get(block, bi), amp);
+            vec_set(block, bi, y);
+            # copy block[bi] into buffer[bi]
+            vec_set(buffer, bi, y);
+            bi = bi + 1;
+        }
+    }
+
+    SynthStream_set_samples_rendered(self, rendered + to_render);
+    return to_render;
+}
+
+# next_block(self, block_size) -- produce the next block of audio as an owned
+# vec. block_size is clamped to the remaining samples; returns an empty vec when
+# nothing remains.
+fn stream_next_block(self, block_size) {
+    var total = SynthStream_total_samples(self);
+    var rendered = SynthStream_samples_rendered(self);
+    # remaining = total.saturating_sub(rendered)
+    var remaining = 0;
+    if (total > rendered) { remaining = total - rendered; }
+    var actual = block_size;
+    if (remaining < actual) { actual = remaining; }
+    if (actual == 0) { return vec_new(); }
+    var buf = vec_new();
+    var i = 0;
+    while (i < actual) {
+        vec_push(buf, 0);
+        i = i + 1;
+    }
+    stream_fill_buffer(self, buf);
+    return buf;
+}
+
+# ---- pitch_contour_at (f0-returning helper) ---------------------------------
+
+# pitch_contour_at(voc, base_f0, t) -- the f0 at normalized time t for a
+# vocalization. Distinct from voice's struct-returning contour: this is the
+# free-function form the stream uses per-block. Static tables (FLAT/HOWL/BARK/
+# ROAR/WHINE/SCREECH/TRILL) transcribed verbatim from the oracle. t is clamped to
+# [0,1]; the point pairs are walked and the interpolated multiplier applied to
+# base_f0.
+#must_use
+fn stream_pitch_contour_at(voc, base_f0, t) {
+    var points = vec_new();
+    if (voc == PRANI_VOC_HOWL) {
+        # HOWL: (0.0,0.8),(0.3,1.3),(0.7,1.2),(1.0,0.6)
+        stream_contour_push(points, 0, PR_ST_0_8);
+        stream_contour_push(points, PR_ST_0_3, PR_ST_1_3);
+        stream_contour_push(points, PR_ST_0_7, PR_ST_1_2);
+        stream_contour_push(points, F64_ONE, PR_ST_0_6);
+    } elif (voc == PRANI_VOC_BARK) {
+        stream_contour_bark(points);
+    } elif (voc == PRANI_VOC_YELP) {
+        stream_contour_bark(points);
+    } elif (voc == PRANI_VOC_ROAR) {
+        stream_contour_roar(points);
+    } elif (voc == PRANI_VOC_RUMBLE) {
+        stream_contour_roar(points);
+    } elif (voc == PRANI_VOC_WHINE) {
+        # WHINE: (0.0,1.0),(0.5,1.4),(1.0,1.6)
+        stream_contour_push(points, 0, F64_ONE);
+        stream_contour_push(points, PR_ST_0_5, PR_ST_1_4);
+        stream_contour_push(points, F64_ONE, PR_ST_1_6);
+    } elif (voc == PRANI_VOC_SCREECH) {
+        # SCREECH: (0.0,1.5),(0.3,1.2),(1.0,0.7)
+        stream_contour_push(points, 0, PR_ST_1_5);
+        stream_contour_push(points, PR_ST_0_3, PR_ST_1_2);
+        stream_contour_push(points, F64_ONE, PR_ST_0_7);
+    } elif (voc == PRANI_VOC_TRILL) {
+        # TRILL: (0.0,1.0),(0.25,1.1),(0.5,0.9),(0.75,1.1),(1.0,1.0)
+        stream_contour_push(points, 0, F64_ONE);
+        stream_contour_push(points, PR_ST_0_25, PR_ST_1_1);
+        stream_contour_push(points, PR_ST_0_5, PR_ST_0_9);
+        stream_contour_push(points, PR_ST_0_75, PR_ST_1_1);
+        stream_contour_push(points, F64_ONE, F64_ONE);
+    } else {
+        # FLAT: (0.0,1.0),(1.0,1.0)
+        stream_contour_push(points, 0, F64_ONE);
+        stream_contour_push(points, F64_ONE, F64_ONE);
+    }
+
+    var n = vec_len(points);           # total slots (2 per point)
+    var tc = f64_clamp(t, 0, F64_ONE);
+    if (n == 0) { return base_f0; }
+    var num_points = n / 2;
+    var i = 0;
+    while (i < num_points - 1) {
+        var t0 = vec_get(points, i * 2);
+        var v0 = vec_get(points, i * 2 + 1);
+        var t1 = vec_get(points, (i + 1) * 2);
+        var v1 = vec_get(points, (i + 1) * 2 + 1);
+        if (f64_ge(tc, t0) == 1) {
+            if (f64_le(tc, t1) == 1) {
+                var frac = 0;
+                if (f64_ge(f64_abs(f64_sub(t1, t0)), PRANI_EPSILON) == 1) {
+                    frac = f64_div(f64_sub(tc, t0), f64_sub(t1, t0));
+                }
+                # base_f0 * (v0 + (v1 - v0) * frac)
+                return f64_mul(base_f0, f64_add(v0, f64_mul(f64_sub(v1, v0), frac)));
+            }
+        }
+        i = i + 1;
+    }
+    # past the last point: base_f0 * last multiplier
+    return f64_mul(base_f0, vec_get(points, n - 1));
+}
+
+# push a (time, multiplier) point onto a flat contour vec.
+fn stream_contour_push(v, t, mult) {
+    vec_push(v, t);
+    vec_push(v, mult);
+}
+
+# BARK/YELP: (0.0,1.2),(0.1,1.0),(1.0,0.8)
+fn stream_contour_bark(points) {
+    stream_contour_push(points, 0, PR_ST_1_2);
+    stream_contour_push(points, PR_ST_0_1, F64_ONE);
+    stream_contour_push(points, F64_ONE, PR_ST_0_8);
+}
+
+# ROAR/RUMBLE: (0.0,0.9),(0.15,1.2),(0.5,1.0),(1.0,0.7)
+fn stream_contour_roar(points) {
+    stream_contour_push(points, 0, PR_ST_0_9);
+    stream_contour_push(points, PR_ST_0_15, PR_ST_1_2);
+    stream_contour_push(points, PR_ST_0_5, F64_ONE);
+    stream_contour_push(points, F64_ONE, PR_ST_0_7);
+}

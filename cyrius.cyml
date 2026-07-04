@@ -1,0 +1,115 @@
+[package]
+name = "prani"
+version = "${file:VERSION}"
+description = "prani — creature & animal vocal synthesis (species vocal tracts, call patterns, emotion/fatigue drive, behavioral vocalization). Cyrius port of a 3,527-line Rust library."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/prani"
+language = "cyrius"
+cyrius = "6.3.45"
+
+[build]
+entry = "src/main.cyr"
+output = "build/prani"
+
+# `[lib]` declares the distlib bundle `cyrius distlib` writes into
+# `dist/prani.cyr` — every module concatenated in dependency order (deps
+# before dependents). Populated as modules are ported (foundations first,
+# then tract/voice, then sequence/stream/ffi). Every module is
+# self-contained (no `include` lines); the entry / test harness orders them.
+# svara + its transitive deps (naad/hisab/goonj/sakshi) resolve from THIS
+# manifest's [deps].
+[lib]
+# Dependency order (deps before dependents). Cyrius resolves forward function
+# references across the unit, but structs must be defined before `sizeof`/
+# accessor use — so sequence (defines CallBout) precedes species (bout_template
+# constructs it). sequence's synthesize methods forward-reference voice's
+# crvoice_* (defined later) — fine (whole-unit resolution). math.rs (thin f32
+# transcendental wrappers) folds into direct f64_* builtin + ganita calls; no
+# separate module, same as svara/naad.
+modules = [
+    # L0 foundations (no internal deps)
+    "src/error.cyr",
+    "src/rng.cyr",
+    "src/dsp.cyr",
+    "src/spatial.cyr",
+    "src/vocalization.cyr",
+    "src/fatigue.cyr",
+    # L1
+    "src/emotion.cyr",
+    "src/sequence.cyr",   # CallElement/CallBout/CallPhrase structs (used by species)
+    "src/species.cyr",
+    "src/bridge.cyr",
+    # L2 — svara vocal-tract bridge
+    "src/tract.cyr",
+    # L3 — voice orchestration
+    "src/voice.cyr",
+    # L4 — composites
+    "src/preset.cyr",
+    "src/stream.cyr",
+    # L5 — FFI surface
+    "src/ffi.cyr",
+]
+
+# stdlib: mirrors svara's set (prani sits directly on svara). math gives
+# clamp/min/max/lerp/sign + F64_* constants; ganita gives the transcendentals
+# the tract/glottal DSP leans on (sin/cos/tan/exp/ln/pow/sqrt/tanh/…); tagged
+# for Option-shaped returns; fnptr/callback for the closure→fn-ptr port
+# pattern; bench for .bcyr harnesses; assert for .tcyr.
+[deps]
+stdlib = [
+    "syscalls",
+    "string",
+    "alloc",
+    "str",
+    "fmt",
+    "vec",
+    "io",
+    "args",
+    "assert",
+    "math",
+    "ganita",
+    "hashmap",
+    "bayan",
+    "tagged",
+    "fnptr",
+    "callback",
+    "bench",
+]
+
+# svara — human/formant vocal synthesis primitives. prani consumes svara's
+# GlottalSource / FormantFilter / VocalTract surface (tract.cyr, voice.cyr)
+# from the single monolithic dist bundle. The bundle references naad + hisab +
+# goonj + sakshi symbols, resolved from THIS manifest below.
+[deps.svara]
+git = "https://github.com/MacCracken/svara.git"
+tag = "3.0.0"
+modules = ["dist/svara.cyr"]
+
+# naad — audio synthesis primitives (noise / biquad / LFO). Referenced by
+# svara's bundle and available to prani's tract/voice DSP. Pinned to the tag
+# svara consumes, for a coherent bundle.
+[deps.naad]
+git = "https://github.com/MacCracken/naad.git"
+tag = "2.1.0"
+modules = ["dist/naad.cyr"]
+
+# hisab — math/geometry (HVec3/HComplex/FFT/ganita least-squares). Referenced
+# by svara + naad bundles. Pinned to the tag they consume.
+[deps.hisab]
+git = "https://github.com/MacCracken/hisab.git"
+tag = "2.6.7"
+modules = ["dist/hisab.cyr"]
+
+# goonj — acoustics engine. Referenced by naad's acoustics/* modules (present
+# in the monolithic bundle). Pulls sakshi + hisab transitively.
+[deps.goonj]
+git = "https://github.com/MacCracken/goonj.git"
+tag = "2.0.0"
+modules = ["dist/goonj.cyr"]
+
+# sakshi — structured logging. Arrives transitively via hisab/goonj/naad;
+# declared explicitly so the bundle's sakshi_* references resolve.
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+tag = "2.4.3"
+modules = ["dist/sakshi.cyr"]

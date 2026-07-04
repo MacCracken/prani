@@ -1,0 +1,207 @@
+# bridge.cyr -- science-crate bridge: pure value conversions.
+# Ports rust-old/src/bridge.rs. 13 stateless functions that convert bioacoustic
+# measurements + behavioral state into prani synthesis parameters. Consumers
+# (kiran, joshua) call these with primitive values, independent of which science
+# crates are in their dependency graph.
+#
+# Requires (in the build/test unit): vocalization.cyr (PRANI_INTENT_*) and
+# species.cyr (PRANI_SP_*) for the enum-returning mappers. The module file has no
+# `include` lines -- the entry orders the deps.
+#
+# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only).
+# Integer literals via f64_from(n); non-integer literals via the module-top
+# IEEE-754 hex constants below (decimals in comments). cbrt has no builtin, so
+# size_from_body_mass uses f64_pow(x, 1/3) (input is guaranteed positive there).
+#
+# The one tuple return in the oracle -- perturbation_from_urgency -> (f32, f32) --
+# becomes the PrPerturbation #derive(accessors) struct returned by pointer.
+
+# ================================================================
+# Non-integer parameter constants (IEEE-754 hex; decimals in comments).
+# ================================================================
+var PR_B_0_1     = 0x3fb999999999999a;   # 0.1   (min size scale)
+var PR_B_30_0    = 0x403e000000000000;   # 30.0  (reference mass, kg)
+var PR_B_1_3RD   = 0x3fd5555555555555;   # 0.333333333333... (1/3, cbrt exponent)
+var PR_B_0_03    = 0x3f9eb851eb851eb8;   # 0.03  (%/degC f0 sensitivity)
+var PR_B_100_0   = 0x4059000000000000;   # 100.0 (Hz-range scale factor)
+var PR_B_0_3     = 0x3fd3333333333333;   # 0.3   (arousal->breathiness slope)
+var PR_B_0_6     = 0x3fe3333333333333;   # 0.6   (threat->alarm cut)
+var PR_B_0_4     = 0x3fd999999999999a;   # 0.4   (threat->threat cut)
+var PR_B_0_0     = 0x0000000000000000;   # 0.0
+var PR_B_1_0     = 0x3ff0000000000000;   # 1.0
+var PR_B_10_0    = 0x4024000000000000;   # 10.0  (amplitude clamp ceiling / pow base)
+var PR_B_94_0    = 0x4057800000000000;   # 94.0  (reference SPL, dB)
+var PR_B_20_0    = 0x4034000000000000;   # 20.0  (dB->amp divisor; reference temp degC)
+var PR_B_0_8     = 0x3fe999999999999a;   # 0.8   (humidity-factor base)
+var PR_B_0_2     = 0x3fc999999999999a;   # 0.2   (humidity-factor span)
+var PR_B_40_0    = 0x4044000000000000;   # 40.0  (humidity knee %; Lombard baseline dB)
+var PR_B_0_005   = 0x3f747ae147ae147b;   # 0.005 (temp-factor slope; Lombard slope)
+var PR_B_0_5     = 0x3fe0000000000000;   # 0.5   (absorption low clamp; Lombard cap)
+var PR_B_2_0     = 0x4000000000000000;   # 2.0   (absorption high clamp)
+var PR_B_0_15    = 0x3fc3333333333333;   # 0.15  (valence->pitch slope)
+var PR_B_0_7     = 0x3fe6666666666666;   # 0.7   (pitch-scale low clamp)
+var PR_B_1_3     = 0x3ff4cccccccccccd;   # 1.3   (pitch-scale high clamp)
+var PR_B_3_0     = 0x4008000000000000;   # 3.0   (smoothstep coefficient)
+var PR_B_1_5     = 0x3ff8000000000000;   # 1.5   (jitter urgency slope)
+var PR_B_3000_0  = 0x40a7700000000000;   # 3000.0  (cricket f0 threshold)
+var PR_B_1000_0  = 0x408f400000000000;   # 1000.0  (songbird f0 threshold)
+var PR_B_500_0   = 0x407f400000000000;   # 500.0   (crow f0 threshold)
+var PR_B_200_0   = 0x4069000000000000;   # 200.0   (cat f0 threshold)
+
+# ---------------------------------------------------------------------------
+# Body-mass / allometry -> voice parameters
+# ---------------------------------------------------------------------------
+
+# bridge_size_from_body_mass -- size_from_body_mass. Allometric: vocal-tract
+# length scales with body_mass^(1/3), reference 30 kg (wolf-sized). Non-positive
+# mass -> min size scale 0.1. No f64_cbrt builtin; the >0 branch guarantees a
+# positive base so f64_pow(mass/30, 1/3) matches .cbrt() exactly there.
+#must_use
+fn bridge_size_from_body_mass(mass_kg) {
+    if (f64_le(mass_kg, PR_B_0_0) == 1) {
+        return PR_B_0_1;
+    }
+    return f64_pow(f64_div(mass_kg, PR_B_30_0), PR_B_1_3RD);
+}
+
+# bridge_f0_offset_from_temperature -- f0_offset_from_temperature. ~3% f0 change
+# per degC (ectotherm Q10 ~1.3), scaled to a Hz-range offset. delta = temp -
+# baseline; offset = delta * 0.03 * 100.0.
+#must_use
+fn bridge_f0_offset_from_temperature(temp_c, baseline_c) {
+    var delta = f64_sub(temp_c, baseline_c);
+    return f64_mul(f64_mul(delta, PR_B_0_03), PR_B_100_0);
+}
+
+# ---------------------------------------------------------------------------
+# Behavioral state -> call intent
+# ---------------------------------------------------------------------------
+
+# bridge_intent_from_threat_level -- intent_from_threat_level. Maps threat
+# (0.0-1.0) to the closest CallIntent via descending thresholds.
+#must_use
+fn bridge_intent_from_threat_level(threat) {
+    if (f64_ge(threat, PR_B_0_8) == 1) { return PRANI_INTENT_DISTRESS; }
+    if (f64_ge(threat, PR_B_0_6) == 1) { return PRANI_INTENT_ALARM; }
+    if (f64_ge(threat, PR_B_0_4) == 1) { return PRANI_INTENT_THREAT; }
+    if (f64_ge(threat, PR_B_0_2) == 1) { return PRANI_INTENT_TERRITORIAL; }
+    return PRANI_INTENT_IDLE;
+}
+
+# bridge_breathiness_from_arousal -- breathiness_from_arousal. Higher arousal ->
+# more breathiness (panting / stressed phonation). clamp(arousal * 0.3, 0, 1).
+#must_use
+fn bridge_breathiness_from_arousal(arousal) {
+    return f64_clamp(f64_mul(arousal, PR_B_0_3), PR_B_0_0, PR_B_1_0);
+}
+
+# ---------------------------------------------------------------------------
+# Acoustic environment -> spatial parameters
+# ---------------------------------------------------------------------------
+
+# bridge_amplitude_from_spl -- amplitude_from_spl. 94 dB SPL ~ 1.0 amplitude
+# (1 Pa RMS). amp = 10^((spl - 94)/20), clamped to [0, 10].
+#must_use
+fn bridge_amplitude_from_spl(spl_db) {
+    var diff = f64_sub(spl_db, PR_B_94_0);
+    var amp = f64_pow(PR_B_10_0, f64_div(diff, PR_B_20_0));
+    return f64_clamp(amp, PR_B_0_0, PR_B_10_0);
+}
+
+# bridge_absorption_factor -- absorption_factor. Simplified ISO 9613-1: HF
+# absorption decreases with humidity up to ~40% and rises with temperature.
+# humidity_factor = humidity < 40 ? 0.8 + (humidity/40)*0.2 : 1.0;
+# temp_factor = 1 + (temp - 20)*0.005; clamp(product, 0.5, 2.0).
+#must_use
+fn bridge_absorption_factor(humidity_pct, temp_c) {
+    var humidity_factor = PR_B_1_0;
+    if (f64_lt(humidity_pct, PR_B_40_0) == 1) {
+        humidity_factor = f64_add(PR_B_0_8,
+            f64_mul(f64_div(humidity_pct, PR_B_40_0), PR_B_0_2));
+    }
+    var temp_factor = f64_add(PR_B_1_0,
+        f64_mul(f64_sub(temp_c, PR_B_20_0), PR_B_0_005));
+    return f64_clamp(f64_mul(humidity_factor, temp_factor), PR_B_0_5, PR_B_2_0);
+}
+
+# ---------------------------------------------------------------------------
+# Wind / aerodynamics -> Doppler
+# ---------------------------------------------------------------------------
+
+# bridge_doppler_velocity_from_wind -- doppler_velocity_from_wind. Projects wind
+# onto the source-listener axis: wind_speed * cos(angle). angle 0 = toward
+# listener, pi = away.
+#must_use
+fn bridge_doppler_velocity_from_wind(wind_speed_ms, angle_rad) {
+    return f64_mul(wind_speed_ms, f64_cos(angle_rad));
+}
+
+# ---------------------------------------------------------------------------
+# RTPC-style continuous parameters (what game AI systems drive)
+# ---------------------------------------------------------------------------
+
+# bridge_pitch_scale_from_valence -- pitch_scale_from_valence. +-15% pitch shift
+# across the full valence range [-1, +1]. clamp(1 + valence*0.15, 0.7, 1.3).
+#must_use
+fn bridge_pitch_scale_from_valence(valence) {
+    return f64_clamp(f64_add(PR_B_1_0, f64_mul(valence, PR_B_0_15)), PR_B_0_7, PR_B_1_3);
+}
+
+# bridge_vocal_effort_from_arousal -- vocal_effort_from_arousal. Smoothstep of
+# clamped arousal: 3a^2 - 2a^3 (slow start, fast middle, plateau near 1.0).
+#must_use
+fn bridge_vocal_effort_from_arousal(arousal) {
+    var a = f64_clamp(arousal, PR_B_0_0, PR_B_1_0);
+    var aa = f64_mul(a, a);
+    var aaa = f64_mul(aa, a);
+    return f64_sub(f64_mul(PR_B_3_0, aa), f64_mul(PR_B_2_0, aaa));
+}
+
+# ================================================================
+# PrPerturbation -- (jitter_scale, shimmer_scale) tuple returned by
+# perturbation_from_urgency. Rust returned a bare (f32, f32); the port wraps it
+# in this 2-field struct returned by pointer.
+# ================================================================
+#derive(accessors)
+struct PrPerturbation { jitter_scale; shimmer_scale; }
+
+# bridge_perturbation_from_urgency -- perturbation_from_urgency. Maps urgency
+# (0.0-1.0) to jitter (1.0-2.5x) and shimmer (1.0-2.0x) scale factors: more
+# perturbation = more vocal instability under stress.
+#   jitter_scale  = 1 + u*1.5
+#   shimmer_scale = 1 + u*1.0
+#must_use
+fn bridge_perturbation_from_urgency(urgency) {
+    var u = f64_clamp(urgency, PR_B_0_0, PR_B_1_0);
+    var p = alloc(sizeof(PrPerturbation));
+    PrPerturbation_set_jitter_scale(p, f64_add(PR_B_1_0, f64_mul(u, PR_B_1_5)));
+    PrPerturbation_set_shimmer_scale(p, f64_add(PR_B_1_0, f64_mul(u, PR_B_1_0)));
+    return p;
+}
+
+# bridge_lombard_effort_boost -- lombard_effort_boost. Lombard effect: involuntary
+# vocal increase in noise. Baseline 40 dB SPL; below/at it -> 0. Above:
+# clamp((spl - 40) * 0.005, 0, 0.5) additive effort boost.
+#must_use
+fn bridge_lombard_effort_boost(ambient_spl_db) {
+    if (f64_le(ambient_spl_db, PR_B_40_0) == 1) {
+        return PR_B_0_0;
+    }
+    var excess = f64_sub(ambient_spl_db, PR_B_40_0);
+    return f64_clamp(f64_mul(excess, PR_B_0_005), PR_B_0_0, PR_B_0_5);
+}
+
+# bridge_species_from_f0 -- species_from_f0. Suggests the closest prani species
+# from a fundamental-frequency measurement via descending thresholds. f0 = 0 ->
+# Snake (noise-only).
+#must_use
+fn bridge_species_from_f0(f0_hz) {
+    if (f64_ge(f0_hz, PR_B_3000_0) == 1) { return PRANI_SP_CRICKET; }
+    if (f64_ge(f0_hz, PR_B_1000_0) == 1) { return PRANI_SP_SONGBIRD; }
+    if (f64_ge(f0_hz, PR_B_500_0) == 1)  { return PRANI_SP_CROW; }
+    if (f64_ge(f0_hz, PR_B_200_0) == 1)  { return PRANI_SP_CAT; }
+    if (f64_ge(f0_hz, PR_B_100_0) == 1)  { return PRANI_SP_WOLF; }
+    if (f64_ge(f0_hz, PR_B_40_0) == 1)   { return PRANI_SP_LION; }
+    if (f64_gt(f0_hz, PR_B_0_0) == 1)    { return PRANI_SP_CROCODILIAN; }
+    return PRANI_SP_SNAKE;
+}

@@ -1,0 +1,56 @@
+# rng.tcyr -- tests for src/rng.cyr (PCG32).
+# rust-old/src/rng.rs had no #[test] blocks. prani's PCG32 is bit-identical to
+# svara's (same multiplier + seeding sequence), so the golden next_u32 values
+# are the same real parity oracle svara uses. next_f32 is exact in f64
+# (integer * 2^-31), so its golden bit pattern is asserted exactly too;
+# determinism + range round out coverage.
+
+include "src/error.cyr"
+include "src/rng.cyr"
+
+alloc_init();
+
+# ================================================================
+test_group("next_u32 golden sequence (seed 42)");
+var r = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
+assert_eq(prani_rng_next_u32(r), 1085446021, "u32[0]");
+assert_eq(prani_rng_next_u32(r), 176895750,  "u32[1]");
+assert_eq(prani_rng_next_u32(r), 789123591,  "u32[2]");
+assert_eq(prani_rng_next_u32(r), 1684778745, "u32[3]");
+assert_eq(prani_rng_next_u32(r), 4229066268, "u32[4] (> 2^31, high-bit path)");
+assert_eq(prani_rng_next_u32(r), 1793278615, "u32[5]");
+
+# ================================================================
+test_group("next_u32 golden sequence (seed 7)");
+var r7 = prani_rng_new(7);
+assert_eq(prani_rng_next_u32(r7), 4046551126, "seed7 u32[0]");
+assert_eq(prani_rng_next_u32(r7), 168348581,  "seed7 u32[1]");
+assert_eq(prani_rng_next_u32(r7), 489822171,  "seed7 u32[2]");
+
+# ================================================================
+test_group("determinism");
+var a = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
+var b = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
+assert_eq(prani_rng_next_u32(a), prani_rng_next_u32(b), "same seed -> same u32[0]");
+assert_eq(prani_rng_next_u32(a), prani_rng_next_u32(b), "same seed -> same u32[1]");
+var c = prani_rng_new(99);
+assert_neq(prani_rng_next_u32(c), prani_rng_next_u32(a), "different seed -> different stream");
+
+# ================================================================
+test_group("next_f32 exact + range (seed 42)");
+var rf = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
+assert_eq(prani_rng_next_f32(rf), 0x3FD02CA5E1000000, "next_f32[0] == 0.2527250955 (exact f64)");
+assert_eq(prani_rng_next_f32(rf), 0x3FA5166E0C000000, "next_f32[1] == 0.0411867513 (exact f64)");
+# remaining draws must stay in [0.0, 1.0)
+var i = 0;
+var in_range = 1;
+while (i < 256) {
+    var v = prani_rng_next_f32(rf);
+    if (f64_lt(v, 0) == 1) { in_range = 0; }
+    if (f64_ge(v, F64_ONE) == 1) { in_range = 0; }
+    i = i + 1;
+}
+assert_eq(in_range, 1, "256 next_f32 draws all in [0.0, 1.0)");
+
+var rc = assert_summary();
+syscall(60, rc);

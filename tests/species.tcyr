@@ -1,0 +1,117 @@
+# species.tcyr -- tests for src/species.cyr.
+# rust-old/src/species.rs had no #[test] blocks; parity surface is the enum
+# discriminants, the per-species params() lookup, the precomputed resonance_seed
+# (f32-bit-pattern parity), the supports_vocalization() bioacoustic matrix, and
+# bout_template(). serde/Display tests dropped.
+#
+# sequence.cyr is included ONLY for the CallBout struct + sequence_call_bout_new
+# that species_bout_template uses. sequence's synthesize methods forward-reference
+# crvoice_* (voice.cyr, not included here) -- those are UNREACHABLE in this unit,
+# so undefined-fn WARNINGS for crvoice_* are EXPECTED and fine (not link errors).
+
+include "src/error.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+
+alloc_init();
+
+# ================================================================
+test_group("enum discriminants (declaration order)");
+assert_eq(PRANI_SP_WOLF, 0, "Wolf == 0");
+assert_eq(PRANI_SP_FANTASY, 12, "Fantasy == 12");
+assert_eq(PRANI_SP_COUNT, 13, "13 species");
+assert_eq(PRANI_APP_LARYNGEAL, 0, "Laryngeal == 0");
+assert_eq(PRANI_APP_NOISE_ONLY, 4, "NoiseOnly == 4");
+
+# ================================================================
+test_group("params -- Wolf (laryngeal, f0 150-1200/400, tilt -3)");
+var wolf = species_params(PRANI_SP_WOLF);
+assert_eq(SpeciesParams_apparatus(wolf), PRANI_APP_LARYNGEAL, "wolf laryngeal");
+assert_eq(SpeciesParams_f0_min(wolf), f64_from(150), "wolf f0_min 150");
+assert_eq(SpeciesParams_f0_max(wolf), f64_from(1200), "wolf f0_max 1200");
+assert_eq(SpeciesParams_f0_default(wolf), f64_from(400), "wolf f0_default 400");
+assert_eq(SpeciesParams_tract_scale(wolf), PR_TS_1_2, "wolf tract_scale 1.2");
+assert_eq(SpeciesParams_formant0(wolf), f64_from(420), "wolf F1 420");
+assert_eq(SpeciesParams_bandwidth2(wolf), f64_from(150), "wolf B3 150");
+assert_eq(SpeciesParams_breathiness(wolf), PR_BR_0_05, "wolf breathiness 0.05");
+assert_eq(SpeciesParams_spectral_tilt(wolf), f64_neg(f64_from(3)), "wolf tilt -3");
+
+# ================================================================
+test_group("params -- Lion (laryngeal, infrasonic f0 40-200/80, tilt -6)");
+var lion = species_params(PRANI_SP_LION);
+assert_eq(SpeciesParams_apparatus(lion), PRANI_APP_LARYNGEAL, "lion laryngeal");
+assert_eq(SpeciesParams_f0_min(lion), f64_from(40), "lion f0_min 40");
+assert_eq(SpeciesParams_f0_default(lion), f64_from(80), "lion f0_default 80");
+assert_eq(SpeciesParams_tract_scale(lion), f64_from(2), "lion tract_scale 2.0");
+assert_eq(SpeciesParams_formant0(lion), f64_from(250), "lion F1 250");
+assert_eq(SpeciesParams_breathiness(lion), PR_BR_0_1, "lion breathiness 0.1");
+assert_eq(SpeciesParams_spectral_tilt(lion), f64_neg(f64_from(6)), "lion tilt -6 (steep)");
+
+# ================================================================
+test_group("params -- Songbird (syringeal, high f0 1000-8000/3000, tilt -1)");
+var bird = species_params(PRANI_SP_SONGBIRD);
+assert_eq(SpeciesParams_apparatus(bird), PRANI_APP_SYRINGEAL, "songbird syringeal");
+assert_eq(SpeciesParams_f0_max(bird), f64_from(8000), "songbird f0_max 8000");
+assert_eq(SpeciesParams_f0_default(bird), f64_from(3000), "songbird f0_default 3000");
+assert_eq(SpeciesParams_tract_scale(bird), PR_TS_0_15, "songbird tract_scale 0.15");
+assert_eq(SpeciesParams_formant2(bird), f64_from(10500), "songbird F3 10500");
+assert_eq(SpeciesParams_bandwidth0(bird), f64_from(500), "songbird B1 500 (wide)");
+assert_eq(SpeciesParams_spectral_tilt(bird), f64_neg(f64_from(1)), "songbird tilt -1 (flat)");
+
+# ================================================================
+test_group("params -- Snake (noise-only, no f0, full breathiness)");
+var snake = species_params(PRANI_SP_SNAKE);
+assert_eq(SpeciesParams_apparatus(snake), PRANI_APP_NOISE_ONLY, "snake noise-only");
+assert_eq(SpeciesParams_f0_min(snake), f64_from(0), "snake f0_min 0");
+assert_eq(SpeciesParams_f0_default(snake), f64_from(0), "snake f0_default 0");
+assert_eq(SpeciesParams_tract_scale(snake), PR_TS_0_4, "snake tract_scale 0.4");
+assert_eq(SpeciesParams_breathiness(snake), f64_from(1), "snake breathiness 1.0 (full)");
+assert_eq(SpeciesParams_jitter(snake), f64_from(0), "snake jitter 0");
+assert_eq(SpeciesParams_spectral_tilt(snake), f64_from(0), "snake tilt 0 (neutral)");
+
+# ================================================================
+test_group("resonance_seed -- precomputed f32-bit-pattern parity");
+assert_eq(species_params_resonance_seed(species_params(PRANI_SP_WOLF)), PR_SEED_WOLF, "wolf seed");
+assert_eq(species_params_resonance_seed(wolf), 2180968338894094337, "wolf seed literal");
+assert_eq(species_params_resonance_seed(species_params(PRANI_SP_SONGBIRD)), 3639187878752649217, "songbird seed literal");
+assert_eq(species_params_resonance_seed(species_params(PRANI_SP_DOG)), (0 - 4557473707297210367), "dog seed literal (negative)");
+
+# ================================================================
+test_group("supports_vocalization matrix");
+# Snake (noise-only): hisses + growls, but cannot howl.
+assert_eq(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HISS), 1, "snake hisses");
+assert_eq(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_GROWL), 1, "snake growls");
+assert_eq(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HOWL), 0, "snake cannot howl");
+# Cricket (stridulatory): stridulates, but cannot roar.
+assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_STRIDULATE), 1, "cricket stridulates");
+assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_ROAR), 0, "cricket cannot roar");
+# Wolf (laryngeal): howls, but cannot buzz/stridulate.
+assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_HOWL), 1, "wolf howls");
+assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_BUZZ), 0, "wolf cannot buzz");
+assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_STRIDULATE), 0, "wolf cannot stridulate");
+# Bee (vibratile): buzz + chirp only.
+assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_BUZZ), 1, "bee buzzes");
+assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_HISS), 0, "bee cannot hiss");
+
+# ================================================================
+test_group("bout_template -- count / vocalization / intent");
+var wolf_bout = species_bout_template(PRANI_SP_WOLF);
+assert_eq(CallBout_vocalization(wolf_bout), PRANI_VOC_HOWL, "wolf bout howls");
+assert_eq(CallBout_count(wolf_bout), 3, "wolf bout count 3");
+assert_eq(CallBout_call_duration(wolf_bout), f64_from(3), "wolf bout call_duration 3.0");
+assert_eq(CallBout_intent(wolf_bout), PRANI_INTENT_SOCIAL, "wolf bout social");
+
+var dog_bout = species_bout_template(PRANI_SP_DOG);
+assert_eq(CallBout_vocalization(dog_bout), PRANI_VOC_BARK, "dog bout barks");
+assert_eq(CallBout_count(dog_bout), 5, "dog bout count 5");
+assert_eq(CallBout_call_duration(dog_bout), PR_DUR_0_15, "dog bout call_duration 0.15");
+assert_eq(CallBout_intent(dog_bout), PRANI_INTENT_ALARM, "dog bout alarm");
+
+var lion_bout = species_bout_template(PRANI_SP_LION);
+assert_eq(CallBout_vocalization(lion_bout), PRANI_VOC_ROAR, "lion bout roars");
+assert_eq(CallBout_count(lion_bout), 4, "lion bout count 4");
+assert_eq(CallBout_intent(lion_bout), PRANI_INTENT_TERRITORIAL, "lion bout territorial");
+
+var rc = assert_summary();
+syscall(60, rc);

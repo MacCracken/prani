@@ -1,0 +1,122 @@
+# sequence.tcyr -- tests for src/sequence.cyr.
+# Struct constructors/accessors + the full synthesize/chorus paths. The latter
+# route through the whole voice → tract → svara stack, so they were untestable
+# until voice.cyr landed; now included, they lock the bout/phrase/chorus
+# structure (call count + inter-call gaps, phrase gaps, chorus mix length +
+# error propagation). serde/Display tests dropped.
+#
+# Include order: sequence BEFORE species (species uses the CallBout struct);
+# voice AFTER sequence (sequence's synthesize forward-references crvoice_* —
+# Cyrius resolves forward refs across the unit).
+
+include "src/error.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+
+alloc_init();
+
+# ================================================================
+test_group("CallElement construction + accessors");
+var e = sequence_call_element_new(PRANI_VOC_CHIRP, F64_ONE, F64_HALF);
+assert_eq(CallElement_vocalization(e), PRANI_VOC_CHIRP, "element voc");
+assert_eq(CallElement_duration(e), F64_ONE, "element duration");
+assert_eq(CallElement_gap(e), F64_HALF, "element gap");
+
+# ================================================================
+test_group("CallBout construction + accessors");
+var b = sequence_call_bout_new(PRANI_VOC_HOWL, 3, f64_from(3), f64_from(2), PRANI_INTENT_SOCIAL);
+assert_eq(CallBout_vocalization(b), PRANI_VOC_HOWL, "bout voc");
+assert_eq(CallBout_count(b), 3, "bout count");
+assert_eq(CallBout_intent(b), PRANI_INTENT_SOCIAL, "bout intent");
+
+# ================================================================
+test_group("CallPhrase construction + accessors");
+var elems = vec_new();
+vec_push(elems, sequence_call_element_new(PRANI_VOC_CHIRP, F64_HALF, f64_from(0)));
+vec_push(elems, sequence_call_element_new(PRANI_VOC_TRILL, F64_ONE, F64_HALF));
+var p = sequence_call_phrase_new(elems, PRANI_INTENT_MATING);
+assert_eq(vec_len(CallPhrase_elements(p)), 2, "phrase has 2 elements");
+assert_eq(CallPhrase_intent(p), PRANI_INTENT_MATING, "phrase intent");
+
+# ================================================================
+# Full synthesize path: Wolf howl bout. Social intent (duration_scale 1.0), so
+# each call = f64_to(call_duration*sr) samples; a gap of f64_to(interval*sr)
+# separates each of the (count-1) inter-call boundaries.
+#   sr=8000, call_duration=0.05 -> 400 samples/call; interval=0.1 -> 800 gap.
+#   count=2 -> total = 2*400 + 1*800 = 1600.
+test_group("CallBout::synthesize -- Wolf howl (structure + finiteness)");
+var SR = f64_from(8000);
+var CALL_D = 0x3FA999999999999A;   # 0.05
+var GAP_I  = 0x3FB999999999999A;   # 0.1
+var wolf = crvoice_new(PRANI_SP_WOLF);
+var wbout = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+var bout_buf = sequence_call_bout_synthesize(wbout, wolf, SR);
+assert_eq(prani_is_err(bout_buf), 0, "bout synth is not an error");
+assert_eq(vec_len(bout_buf), 1600, "bout length = 2*400 + 800 gap");
+# all finite
+var i = 0;
+var all_finite = 1;
+while (i < vec_len(bout_buf)) {
+    if (prani_is_finite(vec_get(bout_buf, i)) == 0) { all_finite = 0; }
+    i = i + 1;
+}
+assert_eq(all_finite, 1, "all bout samples finite");
+
+# determinism: same bout + fresh voice -> identical length + first sample
+var wolf2 = crvoice_new(PRANI_SP_WOLF);
+var bout_buf2 = sequence_call_bout_synthesize(wbout, wolf2, SR);
+assert_eq(vec_len(bout_buf2), vec_len(bout_buf), "deterministic length");
+assert_eq(vec_get(bout_buf2, 200), vec_get(bout_buf, 200), "deterministic sample[200]");
+
+# ================================================================
+test_group("CallBout::synthesize -- error propagates (Snake cannot howl)");
+var snake = crvoice_new(PRANI_SP_SNAKE);
+var sbout = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+var serr = sequence_call_bout_synthesize(sbout, snake, SR);
+assert_eq(prani_is_err(serr), 1, "snake howl bout -> error");
+assert_eq(serr, PRANI_ERR_INVALID_VOCALIZATION, "-> INVALID_VOCALIZATION");
+
+# ================================================================
+# Phrase: two elements (howl 0.05s gap 0.1s, howl 0.05s gap 0.0s).
+#   each call 400 samples; gaps 800 + 0 -> total = 400+800 + 400+0 = 1600.
+test_group("CallPhrase::synthesize -- structure + finiteness");
+var pelems = vec_new();
+vec_push(pelems, sequence_call_element_new(PRANI_VOC_HOWL, CALL_D, GAP_I));
+vec_push(pelems, sequence_call_element_new(PRANI_VOC_HOWL, CALL_D, f64_from(0)));
+var phrase = sequence_call_phrase_new(pelems, PRANI_INTENT_SOCIAL);
+var wolf3 = crvoice_new(PRANI_SP_WOLF);
+var phrase_buf = sequence_call_phrase_synthesize(phrase, wolf3, SR);
+assert_eq(prani_is_err(phrase_buf), 0, "phrase synth not an error");
+assert_eq(vec_len(phrase_buf), 1600, "phrase length = (400+800)+(400+0)");
+
+# ================================================================
+# Chorus: 2 wolves, duration 0.05s, timing_spread 0.05s.
+#   base = f64_to(0.05*8000)=400; max_offset = f64_to(0.05*8000)=400.
+#   total_len = base + max_offset*2 = 400 + 800 = 1200.
+test_group("synthesize_chorus -- mix length + finiteness");
+var voices = vec_new();
+vec_push(voices, crvoice_new(PRANI_SP_WOLF));
+vec_push(voices, crvoice_new(PRANI_SP_WOLF));
+var chorus = sequence_synthesize_chorus(voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, CALL_D, CALL_D);
+assert_eq(prani_is_err(chorus), 0, "chorus not an error");
+assert_eq(vec_len(chorus), 1200, "chorus length = base 400 + 2*400 spread");
+var j = 0;
+var chorus_finite = 1;
+while (j < vec_len(chorus)) {
+    if (prani_is_finite(vec_get(chorus, j)) == 0) { chorus_finite = 0; }
+    j = j + 1;
+}
+assert_eq(chorus_finite, 1, "all chorus samples finite");
+
+# empty chorus early return
+var empty_chorus = sequence_synthesize_chorus(vec_new(), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, F64_ONE, F64_HALF);
+assert_eq(vec_len(empty_chorus), 0, "empty voices -> empty chorus");
+
+var rc = assert_summary();
+syscall(60, rc);

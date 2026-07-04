@@ -1,0 +1,72 @@
+# error.cyr -- prani error codes + shared DSP tolerances and base helpers.
+# L0 base module: included FIRST by every build/test entry. Modules never
+# `include` each other -- the entry file orders them.
+#
+# Ports rust-old/src/error.rs (the `PraniError` enum + `From<SvaraError>`).
+# Rust carried a String payload per variant; the Cyrius port uses integer
+# codes -- fallible functions return PRANI_ERR_NONE (0) on success or a
+# negative code on failure; diagnostic text via prani_err_name().
+#
+# NAMING: every prani top-level symbol is `prani_`/`PRANI_`/`Pr`-prefixed so
+# the prani distlib coexists with svara + naad bundles in one flat namespace
+# (svara exports svara_*, naad exports validate_*/flush_denormal/ERR_NONE).
+#
+# FLOATS: prani's Rust was f32; the Cyrius port is f64 throughout (svara/naad/
+# hisab are f64-only, widening is forced and improves precision). PRANI_EPSILON
+# preserves the f32::EPSILON (2^-23) tolerance the Rust tests used, promoted to
+# f64. Test tolerances loosened vs the f32 oracle where bit-exactness isn't
+# meaningful.
+
+# ================================================================
+# Error codes (was `enum PraniError`). One per Rust variant, in order.
+# ================================================================
+var PRANI_ERR_NONE                 = 0;
+var PRANI_ERR_INVALID_TRACT        = (0 - 1);   # vocal tract parameter out of range
+var PRANI_ERR_INVALID_VOCALIZATION = (0 - 2);   # vocalization parameter invalid
+var PRANI_ERR_INVALID_SPECIES      = (0 - 3);   # species configuration invalid
+var PRANI_ERR_SYNTHESIS_FAILED     = (0 - 4);   # a synthesis step failed
+var PRANI_ERR_SVARA                = (0 - 5);   # underlying svara operation failed
+
+# ================================================================
+# Shared f64 tolerances / sentinels (IEEE-754 bit patterns). Exported for
+# consumers (tract clamps, tests). PRANI_EPSILON = f32::EPSILON promoted.
+# ================================================================
+var PRANI_EPSILON = 0x3E80000000000000;   # f32::EPSILON = 2^-23 ~ 1.192e-7
+var PRANI_POS_INF = 0x7FF0000000000000;   # +inf
+var PRANI_NEG_INF = 0xFFF0000000000000;   # -inf
+
+# 1 if `code` is an error (negative), 0 otherwise.
+#must_use
+fn prani_is_err(code) {
+    if (code < 0) { return 1; }
+    return 0;
+}
+
+# Static name for an error code (diagnostics / logging).
+#must_use
+fn prani_err_name(code) {
+    if (code == PRANI_ERR_NONE) { return "none"; }
+    if (code == PRANI_ERR_INVALID_TRACT) { return "invalid tract parameter"; }
+    if (code == PRANI_ERR_INVALID_VOCALIZATION) { return "invalid vocalization"; }
+    if (code == PRANI_ERR_INVALID_SPECIES) { return "invalid species"; }
+    if (code == PRANI_ERR_SYNTHESIS_FAILED) { return "synthesis failed"; }
+    if (code == PRANI_ERR_SVARA) { return "svara error"; }
+    return "unknown error";
+}
+
+# Map a svara error code (svara's own SVARA_ERR_* are negative) to
+# PRANI_ERR_SVARA. Ports `impl From<svara::error::SvaraError> for PraniError`.
+# Any nonzero svara code becomes the wrapping prani code; 0 (none) passes.
+#must_use
+fn prani_from_svara(svara_code) {
+    if (svara_code == 0) { return PRANI_ERR_NONE; }
+    return PRANI_ERR_SVARA;
+}
+
+# Finite test: 1 iff x is neither +/-inf nor NaN. abs(x) < +inf holds for
+# finite x, fails for infinities (inf < inf is false) and NaN (any NaN
+# compare is false). Mirrors Rust `f32::is_finite`.
+#must_use
+fn prani_is_finite(x) {
+    return f64_lt(f64_abs(x), PRANI_POS_INF);
+}

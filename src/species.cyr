@@ -1,0 +1,364 @@
+# species.cyr -- creature species definitions + per-species vocal parameters.
+# Ports rust-old/src/species.rs. Two enums (Species, VocalApparatus) -> integer
+# constants, the SpeciesParams struct, the big per-species params() lookup, the
+# supports_vocalization() bioacoustic gate, and bout_template() (a CallBout per
+# species). No serde (round-trip tests dropped); integer codes throughout.
+#
+# Requires (in the build/test unit): vocalization.cyr (PRANI_VOC_*/PRANI_INTENT_*)
+# and sequence.cyr (CallBout struct + sequence_call_bout_new). The module file
+# has no `include` lines -- the entry orders the deps.
+#
+# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only).
+# Integer-valued params via f64_from(n) (negatives via f64_neg(f64_from(n)));
+# non-integer params via module-top IEEE-754 hex constants (decimals in comments),
+# one constant per distinct value.
+#
+# RESONANCE_SEED PARITY (critical): the Rust SpeciesParams::resonance_seed() hashes
+# the *f32 bit patterns* of f0_default and tract_scale. Recomputing it from the
+# widened f64 fields would use the wrong bits, so the 13 seeds are PRECOMPUTED with
+# exact f32 semantics and stored in each species' resonance_seed field. The seeds
+# were verified against the oracle's hash (f0_default.to_bits() as u64) ^
+# ((tract_scale.to_bits() as u64) << 32), then *6364136223846793005 +1, wrapping.
+
+# ================================================================
+# Species -- creature species (was `enum Species`, 13 variants). Discriminant ==
+# declaration order (0-based), matching Rust's default enum layout.
+# ================================================================
+var PRANI_SP_WOLF        = 0;    # long howls, barks, growls, whines. f0 150-1200
+var PRANI_SP_DOG         = 1;    # barks, whines, growls, yelps. f0 100-2000
+var PRANI_SP_CAT         = 2;    # meow, purr, hiss, yowl. f0 200-1000
+var PRANI_SP_LION        = 3;    # roar, growl, grunt. f0 40-200 (infrasonic capable)
+var PRANI_SP_SONGBIRD    = 4;    # chirps, trills, warbles. f0 1000-8000 (syrinx)
+var PRANI_SP_CROW        = 5;    # caw, croak, rattle. f0 500-2000
+var PRANI_SP_RAPTOR      = 6;    # screech, kee. f0 2000-4000
+var PRANI_SP_SNAKE       = 7;    # hiss (noise-based, no vocal folds). No f0
+var PRANI_SP_CROCODILIAN = 8;    # bellow, hiss, growl. f0 30-200
+var PRANI_SP_CRICKET     = 9;    # chirp via stridulation. f0 3000-8000
+var PRANI_SP_BEE         = 10;   # buzz via wing vibration. f0 200-500
+var PRANI_SP_DRAGON      = 11;   # roar with subharmonics, fire-breath noise
+var PRANI_SP_FANTASY     = 12;   # generic fantasy creature (configurable)
+
+var PRANI_SP_COUNT = 13;         # number of Species variants
+
+# ================================================================
+# VocalApparatus -- excitation model (was `enum VocalApparatus`, 5 variants).
+# Discriminant == declaration order (0-based).
+# ================================================================
+var PRANI_APP_LARYNGEAL    = 0;   # larynx w/ vocal folds (mammals, reptiles)
+var PRANI_APP_SYRINGEAL    = 1;   # syrinx (birds), dual-source, higher f0
+var PRANI_APP_STRIDULATORY = 2;   # stridulation (insects), friction-based
+var PRANI_APP_VIBRATILE    = 3;   # vibratile (bees, flies), wing vibration
+var PRANI_APP_NOISE_ONLY   = 4;   # noise-only (snakes), no periodic source
+
+# ================================================================
+# Non-integer parameter constants (IEEE-754 hex; decimals in comments). One
+# constant per distinct value; shared across species where equal.
+# ================================================================
+# tract_scale
+var PR_TS_1_2  = 0x3ff3333333333333;   # 1.2
+var PR_TS_0_9  = 0x3feccccccccccccd;   # 0.9
+var PR_TS_0_5  = 0x3fe0000000000000;   # 0.5
+var PR_TS_0_15 = 0x3fc3333333333333;   # 0.15
+var PR_TS_0_3  = 0x3fd3333333333333;   # 0.3
+var PR_TS_0_2  = 0x3fc999999999999a;   # 0.2
+var PR_TS_0_4  = 0x3fd999999999999a;   # 0.4
+var PR_TS_2_5  = 0x4004000000000000;   # 2.5
+var PR_TS_0_05 = 0x3fa999999999999a;   # 0.05
+var PR_TS_0_03 = 0x3f9eb851eb851eb8;   # 0.03
+
+# breathiness
+var PR_BR_0_05 = 0x3fa999999999999a;   # 0.05
+var PR_BR_0_03 = 0x3f9eb851eb851eb8;   # 0.03
+var PR_BR_0_08 = 0x3fb47ae147ae147b;   # 0.08
+var PR_BR_0_1  = 0x3fb999999999999a;   # 0.1
+var PR_BR_0_02 = 0x3f947ae147ae147b;   # 0.02
+var PR_BR_0_18 = 0x3fc70a3d70a3d70a;   # 0.18
+var PR_BR_0_15 = 0x3fc3333333333333;   # 0.15
+var PR_BR_0_2  = 0x3fc999999999999a;   # 0.2
+
+# jitter
+var PR_JI_0_015 = 0x3f8eb851eb851eb8;   # 0.015
+var PR_JI_0_012 = 0x3f889374bc6a7efa;   # 0.012
+var PR_JI_0_02  = 0x3f947ae147ae147b;   # 0.02
+var PR_JI_0_025 = 0x3f9999999999999a;   # 0.025
+var PR_JI_0_005 = 0x3f747ae147ae147b;   # 0.005
+var PR_JI_0_03  = 0x3f9eb851eb851eb8;   # 0.03
+var PR_JI_0_01  = 0x3f847ae147ae147b;   # 0.01
+var PR_JI_0_002 = 0x3f60624dd2f1a9fc;   # 0.002
+var PR_JI_0_001 = 0x3f50624dd2f1a9fc;   # 0.001
+var PR_JI_0_04  = 0x3fa47ae147ae147b;   # 0.04
+
+# shimmer
+var PR_SH_0_03  = 0x3f9eb851eb851eb8;   # 0.03
+var PR_SH_0_025 = 0x3f9999999999999a;   # 0.025
+var PR_SH_0_04  = 0x3fa47ae147ae147b;   # 0.04
+var PR_SH_0_05  = 0x3fa999999999999a;   # 0.05
+var PR_SH_0_01  = 0x3f847ae147ae147b;   # 0.01
+var PR_SH_0_02  = 0x3f947ae147ae147b;   # 0.02
+var PR_SH_0_06  = 0x3faeb851eb851eb8;   # 0.06
+var PR_SH_0_005 = 0x3f747ae147ae147b;   # 0.005
+var PR_SH_0_003 = 0x3f689374bc6a7efa;   # 0.003
+var PR_SH_0_08  = 0x3fb47ae147ae147b;   # 0.08
+
+# spectral_tilt (only -1.5 is non-integer; others via f64_neg(f64_from(n)))
+var PR_TILT_NEG_1_5 = 0xbff8000000000000;   # -1.5
+
+# bout call_duration / interval (non-integer values)
+var PR_DUR_0_15 = 0x3fc3333333333333;   # 0.15
+var PR_DUR_0_25 = 0x3fd0000000000000;   # 0.25
+var PR_DUR_0_6  = 0x3fe3333333333333;   # 0.6
+var PR_DUR_0_3  = 0x3fd3333333333333;   # 0.3
+var PR_DUR_0_2  = 0x3fc999999999999a;   # 0.2
+var PR_DUR_0_8  = 0x3fe999999999999a;   # 0.8
+var PR_DUR_0_5  = 0x3fe0000000000000;   # 0.5
+var PR_DUR_1_5  = 0x3ff8000000000000;   # 1.5
+
+# ================================================================
+# Precomputed resonance seeds (i64) -- see the RESONANCE_SEED note at file top.
+# Each is hash(f32_bits(f0_default) ^ (f32_bits(tract_scale) << 32)) under the
+# oracle's PCG-style mix; stored as the exact seed for that species.
+# ================================================================
+var PR_SEED_WOLF        = 2180968338894094337;
+var PR_SEED_DOG         = (0 - 4557473707297210367);
+var PR_SEED_CAT         = 7081886529608613889;
+var PR_SEED_LION        = (0 - 8498740852407926783);
+var PR_SEED_SONGBIRD    = 3639187878752649217;
+var PR_SEED_CROW        = 570450708879900673;
+var PR_SEED_RAPTOR      = (0 - 8931005506639151103);
+var PR_SEED_SNAKE       = (0 - 5554430339172007935);
+var PR_SEED_CROCODILIAN = (0 - 6399601664865599487);
+var PR_SEED_CRICKET     = (0 - 1841638068586012671);
+var PR_SEED_BEE         = 4722345285137596417;
+var PR_SEED_DRAGON      = 4739032052804616193;
+var PR_SEED_FANTASY     = 3551275586278653953;
+
+# ================================================================
+# SpeciesParams -- species-specific vocal parameters. The Rust `formants: [f32;3]`
+# and `bandwidths: [f32;3]` fixed arrays become the three formant0..2 /
+# bandwidth0..2 scalar fields (direct parity with the fixed arrays).
+#   apparatus     : PRANI_APP_* constant
+#   f0_min/max/default : fundamental frequency range (Hz)
+#   tract_scale   : vocal-tract length scaling (1.0 = human male reference)
+#   formant0..2   : formant frequencies F1-F3 (Hz)
+#   bandwidth0..2 : formant bandwidths B1-B3 (Hz)
+#   breathiness   : default breathiness (0..1)
+#   jitter        : default jitter (0..0.05)
+#   shimmer       : default shimmer (0..0.1)
+#   spectral_tilt : spectral tilt in dB/octave (negative = darker)
+#   resonance_seed: precomputed deterministic seed (f32-bit-pattern parity)
+# ================================================================
+#derive(accessors)
+struct SpeciesParams {
+    apparatus;
+    f0_min; f0_max; f0_default;
+    tract_scale;
+    formant0; formant1; formant2;
+    bandwidth0; bandwidth1; bandwidth2;
+    breathiness; jitter; shimmer;
+    spectral_tilt;
+    resonance_seed;
+}
+
+# Internal builder -- fills every field in declaration order.
+#must_use
+fn species_params_make(apparatus, f0_min, f0_max, f0_default, tract_scale,
+    formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
+    breathiness, jitter, shimmer, spectral_tilt, resonance_seed) {
+    var p = alloc(sizeof(SpeciesParams));
+    SpeciesParams_set_apparatus(p, apparatus);
+    SpeciesParams_set_f0_min(p, f0_min);
+    SpeciesParams_set_f0_max(p, f0_max);
+    SpeciesParams_set_f0_default(p, f0_default);
+    SpeciesParams_set_tract_scale(p, tract_scale);
+    SpeciesParams_set_formant0(p, formant0);
+    SpeciesParams_set_formant1(p, formant1);
+    SpeciesParams_set_formant2(p, formant2);
+    SpeciesParams_set_bandwidth0(p, bandwidth0);
+    SpeciesParams_set_bandwidth1(p, bandwidth1);
+    SpeciesParams_set_bandwidth2(p, bandwidth2);
+    SpeciesParams_set_breathiness(p, breathiness);
+    SpeciesParams_set_jitter(p, jitter);
+    SpeciesParams_set_shimmer(p, shimmer);
+    SpeciesParams_set_spectral_tilt(p, spectral_tilt);
+    SpeciesParams_set_resonance_seed(p, resonance_seed);
+    return p;
+}
+
+# species_params -- Species::params(). The big per-species lookup, transcribed
+# verbatim from the oracle match arms. Integer params via f64_from; non-integer
+# via the hex constants above; negative integer tilts via f64_neg(f64_from(n)).
+#must_use
+fn species_params(species) {
+    if (species == PRANI_SP_WOLF) {
+        return species_params_make(PRANI_APP_LARYNGEAL,
+            f64_from(150), f64_from(1200), f64_from(400), PR_TS_1_2,
+            f64_from(420), f64_from(1250), f64_from(2100),
+            f64_from(100), f64_from(120), f64_from(150),
+            PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_WOLF);
+    }
+    if (species == PRANI_SP_DOG) {
+        return species_params_make(PRANI_APP_LARYNGEAL,
+            f64_from(100), f64_from(2000), f64_from(300), PR_TS_0_9,
+            f64_from(550), f64_from(1650), f64_from(2750),
+            f64_from(100), f64_from(130), f64_from(160),
+            PR_BR_0_03, PR_JI_0_012, PR_SH_0_025, f64_neg(f64_from(2)), PR_SEED_DOG);
+    }
+    if (species == PRANI_SP_CAT) {
+        return species_params_make(PRANI_APP_LARYNGEAL,
+            f64_from(200), f64_from(1000), f64_from(500), PR_TS_0_5,
+            f64_from(850), f64_from(2500), f64_from(4200),
+            f64_from(120), f64_from(150), f64_from(200),
+            PR_BR_0_08, PR_JI_0_02, PR_SH_0_04, f64_neg(f64_from(2)), PR_SEED_CAT);
+    }
+    if (species == PRANI_SP_LION) {
+        return species_params_make(PRANI_APP_LARYNGEAL,
+            f64_from(40), f64_from(200), f64_from(80), f64_from(2),
+            f64_from(250), f64_from(750), f64_from(1250),
+            f64_from(80), f64_from(100), f64_from(130),
+            PR_BR_0_1, PR_JI_0_025, PR_SH_0_05, f64_neg(f64_from(6)), PR_SEED_LION);
+    }
+    if (species == PRANI_SP_SONGBIRD) {
+        return species_params_make(PRANI_APP_SYRINGEAL,
+            f64_from(1000), f64_from(8000), f64_from(3000), PR_TS_0_15,
+            f64_from(3500), f64_from(7000), f64_from(10500),
+            f64_from(500), f64_from(800), f64_from(1100),
+            PR_BR_0_02, PR_JI_0_005, PR_SH_0_01, f64_neg(f64_from(1)), PR_SEED_SONGBIRD);
+    }
+    if (species == PRANI_SP_CROW) {
+        return species_params_make(PRANI_APP_SYRINGEAL,
+            f64_from(500), f64_from(2000), f64_from(800), PR_TS_0_3,
+            f64_from(1400), f64_from(4200), f64_from(7000),
+            f64_from(350), f64_from(500), f64_from(700),
+            PR_BR_0_18, PR_JI_0_03, PR_SH_0_05, f64_neg(f64_from(2)), PR_SEED_CROW);
+    }
+    if (species == PRANI_SP_RAPTOR) {
+        return species_params_make(PRANI_APP_SYRINGEAL,
+            f64_from(2000), f64_from(4000), f64_from(2500), PR_TS_0_2,
+            f64_from(2100), f64_from(5500), f64_from(8500),
+            f64_from(400), f64_from(600), f64_from(800),
+            PR_BR_0_1, PR_JI_0_01, PR_SH_0_02, PR_TILT_NEG_1_5, PR_SEED_RAPTOR);
+    }
+    if (species == PRANI_SP_SNAKE) {
+        return species_params_make(PRANI_APP_NOISE_ONLY,
+            f64_from(0), f64_from(0), f64_from(0), PR_TS_0_4,
+            f64_from(2500), f64_from(5000), f64_from(8000),
+            f64_from(1500), f64_from(2000), f64_from(2500),
+            f64_from(1), f64_from(0), f64_from(0), f64_from(0), PR_SEED_SNAKE);
+    }
+    if (species == PRANI_SP_CROCODILIAN) {
+        return species_params_make(PRANI_APP_LARYNGEAL,
+            f64_from(30), f64_from(200), f64_from(60), PR_TS_2_5,
+            f64_from(200), f64_from(600), f64_from(1000),
+            f64_from(70), f64_from(90), f64_from(120),
+            PR_BR_0_15, PR_JI_0_03, PR_SH_0_06, f64_neg(f64_from(5)), PR_SEED_CROCODILIAN);
+    }
+    if (species == PRANI_SP_CRICKET) {
+        return species_params_make(PRANI_APP_STRIDULATORY,
+            f64_from(3000), f64_from(8000), f64_from(4500), PR_TS_0_05,
+            f64_from(4500), f64_from(9000), f64_from(13500),
+            f64_from(500), f64_from(800), f64_from(1000),
+            f64_from(0), PR_JI_0_002, PR_SH_0_005, f64_neg(f64_from(1)), PR_SEED_CRICKET);
+    }
+    if (species == PRANI_SP_BEE) {
+        return species_params_make(PRANI_APP_VIBRATILE,
+            f64_from(200), f64_from(500), f64_from(300), PR_TS_0_03,
+            f64_from(300), f64_from(600), f64_from(900),
+            f64_from(100), f64_from(200), f64_from(300),
+            f64_from(0), PR_JI_0_001, PR_SH_0_003, f64_neg(f64_from(1)), PR_SEED_BEE);
+    }
+    if (species == PRANI_SP_DRAGON) {
+        return species_params_make(PRANI_APP_LARYNGEAL,
+            f64_from(30), f64_from(500), f64_from(70), f64_from(3),
+            f64_from(170), f64_from(500), f64_from(850),
+            f64_from(60), f64_from(80), f64_from(110),
+            PR_BR_0_2, PR_JI_0_04, PR_SH_0_08, f64_neg(f64_from(4)), PR_SEED_DRAGON);
+    }
+    # PRANI_SP_FANTASY (default / fallthrough -- preserves totality since the
+    # Rust enum is #[non_exhaustive]; every valid species maps above).
+    return species_params_make(PRANI_APP_LARYNGEAL,
+        f64_from(50), f64_from(2000), f64_from(200), f64_from(1),
+        f64_from(500), f64_from(1500), f64_from(2500),
+        f64_from(80), f64_from(100), f64_from(130),
+        PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_FANTASY);
+}
+
+# species_params_resonance_seed -- SpeciesParams::resonance_seed(). Returns the
+# precomputed f32-parity seed stored at construction (NOT recomputed from the
+# widened f64 fields, which would hash the wrong bit pattern).
+#must_use
+fn species_params_resonance_seed(params) {
+    return SpeciesParams_resonance_seed(params);
+}
+
+# species_supports_vocalization -- Species::supports_vocalization(). Bioacoustic
+# gate: some (species, vocalization) pairs are invalid (a snake cannot howl, a
+# cricket cannot roar). Dispatches on the species' apparatus. Returns 1/0.
+#must_use
+fn species_supports_vocalization(species, voc) {
+    var apparatus = SpeciesParams_apparatus(species_params(species));
+    if (apparatus == PRANI_APP_NOISE_ONLY) {
+        if (voc == PRANI_VOC_HISS) { return 1; }
+        if (voc == PRANI_VOC_GROWL) { return 1; }
+        return 0;
+    }
+    if (apparatus == PRANI_APP_STRIDULATORY) {
+        if (voc == PRANI_VOC_STRIDULATE) { return 1; }
+        if (voc == PRANI_VOC_BUZZ) { return 1; }
+        if (voc == PRANI_VOC_CHIRP) { return 1; }
+        return 0;
+    }
+    if (apparatus == PRANI_APP_VIBRATILE) {
+        if (voc == PRANI_VOC_BUZZ) { return 1; }
+        if (voc == PRANI_VOC_CHIRP) { return 1; }
+        return 0;
+    }
+    # Laryngeal / Syringeal: most things EXCEPT stridulate/buzz.
+    if (voc == PRANI_VOC_STRIDULATE) { return 0; }
+    if (voc == PRANI_VOC_BUZZ) { return 0; }
+    return 1;
+}
+
+# species_bout_template -- Species::bout_template(). A characteristic calling
+# pattern per species: (vocalization, count, call_duration, interval, intent),
+# verbatim from the oracle match arms, built via sequence_call_bout_new.
+#must_use
+fn species_bout_template(species) {
+    if (species == PRANI_SP_WOLF) {
+        return sequence_call_bout_new(PRANI_VOC_HOWL, 3, f64_from(3), f64_from(2), PRANI_INTENT_SOCIAL);
+    }
+    if (species == PRANI_SP_DOG) {
+        return sequence_call_bout_new(PRANI_VOC_BARK, 5, PR_DUR_0_15, PR_DUR_0_25, PRANI_INTENT_ALARM);
+    }
+    if (species == PRANI_SP_CAT) {
+        return sequence_call_bout_new(PRANI_VOC_HOWL, 2, PR_DUR_0_6, f64_from(1), PRANI_INTENT_SOCIAL);
+    }
+    if (species == PRANI_SP_LION) {
+        return sequence_call_bout_new(PRANI_VOC_ROAR, 4, f64_from(2), PR_DUR_1_5, PRANI_INTENT_TERRITORIAL);
+    }
+    if (species == PRANI_SP_SONGBIRD) {
+        return sequence_call_bout_new(PRANI_VOC_TRILL, 6, PR_DUR_0_3, PR_DUR_0_15, PRANI_INTENT_MATING);
+    }
+    if (species == PRANI_SP_CROW) {
+        return sequence_call_bout_new(PRANI_VOC_SCREECH, 4, PR_DUR_0_2, PR_DUR_0_3, PRANI_INTENT_ALARM);
+    }
+    if (species == PRANI_SP_RAPTOR) {
+        return sequence_call_bout_new(PRANI_VOC_SCREECH, 2, PR_DUR_0_8, PR_DUR_1_5, PRANI_INTENT_TERRITORIAL);
+    }
+    if (species == PRANI_SP_SNAKE) {
+        return sequence_call_bout_new(PRANI_VOC_HISS, 1, PR_DUR_1_5, f64_from(0), PRANI_INTENT_THREAT);
+    }
+    if (species == PRANI_SP_CROCODILIAN) {
+        return sequence_call_bout_new(PRANI_VOC_RUMBLE, 3, PR_TS_2_5, f64_from(2), PRANI_INTENT_TERRITORIAL);
+    }
+    if (species == PRANI_SP_CRICKET) {
+        return sequence_call_bout_new(PRANI_VOC_STRIDULATE, 8, PR_DUR_0_5, PR_DUR_0_3, PRANI_INTENT_MATING);
+    }
+    if (species == PRANI_SP_BEE) {
+        return sequence_call_bout_new(PRANI_VOC_BUZZ, 1, f64_from(2), f64_from(0), PRANI_INTENT_IDLE);
+    }
+    if (species == PRANI_SP_DRAGON) {
+        return sequence_call_bout_new(PRANI_VOC_ROAR, 2, f64_from(3), f64_from(2), PRANI_INTENT_THREAT);
+    }
+    # PRANI_SP_FANTASY (default / fallthrough).
+    return sequence_call_bout_new(PRANI_VOC_GROWL, 3, f64_from(1), f64_from(1), PRANI_INTENT_IDLE);
+}

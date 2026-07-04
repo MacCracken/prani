@@ -1,0 +1,176 @@
+# sequence.cyr -- call sequencing: bouts, phrases, and chorus synthesis.
+# Ports rust-old/src/sequence.rs. Higher-level patterns above individual
+# vocalizations: repeated call bouts, ordered phrases, and multi-voice chorus.
+#
+# Defines the CallElement / CallBout / CallPhrase data structs. species.cyr's
+# bout_template constructs a CallBout, so this module's structs must be present
+# in species' test unit (species does NOT call the synthesize methods, so their
+# forward references to crvoice_* are unreachable there = warnings only).
+#
+# Requires (in the build/test unit): error.cyr (PRANI_ERR_*, prani_is_err),
+# rng.cyr (prani_rng_*), and -- for the synthesize methods only -- voice.cyr
+# (crvoice_vocalize_with_intent). The module file has no `include` lines.
+#
+# RESULT convention: synthesize* return a heap vec pointer on success or a
+# negative PRANI_ERR_* on failure (propagated from crvoice_vocalize_with_intent).
+# Callers check prani_is_err(result). serde/Display tests dropped (no serde).
+
+var PRANI_CHORUS_PRIME = 7919;   # seed multiplier for chorus RNG (voices.len * 7919)
+
+# ================================================================
+# CallElement -- one element in a phrase.
+#   vocalization : PRANI_VOC_* constant
+#   duration     : f64 seconds
+#   gap          : f64 seconds of silence after this call
+# ================================================================
+#derive(accessors)
+struct CallElement { vocalization; duration; gap; }
+
+#must_use
+fn sequence_call_element_new(vocalization, duration, gap) {
+    var e = alloc(sizeof(CallElement));
+    CallElement_set_vocalization(e, vocalization);
+    CallElement_set_duration(e, duration);
+    CallElement_set_gap(e, gap);
+    return e;
+}
+
+# ================================================================
+# CallBout -- repeated instances of the same vocalization.
+#   vocalization  : PRANI_VOC_* constant
+#   count         : u32 repetitions
+#   call_duration : f64 seconds per call
+#   interval      : f64 inter-call interval (seconds)
+#   intent        : PRANI_INTENT_* constant
+# ================================================================
+#derive(accessors)
+struct CallBout { vocalization; count; call_duration; interval; intent; }
+
+#must_use
+fn sequence_call_bout_new(vocalization, count, call_duration, interval, intent) {
+    var b = alloc(sizeof(CallBout));
+    CallBout_set_vocalization(b, vocalization);
+    CallBout_set_count(b, count);
+    CallBout_set_call_duration(b, call_duration);
+    CallBout_set_interval(b, interval);
+    CallBout_set_intent(b, intent);
+    return b;
+}
+
+# CallBout::synthesize -- render the whole bout to one buffer. For each of
+# `count` calls: synthesize via the voice, then (except after the last) append
+# `interval * sample_rate` samples of silence. Returns a vec or a negative error.
+fn sequence_call_bout_synthesize(self, voice, sample_rate) {
+    var gap_samples = f64_to(f64_mul(CallBout_interval(self), sample_rate));
+    var output = vec_new();
+    var count = CallBout_count(self);
+    var i = 0;
+    while (i < count) {
+        var call = crvoice_vocalize_with_intent(voice, CallBout_vocalization(self),
+            CallBout_intent(self), sample_rate, CallBout_call_duration(self));
+        if (prani_is_err(call) == 1) { return call; }
+        var m = vec_len(call);
+        var k = 0;
+        while (k < m) { vec_push(output, vec_get(call, k)); k = k + 1; }
+        if (i < (count - 1)) {
+            var g = 0;
+            while (g < gap_samples) { vec_push(output, 0); g = g + 1; }
+        }
+        i = i + 1;
+    }
+    return output;
+}
+
+# ================================================================
+# CallPhrase -- ordered sequence of different vocalizations.
+#   elements : vec of CallElement pointers
+#   intent   : PRANI_INTENT_* applied to all elements
+# ================================================================
+#derive(accessors)
+struct CallPhrase { elements; intent; }
+
+#must_use
+fn sequence_call_phrase_new(elements, intent) {
+    var p = alloc(sizeof(CallPhrase));
+    CallPhrase_set_elements(p, elements);
+    CallPhrase_set_intent(p, intent);
+    return p;
+}
+
+# CallPhrase::synthesize -- render each element then append `gap * sr` silence.
+# Returns a vec or a negative error.
+fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
+    var output = vec_new();
+    var elements = CallPhrase_elements(self);
+    var n = vec_len(elements);
+    var i = 0;
+    while (i < n) {
+        var element = vec_get(elements, i);
+        var call = crvoice_vocalize_with_intent(voice, CallElement_vocalization(element),
+            CallPhrase_intent(self), sample_rate, CallElement_duration(element));
+        if (prani_is_err(call) == 1) { return call; }
+        var m = vec_len(call);
+        var k = 0;
+        while (k < m) { vec_push(output, vec_get(call, k)); k = k + 1; }
+        var gap_samples = f64_to(f64_mul(CallElement_gap(element), sample_rate));
+        var g = 0;
+        while (g < gap_samples) { vec_push(output, 0); g = g + 1; }
+        i = i + 1;
+    }
+    return output;
+}
+
+# ================================================================
+# synthesize_chorus -- multiple voices with timing variation, summed and
+# normalized. `voices` is a vec of CreatureVoice pointers. Returns a vec or a
+# negative error (empty vec if `voices` is empty).
+# ================================================================
+fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duration, timing_spread) {
+    var voice_count = vec_len(voices);
+    if (voice_count == 0) { return vec_new(); }
+
+    var max_offset_samples = f64_to(f64_mul(timing_spread, sample_rate));
+    var base_samples = f64_to(f64_mul(duration, sample_rate));
+    # total length includes the spread for late-starting voices
+    var total_len = base_samples + max_offset_samples * 2;
+
+    # mix = vec of total_len zeros
+    var mix = vec_new();
+    var z = 0;
+    while (z < total_len) { vec_push(mix, 0); z = z + 1; }
+
+    var rng = prani_rng_new(voice_count * PRANI_CHORUS_PRIME);
+
+    # modulo divisor: max(max_offset_samples, 1) * 2
+    var mo = max_offset_samples;
+    if (mo < 1) { mo = 1; }
+    var divisor = mo * 2;
+
+    var vi = 0;
+    while (vi < voice_count) {
+        var voice = vec_get(voices, vi);
+        var call = crvoice_vocalize_with_intent(voice, vocalization, intent, sample_rate, duration);
+        if (prani_is_err(call) == 1) { return call; }
+        # random offset within timing_spread
+        var offset = prani_rng_next_u32(rng) % divisor;
+        var m = vec_len(call);
+        var i = 0;
+        while (i < m) {
+            var idx = offset + i;
+            if (idx < total_len) {
+                vec_set(mix, idx, f64_add(vec_get(mix, idx), vec_get(call, i)));
+            }
+            i = i + 1;
+        }
+        vi = vi + 1;
+    }
+
+    # normalize by 1/sqrt(voice_count) to prevent clipping
+    var scale = f64_div(F64_ONE, f64_sqrt(f64_from(voice_count)));
+    var s = 0;
+    while (s < total_len) {
+        vec_set(mix, s, f64_mul(vec_get(mix, s), scale));
+        s = s + 1;
+    }
+    return mix;
+}

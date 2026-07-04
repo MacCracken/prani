@@ -1,0 +1,124 @@
+# spatial.cyr -- spatial audio effects for creature vocalizations.
+# Ports rust-old/src/spatial.rs: two free functions, no struct, no internal
+# deps. Distance-based attenuation with atmospheric HF absorption (one-pole
+# lowpass) and Doppler pitch shift (linear-interpolated resampling).
+#
+# Requires (from the build/test unit): stdlib alloc/vec/math (F64_TAU,
+# f64_from, f64_clamp, f64_floor, f64_to) + error.cyr for the test include
+# ordering. The module file itself has no `include` lines.
+#
+# FLOATS: the Rust oracle was f32 throughout; the Cyrius port is f64. The
+# per-sample recurrences (alpha filter, interpolation) are therefore evaluated
+# in f64 -- strictly more precise than the f32 oracle. Tests lock parity to the
+# f64 result via hand-computed golden values.
+#
+# `&[f32]` sample buffers -> stdlib vec handles (f64 in each slot); both
+# functions build and return a NEW vec (Rust returned `Vec<f32>`).
+
+# ================================================================
+# Float constants (IEEE-754 hex bit patterns; decimal in comment).
+# ================================================================
+var PR_SP_0_02  = 0x3f947ae147ae147b;   # 0.02   air-absorption distance coeff
+var PR_SP_0_9   = 0x3feccccccccccccd;   # 0.9    Doppler velocity clamp fraction
+
+# ================================================================
+# spatial_apply_distance_attenuation -- inverse-distance amplitude law plus a
+# first-order lowpass modeling atmospheric HF absorption that increases with
+# distance. Ports `apply_distance_attenuation`.
+#
+#   samples            : input vec (f64 per slot); read-only, not mutated
+#   distance           : meters source->listener (clamped to >= reference)
+#   reference_distance : meters at which gain == 1.0 (typically 1.0)
+#   sample_rate        : Hz
+# Returns a NEW vec of filtered samples (same length as `samples`).
+#
+# distance = max(distance, reference_distance)
+# gain     = reference_distance / distance
+# cutoff   = max(20000 / (1 + distance*0.02), 200)
+# rc       = 1 / (TAU * cutoff);  dt = 1 / sample_rate
+# alpha    = dt / (rc + dt)
+# per sample: filtered = prev + alpha*(s*gain - prev); prev = filtered
+# ================================================================
+#must_use
+fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sample_rate) {
+    var dist = f64_max(distance, reference_distance);
+    var gain = f64_div(reference_distance, dist);
+
+    # cutoff = max(20000 / (1 + distance*0.02), 200)
+    var denom = f64_add(F64_ONE, f64_mul(dist, PR_SP_0_02));
+    var cutoff = f64_max(f64_div(f64_from(20000), denom), f64_from(200));
+
+    var rc = f64_div(F64_ONE, f64_mul(F64_TAU, cutoff));
+    var dt = f64_div(F64_ONE, sample_rate);
+    var alpha = f64_div(dt, f64_add(rc, dt));
+
+    var output = vec_new();
+    var prev = 0;
+    var n = vec_len(samples);
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(samples, i);
+        # filtered = prev + alpha * (s*gain - prev)
+        var filtered = f64_add(prev, f64_mul(alpha, f64_sub(f64_mul(s, gain), prev)));
+        prev = filtered;
+        vec_push(output, filtered);
+        i = i + 1;
+    }
+    return output;
+}
+
+# ================================================================
+# spatial_apply_doppler_shift -- Doppler pitch shift for a moving source, via
+# linear-interpolated resampling. Ports `apply_doppler_shift`. The 2nd Rust
+# arg (`_sample_rate`) is unused in the body but retained for signature parity.
+#
+#   samples      : input vec (f64 per slot); read-only, not mutated
+#   velocity     : radial m/s (positive = moving away, negative = approaching)
+#   _sample_rate : Hz -- UNUSED (kept for signature parity with the oracle)
+# Returns a NEW vec of length out_len = (len / ratio) truncated.
+#
+# SPEED_OF_SOUND = 343
+# v     = clamp(velocity, -343*0.9, +343*0.9)
+# ratio = 343 / (343 + v)
+# out_len = (len / ratio) as usize   (truncate toward zero)
+# for i in 0..out_len:
+#   src = i * ratio;  idx = src as usize;  frac = src - idx
+#   s0 = samples[idx]   if idx   < len else 0
+#   s1 = samples[idx+1] if idx+1 < len else 0
+#   push s0 + (s1 - s0)*frac
+#
+# Approaching (v<0) -> ratio>1 -> out_len < len (shorter, higher pitch).
+# Moving away (v>0) -> ratio<1 -> out_len > len (longer, lower pitch).
+# v == 0 -> ratio == 1 -> out_len == len (identity resample).
+# ================================================================
+#must_use
+fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
+    var speed = f64_from(343);
+    # clamp bounds computed as the port would: 343 * 0.9 (= 308.7), negated.
+    var bound = f64_mul(speed, PR_SP_0_9);
+    var v = f64_clamp(velocity, f64_neg(bound), bound);
+    var ratio = f64_div(speed, f64_add(speed, v));
+
+    var len = vec_len(samples);
+    # out_len = (len / ratio) as usize  -- len as f64, divide, truncate.
+    var out_len = f64_to(f64_div(f64_from(len), ratio));
+
+    var output = vec_new();
+    var i = 0;
+    while (i < out_len) {
+        # src = i * ratio;  idx = trunc(src);  frac = src - idx
+        var src = f64_mul(f64_from(i), ratio);
+        var idx = f64_to(src);
+        var frac = f64_sub(src, f64_from(idx));
+
+        var s0 = 0;
+        if (idx < len) { s0 = vec_get(samples, idx); }
+        var s1 = 0;
+        if ((idx + 1) < len) { s1 = vec_get(samples, idx + 1); }
+
+        # s0 + (s1 - s0) * frac
+        vec_push(output, f64_add(s0, f64_mul(f64_sub(s1, s0), frac)));
+        i = i + 1;
+    }
+    return output;
+}

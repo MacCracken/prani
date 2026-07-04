@@ -1,0 +1,275 @@
+# voice.tcyr -- tests for src/voice.cyr (ports rust-old/src/voice.rs).
+#
+# Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
+# prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
+# sequence -> species -> bridge -> tract -> voice). The prani modules carry no
+# `include` lines -- this entry orders them. sequence.cyr is pulled in for the
+# CallBout struct species_bout_template references; its synthesize methods
+# forward-reference crvoice_* which are now defined (voice.cyr is included), so
+# no undefined-fn warnings remain for them.
+#
+# PARITY APPROACH: exact svara-internal bit parity vs the f32 Rust oracle is NOT
+# attainable -- f32->f64 widening diverges through svara's own DSP (glottal
+# shaping, formant biquads, DC blocker) reached via crtract_synthesize. So the
+# full synthesis paths are asserted STRUCTURALLY: crvoice_vocalize returns a
+# NON-error vec of the expected length (num_samples) with ALL samples finite,
+# and is DETERMINISTIC (same voice+args twice -> bit-identical first/last).
+# Where the math is svara-INDEPENDENT (effective_f0, contour interpolation,
+# builder clamps, lombard boost, spectral-offset table, nasal sentinel) exact
+# f64 bit-pattern assertions are used (hand-computed against the oracle).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+
+# ---- test constants (IEEE-754 hex) -----------------------------------------
+var T_SR        = 0x40e5888000000000;   # 44100.0 sample rate
+var T_DUR_005   = 0x3fa999999999999a;   # 0.05 s  -> 2205 samples @ 44100
+var T_DUR_003   = 0x3f9eb851eb851eb8;   # 0.03 s  -> 1323 samples @ 44100
+var T_0_5       = 0x3fe0000000000000;   # 0.5
+var T_0_3       = 0x3fd3333333333333;   # 0.3
+var T_0_7       = 0x3fe6666666666666;   # 0.7
+var T_0_8       = 0x3fe999999999999a;   # 0.8
+var T_1_0       = 0x3ff0000000000000;   # 1.0
+var T_400       = 0x4079000000000000;   # 400.0  wolf f0_default / effective_f0
+var T_200       = 0x4069000000000000;   # 200.0  wolf effective_f0 @ size 2
+var T_1000      = 0x408f400000000000;   # 1000.0 contour base for f0_at asserts
+var T_3000      = 0x40a7700000000000;   # 3000.0 songbird effective_f0
+var T_800       = 0x4089000000000000;   # 800.0  HOWL f0_at(0) = base*0.8
+var T_1300      = 0x4094500000000000;   # 1300.0 HOWL f0_at(0.3) = base*1.3
+var T_1200      = 0x4092c00000000000;   # 1200.0 HOWL f0_at(0.7) = base*1.2
+var T_600       = 0x4082c00000000000;   # 600.0  HOWL f0_at(1.0) = base*0.6
+var T_NEG_2     = 0xc000000000000000;   # -2.0  growl/rumble spectral offset
+var T_2_0       = 0x4000000000000000;   # 2.0   hiss spectral offset
+var T_0_2       = 0x3fc999999999999a;   # 0.2   cat nasal fraction
+var T_0_1       = 0x3fb999999999999a;   # 0.1   wolf nasal fraction
+var T_60_0      = 0x404e000000000000;   # 60.0  quiet ambient (below Lombard baseline 40 -> boost)
+var T_30_0      = 0x403e000000000000;   # 30.0  ambient at/below Lombard baseline 40 -> no boost
+var T_LOMBARD_60 = 0x3fb999999999999a;  # (60-40)*0.005 = 0.1 lombard boost @ 60 dB
+var T_EFF_06    = 0x3fe3333333333333;   # 0.5 + 0.1 = 0.6 effort after lombard @ 60 dB (start 0.5)
+
+alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# all_finite(vec) -- 1 iff every element passes prani_is_finite.
+#must_use
+fn t_all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (prani_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# vecs_equal(a, b) -- 1 iff same length and bit-identical elements.
+#must_use
+fn t_vecs_equal(a, b) {
+    if (vec_len(a) != vec_len(b)) { return 0; }
+    var n = vec_len(a);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ================================================================
+test_group("crvoice_new defaults (Wolf)");
+var wolf = crvoice_new(PRANI_SP_WOLF);
+assert_eq(crvoice_species(wolf), PRANI_SP_WOLF, "species is Wolf");
+assert_eq(CreatureVoice_f0_offset(wolf), 0, "default f0_offset 0");
+assert_eq(CreatureVoice_size_scale(wolf), T_1_0, "default size_scale 1.0");
+assert_eq(crvoice_vocal_effort(wolf), T_0_5, "default vocal_effort 0.5");
+
+# ================================================================
+test_group("effective_f0 -- hand-computed, exact");
+# Wolf default 400, size 1, offset 0 -> 400/1 = 400, clamp[150,1200] -> 400.
+assert_eq(crvoice_effective_f0(wolf), T_400, "wolf effective_f0 == 400");
+# size 2 -> 400/2 = 200, clamp[150,1200] -> 200.
+var wolf_big = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_2_0);
+assert_eq(crvoice_effective_f0(wolf_big), T_200, "wolf @ size 2 -> effective_f0 200");
+# Songbird default 3000, size 1 -> 3000, clamp[1000,8000] -> 3000.
+var bird = crvoice_new(PRANI_SP_SONGBIRD);
+assert_eq(crvoice_effective_f0(bird), T_3000, "songbird effective_f0 == 3000");
+
+# ================================================================
+test_group("builder clamps");
+# with_size clamps to [0.1, 10.0]
+var too_small = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), 0);
+assert_eq(CreatureVoice_size_scale(too_small), PR_V_0_1, "with_size clamps 0 -> 0.1");
+var too_big = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), f64_from(100));
+assert_eq(CreatureVoice_size_scale(too_big), f64_from(10), "with_size clamps 100 -> 10");
+# with_vocal_effort clamps to [0, 1]
+var v_hi = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), f64_from(5));
+assert_eq(crvoice_vocal_effort(v_hi), T_1_0, "with_vocal_effort clamps 5 -> 1.0");
+var v_lo = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), f64_neg(f64_from(2)));
+assert_eq(crvoice_vocal_effort(v_lo), 0, "with_vocal_effort clamps -2 -> 0.0");
+# with_breathiness clamps to [0,1] (mutates params in place)
+var v_br = crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), f64_from(3));
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_br)), T_1_0, "with_breathiness clamps 3 -> 1.0");
+# with_f0_offset clamps to +/-(f0_max - f0_min). Wolf range = 1200-150 = 1050.
+var v_off = crvoice_with_f0_offset(crvoice_new(PRANI_SP_WOLF), f64_from(5000));
+assert_eq(CreatureVoice_f0_offset(v_off), f64_from(1050), "with_f0_offset clamps 5000 -> 1050 (range)");
+
+# ================================================================
+test_group("set_vocal_effort -- mutable, clamped");
+var v_set = crvoice_new(PRANI_SP_WOLF);
+crvoice_set_vocal_effort(v_set, T_0_8);
+assert_eq(crvoice_vocal_effort(v_set), T_0_8, "set_vocal_effort 0.8");
+crvoice_set_vocal_effort(v_set, f64_from(9));
+assert_eq(crvoice_vocal_effort(v_set), T_1_0, "set_vocal_effort clamps 9 -> 1.0");
+
+# ================================================================
+test_group("apply_lombard_effect raises vocal_effort");
+var v_lom = crvoice_new(PRANI_SP_WOLF);   # effort starts 0.5
+# ambient 30 <= 40 baseline -> boost 0 -> effort unchanged
+crvoice_apply_lombard_effect(v_lom, T_30_0);
+assert_eq(crvoice_vocal_effort(v_lom), T_0_5, "ambient 30 dB -> no boost (still 0.5)");
+# ambient 60 -> boost (60-40)*0.005 = 0.1 -> effort 0.6
+crvoice_apply_lombard_effect(v_lom, T_60_0);
+assert_eq(crvoice_vocal_effort(v_lom), T_EFF_06, "ambient 60 dB -> effort 0.5 + 0.1 = 0.6");
+assert_eq(bridge_lombard_effort_boost(T_60_0), T_LOMBARD_60, "lombard boost @ 60 dB == 0.1");
+
+# ================================================================
+test_group("pitch_contour f0_at -- hand-computed HOWL (base 1000)");
+var howl_c = crvoice_pitch_contour(PRANI_VOC_HOWL, T_1000);
+assert_eq(crvoice_pitch_contour_f0_at(howl_c, 0), T_800, "HOWL f0_at(0) == base*0.8 == 800");
+assert_eq(crvoice_pitch_contour_f0_at(howl_c, T_0_3), T_1300, "HOWL f0_at(0.3) == base*1.3 == 1300");
+assert_eq(crvoice_pitch_contour_f0_at(howl_c, T_0_7), T_1200, "HOWL f0_at(0.7) == base*1.2 == 1200");
+assert_eq(crvoice_pitch_contour_f0_at(howl_c, T_1_0), T_600, "HOWL f0_at(1.0) == base*0.6 == 600");
+# FLAT contour (e.g. GROWL) is base everywhere.
+var flat_c = crvoice_pitch_contour(PRANI_VOC_GROWL, T_1000);
+assert_eq(crvoice_pitch_contour_f0_at(flat_c, T_0_5), T_1000, "FLAT f0_at(0.5) == base == 1000");
+# clamp: t < 0 clamps to 0.
+assert_eq(crvoice_pitch_contour_f0_at(howl_c, f64_neg(T_1_0)), T_800, "HOWL f0_at(-1) clamps to t=0 -> 800");
+
+# ================================================================
+test_group("vocalization_spectral_offset -- table");
+assert_eq(crvoice_vocalization_spectral_offset(PRANI_VOC_GROWL), T_NEG_2, "growl offset -2.0");
+assert_eq(crvoice_vocalization_spectral_offset(PRANI_VOC_HISS), T_2_0, "hiss offset +2.0");
+assert_eq(crvoice_vocalization_spectral_offset(PRANI_VOC_HOWL), 0, "howl offset 0.0 (neutral)");
+
+# ================================================================
+test_group("nasal_phase_fraction -- sentinel for None");
+assert_eq(crvoice_nasal_phase_fraction(PRANI_VOC_HOWL, PRANI_SP_CAT), T_0_2, "cat howl nasal 0.2");
+assert_eq(crvoice_nasal_phase_fraction(PRANI_VOC_HOWL, PRANI_SP_WOLF), T_0_1, "wolf howl nasal 0.1");
+# non-nasal pair -> negative sentinel (< 0).
+assert_lt(crvoice_nasal_phase_fraction(PRANI_VOC_ROAR, PRANI_SP_LION), 0, "lion roar -> nasal None sentinel < 0");
+
+# ================================================================
+test_group("formant_transition_contour -- Some/None");
+# cat howl -> Some (non-zero ptr)
+assert_neq(crvoice_formant_transition_contour(PRANI_VOC_HOWL, PRANI_SP_CAT), 0, "cat howl -> Some contour");
+# wolf howl -> Some
+assert_neq(crvoice_formant_transition_contour(PRANI_VOC_HOWL, PRANI_SP_WOLF), 0, "wolf howl -> Some contour");
+# lion roar -> None (0)
+assert_eq(crvoice_formant_transition_contour(PRANI_VOC_ROAR, PRANI_SP_LION), 0, "lion roar -> None (0)");
+# formant_transition_at endpoints: wolf howl at t=0 blend == 0.0 (first keyframe).
+var wolf_fc = crvoice_formant_transition_contour(PRANI_VOC_HOWL, PRANI_SP_WOLF);
+var fb0 = crvoice_formant_transition_at(wolf_fc, 0);
+assert_eq(FormantBlend_blend(fb0), 0, "wolf howl blend at t=0 == 0.0");
+assert_eq(FormantBlend_f0(fb0), f64_from(420), "wolf howl F1 at t=0 == 420");
+
+# ================================================================
+test_group("supports rejection -> error (snake howl)");
+var snake = crvoice_new(PRANI_SP_SNAKE);
+var snake_out = crvoice_vocalize(snake, PRANI_VOC_HOWL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(snake_out), 1, "snake howl -> error");
+assert_eq(snake_out, PRANI_ERR_INVALID_VOCALIZATION, "snake howl -> PRANI_ERR_INVALID_VOCALIZATION");
+
+# ================================================================
+test_group("vocalize -- non-error, length, finite (multiple species)");
+# Wolf howl (laryngeal + formant contour + nasal + biphonation paths).
+var w_out = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(w_out), 0, "wolf howl non-error");
+assert_eq(vec_len(w_out), 2205, "wolf howl length == 2205 (0.05s @ 44100)");
+assert_eq(t_all_finite(w_out), 1, "wolf howl all finite");
+
+# Lion roar (subharmonics + chaos path).
+var l_out = crvoice_vocalize(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, T_SR, T_DUR_005);
+assert_eq(prani_is_err(l_out), 0, "lion roar non-error");
+assert_eq(vec_len(l_out), 2205, "lion roar length == 2205");
+assert_eq(t_all_finite(l_out), 1, "lion roar all finite");
+
+# Songbird trill (syringeal coupling + AM pattern path).
+var b_out = crvoice_vocalize(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_TRILL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(b_out), 0, "songbird trill non-error");
+assert_eq(vec_len(b_out), 2205, "songbird trill length == 2205");
+assert_eq(t_all_finite(b_out), 1, "songbird trill all finite");
+
+# Snake hiss (noise-only path).
+var h_out = crvoice_vocalize(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HISS, T_SR, T_DUR_005);
+assert_eq(prani_is_err(h_out), 0, "snake hiss non-error");
+assert_eq(vec_len(h_out), 2205, "snake hiss length == 2205");
+assert_eq(t_all_finite(h_out), 1, "snake hiss all finite");
+
+# Cat purr (special synthesize_cat_purr path).
+var p_out = crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, T_SR, T_DUR_005);
+assert_eq(prani_is_err(p_out), 0, "cat purr non-error");
+assert_eq(vec_len(p_out), 2205, "cat purr length == 2205");
+assert_eq(t_all_finite(p_out), 1, "cat purr all finite");
+
+# Cricket stridulate (stridulatory path).
+var c_out = crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_STRIDULATE, T_SR, T_DUR_005);
+assert_eq(prani_is_err(c_out), 0, "cricket stridulate non-error");
+assert_eq(vec_len(c_out), 2205, "cricket stridulate length == 2205");
+assert_eq(t_all_finite(c_out), 1, "cricket stridulate all finite");
+
+# Dragon roar (subharmonics + fire-breath noise path).
+var d_out = crvoice_vocalize(crvoice_new(PRANI_SP_DRAGON), PRANI_VOC_ROAR, T_SR, T_DUR_003);
+assert_eq(prani_is_err(d_out), 0, "dragon roar non-error");
+assert_eq(vec_len(d_out), 1323, "dragon roar length == 1323 (0.03s @ 44100)");
+assert_eq(t_all_finite(d_out), 1, "dragon roar all finite");
+
+# ================================================================
+test_group("vocalize_with_intent -- intent scales duration (Mating x2)");
+# Mating duration_scale = 2.0 -> num_samples doubles: 0.05 * 2 * 44100 = 4410.
+var m_out = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_SONGBIRD),
+    PRANI_VOC_TRILL, PRANI_INTENT_MATING, T_SR, T_DUR_005);
+assert_eq(prani_is_err(m_out), 0, "songbird mating trill non-error");
+assert_eq(vec_len(m_out), 4410, "mating (x2 duration) length == 4410");
+assert_eq(t_all_finite(m_out), 1, "mating trill all finite");
+
+# ================================================================
+test_group("determinism -- same voice+args twice -> bit-identical");
+# Wolf howl (exercises the stochastic biphonation/nasal/perturbation paths).
+var det_a = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, T_SR, T_DUR_005);
+var det_b = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, T_SR, T_DUR_005);
+assert_eq(t_vecs_equal(det_a, det_b), 1, "wolf howl deterministic (bit-identical)");
+# Lion roar (chaos_rng from resonance_seed -- deterministic across fresh voices).
+var det_la = crvoice_vocalize(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, T_SR, T_DUR_005);
+var det_lb = crvoice_vocalize(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, T_SR, T_DUR_005);
+assert_eq(t_vecs_equal(det_la, det_lb), 1, "lion roar deterministic (bit-identical)");
+
+# ================================================================
+test_group("effective_tract_scale");
+# Wolf tract_scale 1.2, size 1 -> 1.2.
+assert_eq(crvoice_effective_tract_scale(crvoice_new(PRANI_SP_WOLF)), PR_V_1_2, "wolf tract_scale 1.2 @ size 1");
+# size 2 -> 1.2 * 2 = 2.4.
+var w2 = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_2_0);
+assert_eq(crvoice_effective_tract_scale(w2), f64_mul(PR_V_1_2, T_2_0), "wolf tract_scale @ size 2 == 2.4");
+
+# ================================================================
+test_group("vocalize does not mutate the voice's own params");
+# effort-adjusted breathiness must go into a fresh copy, not the voice's params.
+var vv = crvoice_new(PRANI_SP_WOLF);
+var br_before = SpeciesParams_breathiness(CreatureVoice_params(vv));
+var _vv = crvoice_with_vocal_effort(vv, T_1_0);   # extreme effort -> breathiness_delta 0.15 (in-place, same ptr)
+crvoice_vocalize(vv, PRANI_VOC_HOWL, T_SR, T_DUR_003);
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(vv)), br_before, "voice params breathiness unchanged after vocalize");
+
+var rc = assert_summary();
+syscall(60, rc);

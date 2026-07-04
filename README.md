@@ -1,8 +1,13 @@
 # prani
 
-**prani** (Sanskrit: प्राणी — living being / creature) — Creature and animal vocal synthesis for Rust.
+**prani** (Sanskrit: प्राणी — living being / creature) — Creature and animal vocal synthesis for [Cyrius](https://github.com/MacCracken/cyrius) / AGNOS.
 
-Procedural synthesis of non-human voices: wolves, cats, lions, birds, snakes, insects, dragons, and fantasy creatures. Built on [svara](https://crates.io/crates/svara)'s formant synthesis engine with species-specific vocal tract models, bioacoustic call patterns, and behavioral vocalization mapping.
+Procedural synthesis of non-human voices: wolves, cats, lions, birds, snakes, insects, dragons, and fantasy creatures. Built on [svara](https://github.com/MacCracken/svara)'s glottal/formant engine with species-specific vocal tract models, bioacoustic call patterns, and behavioral vocalization mapping.
+
+> **v2.0.0 is a Rust → Cyrius port.** The original Rust crate (through 1.1.0) is
+> frozen at [`rust-old/`](rust-old/) as the parity oracle; every Cyrius module is
+> cross-checked against it function-for-function. See
+> [`docs/development/port-audit.md`](docs/development/port-audit.md).
 
 ## Features
 
@@ -16,40 +21,57 @@ Procedural synthesis of non-human voices: wolves, cats, lions, birds, snakes, in
 - **Dragon fire-breath** noise component
 - **Spatial audio**: Doppler shift, distance attenuation with atmospheric HF absorption
 - **Sequencing**: call bouts, phrases, multi-voice chorus synthesis
-- **7 built-in voice presets**: Alpha Wolf, Wolf Pup, House Cat, Kitten, Male Lion, Ancient Dragon, Young Dragon
-- ~1,000x real-time, `no_std` compatible, all types `Send + Sync + Serialize + Deserialize`
+- **11 built-in voice presets**: Alpha Wolf, Wolf Pup, House Cat, Kitten, Male Lion, Ancient/Young Dragon, Bald Eagle, Raven, Field Cricket, American Alligator
+- **Emotion & fatigue** drive: valence/arousal → vocalization + intent + effort; vocal fatigue + alarm habituation
 
 ## Quick Start
 
-```rust
-use prani::prelude::*;
+prani is a Cyrius library. Build the smoke binary and run a suite:
 
-// Create a wolf voice and synthesize a howl
-let voice = CreatureVoice::new(Species::Wolf);
-let samples = voice.vocalize(&Vocalization::Howl, 44100.0, 2.0).unwrap();
+```sh
+cyrius deps                              # resolve svara/naad/hisab/goonj/sakshi
+cyrius build src/main.cyr build/prani    # compile
+cyrius test tests/voice.tcyr             # run one parity suite
+```
 
-// Use a preset for a specific character
-use prani::preset::presets;
-let alpha = presets::ALPHA_WOLF.build();
-let howl = alpha.vocalize_with_intent(
-    &Vocalization::Howl,
-    CallIntent::Territorial,
-    44100.0,
-    3.0,
-).unwrap();
+Synthesize a wolf howl (Cyrius):
 
-// Synthesize a wolf pack chorus
-use prani::sequence::synthesize_chorus;
-let pack: Vec<_> = (0..4)
-    .map(|i| CreatureVoice::new(Species::Wolf).with_size(0.8 + i as f32 * 0.2))
-    .collect();
-let chorus = synthesize_chorus(
-    &pack, &Vocalization::Howl, CallIntent::Social, 44100.0, 3.0, 0.3,
-).unwrap();
+```
+# a fresh Wolf voice → a 2-second howl at 44.1 kHz
+var voice = crvoice_new(PRANI_SP_WOLF);
+var samples = crvoice_vocalize(voice, PRANI_VOC_HOWL, f64_from(44100), f64_from(2));
+# samples is a vec of f64 (or a negative PRANI_ERR_* on failure)
 
-// Apply distance attenuation
-use prani::spatial::apply_distance_attenuation;
-let far_away = apply_distance_attenuation(&samples, 100.0, 1.0, 44100.0);
+# a preset character with a territorial intent
+var alpha = preset_build(preset_alpha_wolf());
+var call = crvoice_vocalize_with_intent(alpha, PRANI_VOC_HOWL, PRANI_INTENT_TERRITORIAL, f64_from(44100), f64_from(3));
+
+# a wolf-pack chorus
+var pack = vec_new();
+vec_push(pack, crvoice_new(PRANI_SP_WOLF));
+vec_push(pack, crvoice_new(PRANI_SP_WOLF));
+var chorus = sequence_synthesize_chorus(pack, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_from(44100), f64_from(3), F64_HALF);
+```
+
+## Consuming prani
+
+Downstream Cyrius projects include the distlib bundle and resolve prani's
+dependencies from their own `cyrius.cyml`:
+
+```
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/sakshi.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+```
+
+```toml
+[deps.prani]
+git = "https://github.com/MacCracken/prani.git"
+tag = "2.0.0"
+modules = ["dist/prani.cyr"]
 ```
 
 ## License

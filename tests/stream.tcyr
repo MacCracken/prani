@@ -1,0 +1,184 @@
+# stream.tcyr -- tests for src/stream.cyr (ports rust-old/src/stream.rs).
+#
+# Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
+# prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
+# sequence -> species -> bridge -> tract -> voice -> stream). The prani modules
+# carry no `include` lines -- this entry orders them. sequence.cyr is pulled in
+# for the CallBout struct species_bout_template references; its synthesize
+# methods forward-reference crvoice_* which are defined once voice.cyr is
+# included, so no undefined-fn warnings remain.
+#
+# PARITY APPROACH: exact svara-internal bit parity vs the f32 Rust oracle is NOT
+# attainable -- f32->f64 widening diverges through svara's own DSP reached via
+# crtract_synthesize (glottal shaping, formant biquads, DC blocker). So the
+# svara-dependent output is asserted STRUCTURALLY: fill_buffer / next_block
+# return the expected counts, advance samples_rendered correctly, is_finished
+# flips true after a full render, and all produced samples are finite. Where the
+# math is svara-INDEPENDENT (total_samples accounting, the supports rejection,
+# fill/next-block sizing, pitch_contour_at interpolation) exact assertions are
+# used (hand-computed against the oracle).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+include "src/stream.cyr"
+
+# ---- test constants (IEEE-754 hex) -----------------------------------------
+var T_SR       = 0x40e5888000000000;   # 44100.0 sample rate
+var T_DUR_005  = 0x3fa999999999999a;   # 0.05 s -> 2205 samples @ 44100 (scale 1.0)
+var T_400      = 0x4079000000000000;   # 400.0  wolf effective_f0 / HOWL contour base
+var T_320      = 0x4074000000000000;   # 320.0  HOWL contour at t=0 == base*0.8
+var T_0_1      = 0x3fb999999999999a;   # 0.1
+var T_1_0      = 0x3ff0000000000000;   # 1.0
+
+alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# all_finite(vec) -- 1 iff every element passes prani_is_finite.
+#must_use
+fn t_all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (prani_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ================================================================
+test_group("stream_new -- valid vocalization (Wolf HOWL, Social)");
+# Wolf effective_f0 400, Social pitch_scale 1.0 -> f0 400. Social duration_scale
+# 1.0 -> total_samples = 0.05 * 1.0 * 44100 = 2205.
+var s = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(s), 0, "wolf howl stream_new -> non-error");
+assert_eq(stream_total_samples(s), 2205, "total_samples == 2205 (0.05*1.0*44100)");
+assert_eq(stream_samples_rendered(s), 0, "samples_rendered starts at 0");
+assert_eq(stream_is_finished(s), 0, "fresh stream not finished");
+
+# ================================================================
+test_group("stream_new -- rejection (Snake howl -> error)");
+# Snake apparatus is NoiseOnly; Howl not in {Hiss,Growl} -> unsupported.
+var bad = stream_new(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
+assert_eq(prani_is_err(bad), 1, "snake howl stream_new -> error");
+assert_eq(bad, PRANI_ERR_INVALID_VOCALIZATION, "snake howl -> PRANI_ERR_INVALID_VOCALIZATION");
+
+# ================================================================
+test_group("stream_new -- intent scales total_samples (Mating x2)");
+# Mating duration_scale = 2.0 -> total doubles: 0.05 * 2 * 44100 = 4410.
+var s_m = stream_new(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_TRILL, PRANI_INTENT_MATING, T_SR, T_DUR_005);
+assert_eq(prani_is_err(s_m), 0, "songbird mating trill stream_new -> non-error");
+assert_eq(stream_total_samples(s_m), 4410, "mating (x2 duration) total_samples == 4410");
+
+# ================================================================
+test_group("stream_pitch_contour_at -- hand-computed HOWL (base 400)");
+# HOWL[0] = 0.8 -> base*0.8 = 320 at t=0 (exact, closed-form).
+assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, 0), T_320, "HOWL t=0 == base*0.8 == 320");
+# t < 0 clamps to 0 -> same 320.
+assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, f64_neg(T_1_0)), T_320, "HOWL t=-1 clamps to 0 -> 320");
+# FLAT contour (GROWL) is base everywhere.
+assert_eq(stream_pitch_contour_at(PRANI_VOC_GROWL, T_400, T_0_1), T_400, "FLAT (growl) t=0.1 == base == 400");
+
+# ================================================================
+test_group("fill_buffer -- writes min(buf,remaining), advances rendered");
+# Small buffer (512) over a 2205-sample stream: first fill writes 512.
+var sf = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+var buf = vec_new();
+var bi = 0;
+while (bi < 512) { vec_push(buf, 0); bi = bi + 1; }
+var wrote = stream_fill_buffer(sf, buf);
+assert_eq(wrote, 512, "first fill_buffer writes full 512 (< remaining 2205)");
+assert_eq(stream_samples_rendered(sf), 512, "samples_rendered advanced to 512");
+assert_eq(stream_is_finished(sf), 0, "not finished after 512/2205");
+assert_eq(t_all_finite(buf), 1, "filled buffer all finite");
+
+# ================================================================
+test_group("fill_buffer -- final partial fill returns remaining, flips finished");
+# Render the rest in one big buffer of 4096 (> remaining 1693) -> writes 1693.
+var buf2 = vec_new();
+var bj = 0;
+while (bj < 4096) { vec_push(buf2, 0); bj = bj + 1; }
+var wrote2 = stream_fill_buffer(sf, buf2);
+assert_eq(wrote2, 1693, "final fill writes remaining 1693 (2205-512)");
+assert_eq(stream_samples_rendered(sf), 2205, "samples_rendered == total 2205");
+assert_eq(stream_is_finished(sf), 1, "is_finished flips true after full render");
+# a subsequent fill on a finished stream writes 0.
+var wrote3 = stream_fill_buffer(sf, buf2);
+assert_eq(wrote3, 0, "fill_buffer on finished stream writes 0");
+
+# ================================================================
+test_group("next_block -- sizing (clamps to remaining, empty at end)");
+var sn = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+# block_size 1000 < remaining 2205 -> vec of 1000.
+var blk1 = stream_next_block(sn, 1000);
+assert_eq(vec_len(blk1), 1000, "next_block(1000) -> 1000 samples");
+assert_eq(stream_samples_rendered(sn), 1000, "rendered advanced to 1000");
+assert_eq(t_all_finite(blk1), 1, "next_block output finite");
+# block_size 5000 > remaining 1205 -> clamped to 1205.
+var blk2 = stream_next_block(sn, 5000);
+assert_eq(vec_len(blk2), 1205, "next_block(5000) clamps to remaining 1205");
+assert_eq(stream_is_finished(sn), 1, "finished after draining");
+# now empty vec.
+var blk3 = stream_next_block(sn, 512);
+assert_eq(vec_len(blk3), 0, "next_block on finished stream -> empty vec");
+
+# ================================================================
+test_group("cat purr special path -- fills + finite");
+# Cat PURR (is_cat_purr path). Idle duration_scale 1.0 -> total 2205.
+var sp = stream_new(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
+assert_eq(prani_is_err(sp), 0, "cat purr stream_new -> non-error");
+assert_eq(stream_total_samples(sp), 2205, "cat purr total_samples == 2205");
+var pbuf = vec_new();
+var pk = 0;
+while (pk < 2205) { vec_push(pbuf, 0); pk = pk + 1; }
+var pwrote = stream_fill_buffer(sp, pbuf);
+assert_eq(pwrote, 2205, "cat purr fill writes all 2205 in one pass");
+assert_eq(stream_is_finished(sp), 1, "cat purr finished after full fill");
+assert_eq(t_all_finite(pbuf), 1, "cat purr output all finite");
+
+# ================================================================
+test_group("noise-only path -- Snake hiss stream fills + finite");
+# Snake HISS is supported (NoiseOnly apparatus). Exercises crtract_synthesize
+# noise path through the stream.
+var sh = stream_new(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HISS, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
+assert_eq(prani_is_err(sh), 0, "snake hiss stream_new -> non-error");
+var hbuf = vec_new();
+var hk = 0;
+while (hk < 2205) { vec_push(hbuf, 0); hk = hk + 1; }
+var hwrote = stream_fill_buffer(sh, hbuf);
+assert_eq(hwrote, 2205, "snake hiss fill writes all 2205");
+assert_eq(t_all_finite(hbuf), 1, "snake hiss output all finite");
+
+# ================================================================
+test_group("determinism -- two identical full-pass streams bit-identical");
+# Two fresh identical streams each drained in a single fill produce bit-identical
+# output (same species seed -> same rng phase, same tilt/amp, same contour t=0).
+var sa = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+var sb = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+var refa = vec_new();
+var refb = vec_new();
+var rk = 0;
+while (rk < 2205) { vec_push(refa, 0); vec_push(refb, 0); rk = rk + 1; }
+stream_fill_buffer(sa, refa);
+stream_fill_buffer(sb, refb);
+var same = 1;
+var ck = 0;
+while (ck < 2205) {
+    if (vec_get(refa, ck) != vec_get(refb, ck)) { same = 0; }
+    ck = ck + 1;
+}
+assert_eq(same, 1, "identical streams -> bit-identical full-pass output");
+assert_eq(t_all_finite(refa), 1, "full-pass output all finite");
+
+var rc = assert_summary();
+syscall(60, rc);

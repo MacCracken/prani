@@ -1,0 +1,60 @@
+# dsp.tcyr -- tests for src/dsp.cyr (DcBlocker + naad error mapping).
+# rust-old/src/dsp.rs had no #[test] blocks. Behavioural parity: the DC blocker
+# passes the first sample, then rings down by R each step, and drives a constant
+# DC input toward zero. serde round-trip dropped (no serde).
+
+include "src/error.cyr"
+include "src/dsp.cyr"
+
+alloc_init();
+
+# ================================================================
+test_group("DcBlocker first-sample + decay (constant DC = 1.0)");
+var b = dcblocker_new();
+# y0 = 1 - 0 + R*0 = 1.0 (first sample passes)
+assert_eq(dcblocker_process(b, F64_ONE), F64_ONE, "y0 == 1.0");
+# y1 = 1 - 1 + R*1 = R = 0.995 (exact)
+assert_eq(dcblocker_process(b, F64_ONE), PRANI_DCBLOCK_R, "y1 == R (0.995)");
+# y2 = 1 - 1 + R*R = R^2; strictly less than y1 (ringing down)
+var y2 = dcblocker_process(b, F64_ONE);
+assert_eq(f64_lt(y2, PRANI_DCBLOCK_R), 1, "y2 < y1 (decaying)");
+assert_eq(f64_gt(y2, 0), 1, "y2 still positive");
+
+# ================================================================
+test_group("DcBlocker converges to ~0 on sustained DC");
+var b2 = dcblocker_new();
+var i = 0;
+var last = F64_ONE;
+while (i < 4000) {
+    last = dcblocker_process(b2, F64_ONE);
+    i = i + 1;
+}
+# after 4000 samples of DC, output should be tiny (< epsilon-ish tolerance)
+assert_eq(f64_lt(f64_abs(last), 0x3F50624DD2F1A9FC), 1, "DC driven below 1e-3");
+
+# ================================================================
+test_group("DcBlocker reset clears memory");
+var b3 = dcblocker_new();
+dcblocker_process(b3, F64_ONE);
+dcblocker_process(b3, F64_ONE);
+dcblocker_reset(b3);
+# after reset, first sample passes at full amplitude again
+assert_eq(dcblocker_process(b3, F64_ONE), F64_ONE, "post-reset y0 == 1.0");
+
+# ================================================================
+test_group("DcBlocker process_buffer (in-place)");
+var buf = vec_new();
+vec_push(buf, F64_ONE);
+vec_push(buf, F64_ONE);
+vec_push(buf, F64_ONE);
+var b4 = dcblocker_new();
+dcblocker_process_buffer(b4, buf);
+assert_eq(vec_get(buf, 0), F64_ONE, "buf[0] == 1.0 (first passes)");
+assert_eq(vec_get(buf, 1), PRANI_DCBLOCK_R, "buf[1] == R");
+
+# ================================================================
+test_group("map_naad_error");
+assert_eq(prani_map_naad_error((0 - 1)), PRANI_ERR_SYNTHESIS_FAILED, "naad err -> synthesis failed");
+
+var rc = assert_summary();
+syscall(60, rc);

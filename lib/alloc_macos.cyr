@@ -1,0 +1,105 @@
+# alloc_macos.cyr — heap allocator using mmap (macOS)
+# Drop-in replacement for alloc.cyr on macOS (which has no brk syscall).
+# API-compatible: alloc_init(), alloc(size), alloc_reset(), alloc_used().
+#
+# Uses mmap(MAP_PRIVATE|MAP_ANON) for memory. Grows in 1MB chunks.
+#
+# Self-contained (no `lib/syscalls.cyr` dep). Uses Linux syscall
+# numbers 9/11 inline; aarch64 Mach-O ESYSXLAT translates to BSD-arm64
+# equivalents at emit time. See CHANGELOG [5.5.16].
+
+var _heap_base = 0;
+var _heap_ptr = 0;
+var _heap_end = 0;
+
+# Maximum single allocation size (256MB) — matches alloc.cyr
+var ALLOC_MAX = 0x10000000;
+
+# Initial heap reservation. v6.0.34: was 1MB, grown by 1MB chunks via a
+# HINTED mmap at _heap_end. macOS does NOT honor mmap address hints (no
+# MAP_FIXED), so any growth returned a non-contiguous region → the
+# contiguity guard failed (or a write ran past the 1MB page into the
+# unmapped next page → SIGBUS "byte write Translation fault"). A bump
+# allocator REQUIRES contiguity, so reserve a large region UP FRONT
+# instead (macOS overcommits anonymous mmap — only touched pages cost
+# RAM). This is why cycc itself worked (main_aarch64_macho.cyr mmaps its
+# whole ~78MB heap once) while the cyrius wrapper SIGBUS'd on its 2nd MB.
+var _MACOS_HEAP_RESERVE = 0x10000000;   # 256 MB virtual, lazy-committed
+
+# Initialize the heap allocator (must call before any alloc)
+fn alloc_init() {
+    # Idempotent (v6.1.23): re-call is a no-op once the heap is up — pre-fix every
+    # recall mmap'd a fresh 256 MB reservation, abandoning the live one. Free via
+    # alloc_reset(). See issue 2026-06-09-chunked-alloc-init-not-idempotent.
+    if (_heap_base != 0) { return _heap_base; }
+    # mmap(addr=0, len=256MB, prot=RW, flags=MAP_PRIVATE|MAP_ANON, fd=-1, offset=0)
+    _heap_base = syscall(9, 0, _MACOS_HEAP_RESERVE, 3, 0x1002, 0 - 1, 0);
+    if (_heap_base < 0) {
+        syscall(1, 2, "alloc_init: mmap failed\n", 24);
+        syscall(60, 1);
+    }
+    _heap_end = _heap_base + _MACOS_HEAP_RESERVE;
+    _heap_ptr = _heap_base;
+    return _heap_base;
+}
+
+# Allocate size bytes from the heap, 8-byte aligned
+fn alloc(size) {
+    # Pure validation OUTSIDE the v6.0.64 alloc lock (no shared state).
+    if (size <= 0) { return 0; }
+    if (size > ALLOC_MAX) { return 0; }
+    # Align to 8 bytes (local).
+    size = (size + 7) & (0 - 8);
+    # --- critical section (shared bump pointer + grow) ---
+    _alloc_lock_acquire();
+    # v5.8.37 — lazy-init the heap if alloc_init() was never called
+    # (now race-safe). Mirrors lib/alloc.cyr; see its header.
+    if (_heap_base == 0) { alloc_init(); }
+    var ptr = _heap_ptr;
+    var new_ptr = ptr + size;
+    # Overflow check
+    if (new_ptr < ptr) { _alloc_lock_release(); return 0; }
+    _heap_ptr = new_ptr;
+    # Loop per-1MB mmaps; mmap hint contract is stricter than brk
+    # (big single mmap may return a different base, breaking the
+    # contiguity guard). See CHANGELOG [5.6.34].
+    while (_heap_end < _heap_ptr) {
+        var result = syscall(9, _heap_end, 0x100000, 3, 0x1002, 0 - 1, 0);
+        if (result < 0) {
+            _heap_ptr = ptr;
+            _alloc_lock_release();
+            return 0;
+        }
+        # If kernel gave us a different address, the heap is non-contiguous — fail
+        if (result != _heap_end) {
+            syscall(11, result, 0x100000);
+            _heap_ptr = ptr;
+            _alloc_lock_release();
+            return 0;
+        }
+        _heap_end = _heap_end + 0x100000;
+    }
+    _alloc_lock_release();
+    return ptr;
+}
+
+# Reset the heap, freeing all allocations at once. Locked so a concurrent
+# alloc() can't observe a half-updated bump pointer.
+fn alloc_reset() {
+    _alloc_lock_acquire();
+    _heap_ptr = _heap_base;
+    _alloc_lock_release();
+    return 0;
+}
+
+# Return the number of heap bytes currently in use
+fn alloc_used() {
+    return _heap_ptr - _heap_base;
+}
+
+# v6.0.57: the arena_* allocator (arena_new / arena_alloc / arena_reset /
+# arena_used / arena_remaining) is defined un-gated in lib/alloc.cyr and works
+# on macOS as-is, so the duplicate copies that lived here only produced five
+# "duplicate fn ... (last definition wins)" warnings on every macOS build.
+# Removed — same shape as lib/alloc_windows.cyr (OS allocator only). See
+# docs/development/issues/2026-06-02-macos-alloc-arena-duplicate-fns.md.

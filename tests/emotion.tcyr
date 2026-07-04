@@ -1,0 +1,208 @@
+# emotion.tcyr -- tests for src/emotion.cyr.
+# rust-old/src/emotion.rs had no #[test] blocks; parity surface is the
+# valence/arousal -> (Vocalization, CallIntent) mapping (all 9 zone quadrants +
+# their sub-branches) and the evaluate() continuous outputs (vocal_effort,
+# pitch_scale, breathiness_delta). Golden float values computed by hand in f64,
+# matching the Rust match arms + arithmetic exactly. serde/Display tests dropped.
+
+include "src/error.cyr"
+include "src/vocalization.cyr"
+include "src/emotion.cyr"
+
+alloc_init();
+
+# ---- test input constants (IEEE-754 hex) ----
+var T_NEG_0_8 = 0xbfe999999999999a;   # -0.8
+var T_NEG_0_6 = 0xbfe3333333333333;   # -0.6
+var T_NEG_0_5 = 0xbfe0000000000000;   # -0.5
+var T_NEG_0_3 = 0xbfd3333333333333;   # -0.3
+var T_POS_0_7 = 0x3fe6666666666666;   #  0.7
+var T_POS_0_3 = 0x3fd3333333333333;   #  0.3
+var T_0_0     = 0x0000000000000000;   #  0.0
+var T_0_1     = 0x3fb999999999999a;   #  0.1
+var T_0_2     = 0x3fc999999999999a;   #  0.2
+var T_0_5     = 0x3fe0000000000000;   #  0.5
+var T_0_9     = 0x3feccccccccccccd;   #  0.9
+var T_1_0     = 0x3ff0000000000000;   #  1.0
+var T_2_0     = 0x4000000000000000;   #  2.0
+var T_NEG_2_0 = 0xc000000000000000;   # -2.0
+var T_NEG_1_0 = 0xbff0000000000000;   # -1.0
+
+# ================================================================
+test_group("constructors -- new() defaults + accessors");
+var e = emotion_new();
+assert_eq(emotion_valence(e), T_0_0, "new valence == 0.0");
+assert_eq(emotion_arousal(e), T_0_2, "new arousal == 0.2");
+assert_eq(PrEmotion_smoothing(e), T_0_1, "new smoothing == 0.1");
+
+# ================================================================
+test_group("with_values -- clamps to valid ranges");
+var ec = emotion_with_values(T_NEG_2_0, T_2_0);
+assert_eq(emotion_valence(ec), T_NEG_1_0, "valence clamped to -1.0");
+assert_eq(emotion_arousal(ec), T_1_0, "arousal clamped to 1.0");
+var ec2 = emotion_with_values(T_2_0, T_NEG_2_0);
+assert_eq(emotion_valence(ec2), T_1_0, "valence clamped to +1.0");
+assert_eq(emotion_arousal(ec2), T_0_0, "arousal clamped to 0.0");
+var ecmid = emotion_with_values(T_POS_0_7, T_0_5);
+assert_eq(emotion_valence(ecmid), T_POS_0_7, "valence 0.7 unclamped");
+assert_eq(emotion_arousal(ecmid), T_0_5, "arousal 0.5 unclamped");
+assert_eq(PrEmotion_smoothing(ecmid), T_0_1, "with_values smoothing default 0.1");
+
+# ================================================================
+test_group("with_smoothing -- clamps to [0.0, 0.95]");
+var es = emotion_with_smoothing(emotion_new(), T_2_0);
+assert_eq(PrEmotion_smoothing(es), 0x3fee666666666666, "smoothing clamped to 0.95");
+var es2 = emotion_with_smoothing(emotion_new(), T_NEG_1_0);
+assert_eq(PrEmotion_smoothing(es2), T_0_0, "smoothing clamped to 0.0");
+var es3 = emotion_with_smoothing(emotion_new(), T_0_5);
+assert_eq(PrEmotion_smoothing(es3), T_0_5, "smoothing 0.5 unclamped");
+
+# ================================================================
+test_group("set -- direct assignment with clamping");
+var eset = emotion_new();
+emotion_set(eset, T_2_0, T_2_0);
+assert_eq(emotion_valence(eset), T_1_0, "set valence clamped +1.0");
+assert_eq(emotion_arousal(eset), T_1_0, "set arousal clamped 1.0");
+
+# ================================================================
+test_group("update -- exponential decay toward target (s=0.1)");
+# new(): v=0.0, a=0.2, s=0.1. update toward (1.0, 1.0):
+#   v = 0.0*0.1 + 1.0*0.9 = 0.9
+#   a = 0.2*0.1 + 1.0*0.9 = 0.92
+var eu = emotion_new();
+emotion_update(eu, T_1_0, T_1_0);
+assert_eq(emotion_valence(eu), 0x3feccccccccccccd, "update valence -> 0.9");
+assert_eq(emotion_arousal(eu), 0x3fed70a3d70a3d71, "update arousal -> 0.92");
+# targets clamped before blending: update toward (-2.0, -2.0) from new()
+var eu2 = emotion_new();
+emotion_update(eu2, T_NEG_2_0, T_NEG_2_0);
+# v = 0.0*0.1 + (-1.0)*0.9 = -0.9 ; a = 0.2*0.1 + 0.0*0.9 = 0.02
+assert_eq(emotion_valence(eu2), 0xbfeccccccccccccd, "update valence clamped tgt -> -0.9");
+assert_eq(emotion_arousal(eu2), 0x3f947ae147ae147c, "update arousal clamped tgt -> 0.02");
+
+# ================================================================
+test_group("valence_zone / arousal_zone boundaries");
+var z = emotion_new();
+emotion_set(z, T_NEG_0_5, T_0_1);
+assert_eq(emotion_valence_zone(z), PRE_VZ_NEGATIVE, "valence -0.5 -> Negative");
+assert_eq(emotion_arousal_zone(z), PRE_AZ_LOW, "arousal 0.1 -> Low");
+emotion_set(z, T_POS_0_7, T_0_9);
+assert_eq(emotion_valence_zone(z), PRE_VZ_POSITIVE, "valence 0.7 -> Positive");
+assert_eq(emotion_arousal_zone(z), PRE_AZ_HIGH, "arousal 0.9 -> High");
+emotion_set(z, T_0_0, T_0_5);
+assert_eq(emotion_valence_zone(z), PRE_VZ_NEUTRAL, "valence 0.0 -> Neutral");
+assert_eq(emotion_arousal_zone(z), PRE_AZ_MID, "arousal 0.5 -> Mid");
+
+# ================================================================
+test_group("select_vocalization -- all 9 zone quadrants + sub-branches");
+var s = emotion_new();
+# Negative / High: screech (v < -0.5) vs bark
+emotion_set(s, T_NEG_0_8, T_0_9);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_SCREECH, "Neg/High v=-0.8 -> Screech");
+emotion_set(s, T_NEG_0_3, T_0_9);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_BARK, "Neg/High v=-0.3 -> Bark");
+# Positive / High: trill (v > 0.5) vs chirp
+emotion_set(s, T_POS_0_7, T_0_9);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_TRILL, "Pos/High v=0.7 -> Trill");
+emotion_set(s, T_POS_0_3, T_0_9);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_CHIRP, "Pos/High v=0.3 -> Chirp");
+# Neutral / High -> Bark
+emotion_set(s, T_0_0, T_0_9);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_BARK, "Neu/High -> Bark");
+# Negative / Low -> Growl
+emotion_set(s, T_NEG_0_5, T_0_1);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_GROWL, "Neg/Low -> Growl");
+# Positive / Low -> Purr
+emotion_set(s, T_POS_0_7, T_0_1);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_PURR, "Pos/Low -> Purr");
+# Neutral / Low -> Rumble
+emotion_set(s, T_0_0, T_0_2);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_RUMBLE, "Neu/Low -> Rumble");
+# Negative / Mid -> Growl
+emotion_set(s, T_NEG_0_5, T_0_5);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_GROWL, "Neg/Mid -> Growl");
+# Positive / Mid -> Howl
+emotion_set(s, T_POS_0_7, T_0_5);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_HOWL, "Pos/Mid -> Howl");
+# Neutral / Mid -> Whine
+emotion_set(s, T_0_0, T_0_5);
+assert_eq(emotion_select_vocalization(s), PRANI_VOC_WHINE, "Neu/Mid -> Whine");
+
+# ================================================================
+test_group("select_intent -- all 9 zone quadrants + sub-branches");
+var it = emotion_new();
+# Negative / High: distress (v < -0.7) vs alarm
+emotion_set(it, T_NEG_0_8, T_0_9);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_DISTRESS, "Neg/High v=-0.8 -> Distress");
+emotion_set(it, T_NEG_0_6, T_0_9);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_ALARM, "Neg/High v=-0.6 -> Alarm");
+emotion_set(it, T_NEG_0_3, T_0_9);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_ALARM, "Neg/High v=-0.3 -> Alarm");
+# Positive / High -> Mating
+emotion_set(it, T_POS_0_7, T_0_9);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_MATING, "Pos/High -> Mating");
+# Neutral / High -> Alarm
+emotion_set(it, T_0_0, T_0_9);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_ALARM, "Neu/High -> Alarm");
+# Negative / Low -> Threat
+emotion_set(it, T_NEG_0_5, T_0_1);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_THREAT, "Neg/Low -> Threat");
+# Positive / Low -> Idle
+emotion_set(it, T_POS_0_7, T_0_1);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_IDLE, "Pos/Low -> Idle");
+# Neutral / Low -> Idle
+emotion_set(it, T_0_0, T_0_2);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_IDLE, "Neu/Low -> Idle");
+# Negative / Mid -> Threat
+emotion_set(it, T_NEG_0_5, T_0_5);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_THREAT, "Neg/Mid -> Threat");
+# Positive / Mid -> Social
+emotion_set(it, T_POS_0_7, T_0_5);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_SOCIAL, "Pos/Mid -> Social");
+# Neutral / Mid -> Social
+emotion_set(it, T_0_0, T_0_5);
+assert_eq(emotion_select_intent(it), PRANI_INTENT_SOCIAL, "Neu/Mid -> Social");
+
+# ================================================================
+test_group("evaluate -- Neutral/Low default (new state)");
+var ev = emotion_new();   # v=0.0, a=0.2
+var o = emotion_evaluate(ev);
+assert_eq(PrEmotionOut_vocalization(o), PRANI_VOC_RUMBLE, "default vocalization Rumble");
+assert_eq(PrEmotionOut_intent(o), PRANI_INTENT_IDLE, "default intent Idle");
+# effort = 0.2 + 0.2*0.7 = 0.34
+assert_eq(PrEmotionOut_vocal_effort(o), 0x3fd5c28f5c28f5c2, "effort 0.34");
+# pitch = 1.0 + 0.0*0.15 = 1.0
+assert_eq(PrEmotionOut_pitch_scale(o), T_1_0, "pitch 1.0");
+# arousal 0.2 is NOT < 0.2 -> breath 0.0
+assert_eq(PrEmotionOut_breathiness_delta(o), T_0_0, "breath 0.0 at arousal 0.2");
+
+# ================================================================
+test_group("evaluate -- high-arousal breathiness branch (v=-0.8, a=0.9)");
+var eh = emotion_new();
+emotion_set(eh, T_NEG_0_8, T_0_9);
+var oh = emotion_evaluate(eh);
+assert_eq(PrEmotionOut_vocalization(oh), PRANI_VOC_SCREECH, "screech");
+assert_eq(PrEmotionOut_intent(oh), PRANI_INTENT_DISTRESS, "distress");
+# effort = 0.2 + 0.9*0.7 = 0.83
+assert_eq(PrEmotionOut_vocal_effort(oh), 0x3fea8f5c28f5c290, "effort 0.83");
+# pitch = 1.0 + (-0.8)*0.15 = 0.88
+assert_eq(PrEmotionOut_pitch_scale(oh), 0x3fec28f5c28f5c29, "pitch 0.88");
+# breath = (0.9-0.8)*0.75 = 0.075
+assert_eq(PrEmotionOut_breathiness_delta(oh), 0x3fb3333333333332, "breath 0.075 (high)");
+
+# ================================================================
+test_group("evaluate -- low-arousal breathiness branch (v=0.7, a=0.1)");
+var el = emotion_new();
+emotion_set(el, T_POS_0_7, T_0_1);
+var ol = emotion_evaluate(el);
+assert_eq(PrEmotionOut_vocalization(ol), PRANI_VOC_PURR, "purr");
+assert_eq(PrEmotionOut_intent(ol), PRANI_INTENT_IDLE, "idle");
+# effort = 0.2 + 0.1*0.7 = 0.27
+assert_eq(PrEmotionOut_vocal_effort(ol), 0x3fd147ae147ae148, "effort 0.27");
+# pitch = 1.0 + 0.7*0.15 = 1.105
+assert_eq(PrEmotionOut_pitch_scale(ol), 0x3ff1ae147ae147ae, "pitch 1.105");
+# breath = (0.2-0.1)*0.5 = 0.05
+assert_eq(PrEmotionOut_breathiness_delta(ol), 0x3fa999999999999a, "breath 0.05 (low)");
+
+var rc = assert_summary();
+syscall(60, rc);

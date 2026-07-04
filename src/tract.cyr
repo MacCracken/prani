@@ -1,0 +1,467 @@
+# tract.cyr -- creature-specific vocal tract models.
+# Ports rust-old/src/tract.rs. Wraps svara's VocalTract / GlottalSource /
+# FormantFilter (+ naad BiquadFilter under naad-backend, the shipped default)
+# with species-specific formant targets and vocal-apparatus-driven excitation.
+#
+# Synthesis strategy depends on the vocal apparatus:
+#   Laryngeal / Syringeal : glottal source through the formant-shaping tract
+#   NoiseOnly             : filtered broadband noise (naad bandpass) -- snakes
+#   Stridulatory          : discrete/continuous AM tone -- insects
+#   Vibratile             : continuous wing-beat modulation -- bees/flies
+#
+# Requires (from the build/test unit, in dependency order): stdlib alloc/vec/
+# math, hisab, goonj, naad (filter_biquad_new/process_sample, FILTER_BANDPASS),
+# svara (svara_tract_*/svara_glottal_*/svara_vowel_target_with_bandwidths,
+# svara_is_err), error.cyr, rng.cyr, dsp.cyr, species.cyr. Module files carry
+# no `include` lines -- the entry orders them.
+#
+# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
+# widening is forced). Integer literals via f64_from(n); non-integers via the
+# module-top IEEE-754 hex constants below (decimals in comments).
+#
+# PARITY NOTE (naad-backend default): NoiseOnly always pre-builds a naad bandpass
+# filter (default features), so synthesize_noise takes the naad path and the
+# svara FormantFilter fallback is dropped (documented deviation). Exact svara-
+# internal bit parity vs the f32 oracle is not attainable (f32->f64 diverges
+# through svara's own DSP); tests assert structural parity + finiteness +
+# determinism instead. See tests/tract.tcyr parity_notes.
+
+# ================================================================
+# Non-integer literal constants (IEEE-754 hex; decimals in comments).
+# ================================================================
+var PR_TR_1_3   = 0x3ff4cccccccccccd;   # 1.3   F4 estimate multiplier
+var PR_TR_1_5   = 0x3ff8000000000000;   # 1.5   F5 estimate multiplier
+var PR_TR_1_2   = 0x3ff3333333333333;   # 1.2   B4 estimate multiplier
+var PR_TR_1_4   = 0x3ff6666666666666;   # 1.4   B5 estimate multiplier
+var PR_TR_0_05  = 0x3fa999999999999a;   # 0.05  jitter clamp ceiling
+var PR_TR_0_1   = 0x3fb999999999999a;   # 0.1   shimmer clamp ceiling / tilt abs threshold
+var PR_TR_0_5   = 0x3fe0000000000000;   # 0.5   sub_f0 mult / tone mix / mod_rate / env thresholds
+var PR_TR_1_498 = 0x3ff7f7ced916872b;   # 1.498 syringeal second-source ratio (~perfect fifth)
+var PR_TR_0_6   = 0x3fe3333333333333;   # 0.6   tone2 amplitude
+var PR_TR_0_25  = 0x3fd0000000000000;   # 0.25  stridulatory/vibratile signal scale
+var PR_TR_0_3   = 0x3fd3333333333333;   # 0.3   second-harmonic amplitude
+var PR_TR_2_5   = 0x4004000000000000;   # 2.5   cricket chirp rate (Hz)
+var PR_TR_30_0  = 0x403e000000000000;   # 30.0  cricket syllable rate (Hz)
+var PR_TR_0_4   = 0x3fd999999999999a;   # 0.4   purr open-phase duty
+var PR_TR_0_02  = 0x3f947ae147ae147b;   # 0.02  purr closed-phase noise scale
+var PR_TR_0_85  = 0x3feb333333333333;   # 0.85  spectral-tilt coefficient clamp ceiling
+var PR_TR_0_01  = 0x3f847ae147ae147b;   # 0.01  spectral-tilt coefficient floor
+var PR_TR_12_0  = 0x4028000000000000;   # 12.0  dB/octave -> coefficient divisor
+
+# ================================================================
+# SynthesisOptions -- per-block synthesis modifiers passed voice -> tract.
+#   subharmonic_amp   : subharmonic amplitude (0.0 = none), injected pre-tract
+#   perturbation_scale: jitter/shimmer intensity multiplier (0.0-2.0)
+# Default = both 0.0 (see crtract_options_default).
+# ================================================================
+#derive(accessors)
+struct SynthesisOptions { subharmonic_amp; perturbation_scale; }
+
+# options_default -- SynthesisOptions::default() (both fields 0.0).
+#must_use
+fn crtract_options_default() {
+    var o = alloc(sizeof(SynthesisOptions));
+    SynthesisOptions_set_subharmonic_amp(o, 0);
+    SynthesisOptions_set_perturbation_scale(o, 0);
+    return o;
+}
+
+# options_new -- explicit constructor for tests / callers.
+#must_use
+fn crtract_options_new(subharmonic_amp, perturbation_scale) {
+    var o = alloc(sizeof(SynthesisOptions));
+    SynthesisOptions_set_subharmonic_amp(o, subharmonic_amp);
+    SynthesisOptions_set_perturbation_scale(o, perturbation_scale);
+    return o;
+}
+
+# ================================================================
+# CreatureTract -- a creature's vocal tract, configured for one species.
+#   tract        : inner svara VocalTract ptr
+#   params       : SpeciesParams ptr (species vocal parameters)
+#   rng          : PrRng ptr (noise-based synthesis)
+#   sample_rate  : sample rate (Hz)
+#   phase        : running phase accumulator (sample-accurate across blocks)
+#   dc_blocker   : DcBlocker ptr (applied to all synthesis output)
+#   noise_filter : naad BiquadFilter ptr for noise shaping, or 0 (== None)
+# serde dropped (integer/pointer state).
+# ================================================================
+#derive(accessors)
+struct CreatureTract {
+    tract; params; rng; sample_rate; phase; dc_blocker; noise_filter;
+}
+
+# new(params, sample_rate) -- CreatureTract::new. Configures the svara tract
+# with species-specific formants (F4/F5 estimated at 1.3x/1.5x F3), pre-builds
+# a naad bandpass for NoiseOnly species, seeds the rng from the species'
+# resonance seed. Rust only WARNS if set_formants_from_target errors, then
+# continues -- so the return is ignored here too.
+#must_use
+fn crtract_new(params, sample_rate) {
+    var tract = svara_tract_new(sample_rate);
+
+    var f0 = SpeciesParams_formant0(params);
+    var f1 = SpeciesParams_formant1(params);
+    var f2 = SpeciesParams_formant2(params);
+    var b0 = SpeciesParams_bandwidth0(params);
+    var b1 = SpeciesParams_bandwidth1(params);
+    var b2 = SpeciesParams_bandwidth2(params);
+
+    # F4/F5 estimated at 1.3x/1.5x F3; B4/B5 at 1.2x/1.4x B3.
+    var target = svara_vowel_target_with_bandwidths(
+        f0, f1, f2, f64_mul(f2, PR_TR_1_3), f64_mul(f2, PR_TR_1_5),
+        b0, b1, b2, f64_mul(b2, PR_TR_1_2), f64_mul(b2, PR_TR_1_4));
+    # Rust: `if let Err(e) = ... { warn!(...) }` -- ignore the return, continue.
+    # (Bind-and-drop to consume the #must_use result; parity = warn-then-continue.)
+    var _fmt_rc = svara_tract_set_formants_from_target(tract, target);
+
+    # naad-backend: pre-build a bandpass for NoiseOnly (snakes). Error -> None(0).
+    var noise_filter = 0;
+    if (SpeciesParams_apparatus(params) == PRANI_APP_NOISE_ONLY) {
+        var nf = filter_biquad_new(FILTER_BANDPASS, sample_rate, f0, f64_from(2));
+        if (prani_is_err(nf) == 0) { noise_filter = nf; }
+    }
+
+    var self = alloc(sizeof(CreatureTract));
+    CreatureTract_set_tract(self, tract);
+    CreatureTract_set_params(self, params);
+    CreatureTract_set_rng(self, prani_rng_new(species_params_resonance_seed(params)));
+    CreatureTract_set_sample_rate(self, sample_rate);
+    CreatureTract_set_phase(self, 0);
+    CreatureTract_set_dc_blocker(self, dcblocker_new());
+    CreatureTract_set_noise_filter(self, noise_filter);
+    return self;
+}
+
+# ---- private synthesis paths ------------------------------------------------
+
+# synthesize_laryngeal -- glottal source through the vocal tract (mammals).
+# Returns a vec (heap ptr) on success or a negative PRANI_ERR_* on failure.
+fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
+    var params = CreatureTract_params(self);
+    var sr = CreatureTract_sample_rate(self);
+    var tract = CreatureTract_tract(self);
+
+    # clamp f0 to [max(f0_min,20), min(f0_max,2000)]
+    var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
+    var hi = f64_min(SpeciesParams_f0_max(params), f64_from(2000));
+    var clamped_f0 = f64_clamp(f0, lo, hi);
+
+    var glottal = svara_glottal_new(clamped_f0, sr);
+    if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
+    svara_glottal_set_breathiness(glottal, SpeciesParams_breathiness(params));
+    # non-stationary perturbation: scale jitter/shimmer by block intensity
+    var ps = f64_max(SynthesisOptions_perturbation_scale(options), 0);
+    svara_glottal_set_jitter(glottal, f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05));
+    svara_glottal_set_shimmer(glottal, f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1));
+
+    var output = vec_new();
+    if (f64_gt(SynthesisOptions_subharmonic_amp(options), 0) == 1) {
+        # inject subharmonics into excitation before tract filtering, so the
+        # formant resonances shape the subharmonic energy.
+        var sub_f0 = f64_mul(clamped_f0, PR_TR_0_5);
+        var phase_inc = f64_div(sub_f0, sr);
+        var i = 0;
+        while (i < num_samples) {
+            var glottal_sample = svara_glottal_next_sample(glottal);
+            var sub = f64_mul(f64_sin(f64_mul(F64_TAU, CreatureTract_phase(self))),
+                SynthesisOptions_subharmonic_amp(options));
+            var ph = f64_add(CreatureTract_phase(self), phase_inc);
+            if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+            CreatureTract_set_phase(self, ph);
+            vec_push(output, svara_tract_process_sample(tract, f64_add(glottal_sample, sub)));
+            i = i + 1;
+        }
+    } else {
+        # no-subharmonic path: inline svara_tract_synthesize's loop, pushing
+        # into the vec directly (avoids the raw-buffer/vec mismatch before DC).
+        var i = 0;
+        while (i < num_samples) {
+            vec_push(output, svara_tract_process_sample(tract, svara_glottal_next_sample(glottal)));
+            i = i + 1;
+        }
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
+    return output;
+}
+
+# synthesize_syringeal -- dual-source capable, high-frequency range (birds).
+fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
+    var params = CreatureTract_params(self);
+    var sr = CreatureTract_sample_rate(self);
+    var tract = CreatureTract_tract(self);
+
+    # clamp f0 to [max(f0_min,20), f0_max]
+    var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
+    var clamped_f0 = f64_clamp(f0, lo, SpeciesParams_f0_max(params));
+
+    var output = vec_new();
+    if (f64_le(clamped_f0, f64_from(2000)) == 1) {
+        var glottal = svara_glottal_new(clamped_f0, sr);
+        if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
+        svara_glottal_set_breathiness(glottal, SpeciesParams_breathiness(params));
+        var ps = f64_max(SynthesisOptions_perturbation_scale(options), 0);
+        svara_glottal_set_jitter(glottal, f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05));
+        svara_glottal_set_shimmer(glottal, f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1));
+        var i = 0;
+        while (i < num_samples) {
+            vec_push(output, svara_tract_process_sample(tract, svara_glottal_next_sample(glottal)));
+            i = i + 1;
+        }
+    } else {
+        # high-frequency syringeal with dual-source capability: the syrinx has
+        # two independent sound sources (left/right bronchus) at different pitches.
+        var f0_2 = f64_mul(clamped_f0, PR_TR_1_498);   # ~perfect fifth above
+        var breathiness = SpeciesParams_breathiness(params);
+        var rng = CreatureTract_rng(self);
+        var i = 0;
+        while (i < num_samples) {
+            var t = f64_div(f64_from(i), sr);
+            var tone1 = f64_sin(f64_mul(f64_mul(F64_TAU, clamped_f0), t));
+            var tone2 = f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, f0_2), t)), PR_TR_0_6);
+            var noise = f64_mul(prani_rng_next_f32(rng), breathiness);
+            # excitation = (tone1+tone2)*0.5*(1-breathiness) + noise
+            var excitation = f64_add(
+                f64_mul(f64_mul(f64_add(tone1, tone2), PR_TR_0_5), f64_sub(F64_ONE, breathiness)),
+                noise);
+            vec_push(output, svara_tract_process_sample(tract, excitation));
+            i = i + 1;
+        }
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
+    return output;
+}
+
+# synthesize_noise -- filtered broadband noise (snakes). naad-backend path:
+# the pre-built bandpass shapes white noise. The svara FormantFilter fallback
+# is dropped (naad-backend default -- noise_filter is always present here).
+fn crtract_synthesize_noise(self, num_samples) {
+    var output = vec_new();
+    var filter = CreatureTract_noise_filter(self);
+    var rng = CreatureTract_rng(self);
+    var i = 0;
+    while (i < num_samples) {
+        var noise = f64_mul(prani_rng_next_f32(rng), PR_TR_0_5);
+        vec_push(output, filter_biquad_process_sample(filter, noise));
+        i = i + 1;
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
+    return output;
+}
+
+# synthesize_stridulatory -- amplitude-modulated tone for insects.
+# High-carrier (cricket, f0 > 1000): discrete pulse-train chirps.
+# Low-carrier (bee, f0 <= 1000): continuous wing-beat modulation.
+fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
+    var sr = CreatureTract_sample_rate(self);
+    var output = vec_new();
+
+    if (f64_gt(f0, f64_from(1000)) == 1) {
+        # cricket-style discrete pulse-train chirps.
+        var syllable_rate = PR_TR_30_0;   # wing strokes per second within a chirp
+        var chirp_rate = PR_TR_2_5;       # chirps per second
+        var pulses_per_chirp = 4;         # typical field cricket (u32)
+        var chirp_period = f64_div(sr, chirp_rate);
+        var syllable_period = f64_div(sr, syllable_rate);
+        var chirp_active = f64_mul(syllable_period, f64_from(pulses_per_chirp));
+
+        var i = 0;
+        while (i < num_samples) {
+            var t = f64_div(f64_from(i), sr);
+            # pos_in_chirp = (i as f32) % chirp_period
+            var pos_in_chirp = crtract_fmod(f64_from(i), chirp_period);
+
+            var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
+            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
+            var signal = f64_mul(f64_add(carrier, h2), PR_TR_0_25);
+
+            if (f64_lt(pos_in_chirp, chirp_active) == 1) {
+                # within active chirp: pulse envelope per syllable
+                var pos_in_syllable = crtract_fmod(pos_in_chirp, syllable_period);
+                var syllable_frac = f64_div(pos_in_syllable, syllable_period);
+                # sharp onset, quick decay per pulse (wing-stroke shape)
+                var pulse_env = 0;
+                if (f64_lt(syllable_frac, PR_TR_0_1) == 1) {
+                    pulse_env = f64_div(syllable_frac, PR_TR_0_1);
+                } elif (f64_lt(syllable_frac, PR_TR_0_5) == 1) {
+                    pulse_env = F64_ONE;
+                } else {
+                    # 1.0 - (syllable_frac - 0.5) / 0.5
+                    pulse_env = f64_sub(F64_ONE, f64_div(f64_sub(syllable_frac, PR_TR_0_5), PR_TR_0_5));
+                }
+                vec_push(output, f64_mul(signal, pulse_env));
+            } else {
+                # inter-chirp silence
+                vec_push(output, 0);
+            }
+            i = i + 1;
+        }
+    } else {
+        # bee-style continuous wing-beat modulation
+        var mod_rate = f64_mul(f0, PR_TR_0_5);
+        var i = 0;
+        while (i < num_samples) {
+            var t = f64_div(f64_from(i), sr);
+            var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
+            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
+            # modulator = 0.5 + 0.5*sin(TAU*mod_rate*t)
+            var modulator = f64_add(PR_TR_0_5,
+                f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
+            vec_push(output, f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25));
+            i = i + 1;
+        }
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
+    return output;
+}
+
+# synthesize_vibratile -- continuous wing-beat modulation (bees, flies).
+# Thoracic flight-muscle vibration through wings; steady buzz, AM at half the
+# wing frequency.
+fn crtract_synthesize_vibratile(self, f0, num_samples) {
+    var sr = CreatureTract_sample_rate(self);
+    var mod_rate = f64_mul(f0, PR_TR_0_5);
+    var output = vec_new();
+    var i = 0;
+    while (i < num_samples) {
+        var t = f64_div(f64_from(i), sr);
+        var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
+        var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
+        var modulator = f64_add(PR_TR_0_5,
+            f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
+        vec_push(output, f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25));
+        i = i + 1;
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
+    return output;
+}
+
+# fmod helper -- floating remainder a - trunc(a/b)*b (matches Rust f32 `%`
+# for the non-negative operands used here: i-index positions and periods).
+#must_use
+fn crtract_fmod(a, b) {
+    var q = f64_trunc(f64_div(a, b));
+    return f64_sub(a, f64_mul(q, b));
+}
+
+# ---- public API -------------------------------------------------------------
+
+# synthesize(f0, num_samples, options) -- CreatureTract::synthesize. Dispatches
+# on the species' vocal apparatus. Returns a vec (heap ptr) on success or a
+# negative PRANI_ERR_* on failure.
+#inline
+fn crtract_synthesize(self, f0, num_samples, options) {
+    var apparatus = SpeciesParams_apparatus(CreatureTract_params(self));
+    if (apparatus == PRANI_APP_LARYNGEAL) {
+        return crtract_synthesize_laryngeal(self, f0, num_samples, options);
+    }
+    if (apparatus == PRANI_APP_SYRINGEAL) {
+        return crtract_synthesize_syringeal(self, f0, num_samples, options);
+    }
+    if (apparatus == PRANI_APP_NOISE_ONLY) {
+        return crtract_synthesize_noise(self, num_samples);
+    }
+    if (apparatus == PRANI_APP_STRIDULATORY) {
+        return crtract_synthesize_stridulatory(self, f0, num_samples, options);
+    }
+    # PRANI_APP_VIBRATILE
+    return crtract_synthesize_vibratile(self, f0, num_samples);
+}
+
+# synthesize_purr(num_samples, purr_f0) -- 25-30 Hz laryngeal muscle cycling.
+# Asymmetric waveform (0.4 open duty): a sharp squared half-sine pulse burst on
+# the open phase excites the tract resonances; near-silence + faint noise on the
+# closed phase. Returns a vec ptr (never fails -- no glottal source involved).
+#inline
+#must_use
+fn crtract_synthesize_purr(self, num_samples, purr_f0) {
+    var sr = CreatureTract_sample_rate(self);
+    var tract = CreatureTract_tract(self);
+    var rng = CreatureTract_rng(self);
+    var phase_inc = f64_div(purr_f0, sr);
+    var output = vec_new();
+    var i = 0;
+    while (i < num_samples) {
+        var phase_frac = CreatureTract_phase(self);
+        var excitation = 0;
+        if (f64_lt(phase_frac, PR_TR_0_4) == 1) {
+            # open phase: sharp glottal-like pulse burst (squared half-sine)
+            var t = f64_div(phase_frac, PR_TR_0_4);
+            var pulse = f64_sin(f64_mul(F64_PI, t));
+            excitation = f64_mul(pulse, pulse);   # squared for a sharper pulse
+        } else {
+            # closed phase: near silence with slight noise
+            excitation = f64_mul(prani_rng_next_f32(rng), PR_TR_0_02);
+        }
+        var ph = f64_add(CreatureTract_phase(self), phase_inc);
+        if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+        CreatureTract_set_phase(self, ph);
+        # sharp pulse excites the vocal tract -> resonant harmonics
+        vec_push(output, svara_tract_process_sample(tract, excitation));
+        i = i + 1;
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
+    return output;
+}
+
+# set_formant_blend(target, target_bw, blend) -- CreatureTract::set_formant_blend.
+# Blends species-default formants toward `target` by `blend` (clamped [0,1]);
+# `target` / `target_bw` are 3-slot vecs (F1-F3 / B1-B3). At blend=0 uses the
+# species defaults, at blend=1 uses `target`. Returns PRANI_ERR_NONE or a
+# negative svara error mapped through prani.
+fn crtract_set_formant_blend(self, target, target_bw, blend) {
+    var params = CreatureTract_params(self);
+    var bl = f64_clamp(blend, 0, F64_ONE);
+
+    var f0 = SpeciesParams_formant0(params);
+    var f1 = SpeciesParams_formant1(params);
+    var f2 = SpeciesParams_formant2(params);
+    var b0 = SpeciesParams_bandwidth0(params);
+    var b1 = SpeciesParams_bandwidth1(params);
+    var b2 = SpeciesParams_bandwidth2(params);
+
+    # blended = base + (target - base) * blend
+    var bf0 = f64_add(f0, f64_mul(f64_sub(vec_get(target, 0), f0), bl));
+    var bf1 = f64_add(f1, f64_mul(f64_sub(vec_get(target, 1), f1), bl));
+    var bf2 = f64_add(f2, f64_mul(f64_sub(vec_get(target, 2), f2), bl));
+    var bb0 = f64_add(b0, f64_mul(f64_sub(vec_get(target_bw, 0), b0), bl));
+    var bb1 = f64_add(b1, f64_mul(f64_sub(vec_get(target_bw, 1), b1), bl));
+    var bb2 = f64_add(b2, f64_mul(f64_sub(vec_get(target_bw, 2), b2), bl));
+
+    var vowel = svara_vowel_target_with_bandwidths(
+        bf0, bf1, bf2, f64_mul(bf2, PR_TR_1_3), f64_mul(bf2, PR_TR_1_5),
+        bb0, bb1, bb2, f64_mul(bb2, PR_TR_1_2), f64_mul(bb2, PR_TR_1_4));
+    # Rust used `.map_err(Into::into)` -- propagate svara error through prani.
+    return prani_from_svara(svara_tract_set_formants_from_target(CreatureTract_tract(self), vowel));
+}
+
+# apply_spectral_tilt(samples, tilt_db, sample_rate) -- static; first-order
+# lowpass applied in place to a vec. tilt_db is dB/octave: negative = darker
+# (lowpass), 0 = neutral. y[n] = (1-a)*x[n] + a*y[n-1]. The coefficient is
+# derived from tilt_db directly (sample_rate unused, kept for signature parity).
+fn crtract_apply_spectral_tilt(samples, tilt_db, sample_rate) {
+    if (f64_lt(f64_abs(tilt_db), PR_TR_0_1) == 1) { return 0; }
+    # dB/octave -> coefficient: a = clamp(-tilt_db/12, 0, 0.85)
+    var a = f64_clamp(f64_div(f64_neg(tilt_db), PR_TR_12_0), 0, PR_TR_0_85);
+    if (f64_lt(a, PR_TR_0_01) == 1) { return 0; }
+    var one_minus_a = f64_sub(F64_ONE, a);
+    var prev = 0;
+    var n = vec_len(samples);
+    var i = 0;
+    while (i < n) {
+        # *s = (1-a)*x + a*prev; prev = *s
+        var y = f64_add(f64_mul(one_minus_a, vec_get(samples, i)), f64_mul(a, prev));
+        vec_set(samples, i, y);
+        prev = y;
+        i = i + 1;
+    }
+    return 0;
+}
+
+# reset -- CreatureTract::reset. Clears the svara tract state, phase, and the
+# DC blocker memory.
+fn crtract_reset(self) {
+    svara_tract_reset(CreatureTract_tract(self));
+    CreatureTract_set_phase(self, 0);
+    dcblocker_reset(CreatureTract_dc_blocker(self));
+}

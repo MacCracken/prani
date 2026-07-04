@@ -1,0 +1,97 @@
+# vocalization.cyr -- vocalization patterns + call-intent prosody mapping.
+# Ports rust-old/src/vocalization.rs. Two enums (Vocalization, CallIntent) ->
+# integer constants, plus IntentModifiers (a 4-field prosody struct) and
+# CallIntent::modifiers() -> a fixed lookup returning that struct.
+#
+# Keystone base module: emotion, species, voice, sequence, stream, ffi all lean
+# on these constants. No internal deps. serde/Display tests dropped (no serde,
+# integer codes).
+
+# ================================================================
+# Vocalization -- the shape/character of a creature call (was `enum
+# Vocalization`, 14 variants). Discriminant == declaration order (0-based),
+# matching Rust's default enum layout.
+# ================================================================
+var PRANI_VOC_HOWL       = 0;    # long sustained, pitch rise then fall (wolves)
+var PRANI_VOC_BARK       = 1;    # short sharp burst (dogs, seals)
+var PRANI_VOC_GROWL      = 2;    # low-frequency sustained vibration (cats, bears)
+var PRANI_VOC_ROAR       = 3;    # loud powerful sustained call (lions, dragons)
+var PRANI_VOC_HISS       = 4;    # breathy turbulent noise (snakes, cats)
+var PRANI_VOC_CHIRP      = 5;    # high-pitched short call (birds, small mammals)
+var PRANI_VOC_TRILL      = 6;    # rapid frequency modulation (songbirds)
+var PRANI_VOC_WHINE      = 7;    # ascending pitch call (dogs, wolves)
+var PRANI_VOC_RUMBLE     = 8;    # low rumbling (crocodilians, elephants)
+var PRANI_VOC_PURR       = 9;    # steady low-freq vibration w/ AM (cats)
+var PRANI_VOC_YELP       = 10;   # very short sharp call (small dogs, rodents)
+var PRANI_VOC_SCREECH    = 11;   # high-pitched descending scream (raptors)
+var PRANI_VOC_STRIDULATE = 12;   # rhythmic stridulation (crickets, cicadas)
+var PRANI_VOC_BUZZ       = 13;   # wing-based tonal vibration (bees, flies)
+
+var PRANI_VOC_COUNT = 14;        # number of Vocalization variants
+
+# ================================================================
+# CallIntent -- behavioral intent behind a vocalization (was `enum CallIntent`,
+# 7 variants). Maps to prosodic modifications via prani_intent_modifiers().
+# ================================================================
+var PRANI_INTENT_ALARM       = 0;   # warning of danger: high urgency, elevated pitch
+var PRANI_INTENT_TERRITORIAL = 1;   # claiming territory: loud, sustained
+var PRANI_INTENT_MATING      = 2;   # attracting a mate: melodic, extended
+var PRANI_INTENT_DISTRESS    = 3;   # pain/distress: high pitch, irregular, urgent
+var PRANI_INTENT_IDLE        = 4;   # neutral/background: relaxed, low effort
+var PRANI_INTENT_THREAT      = 5;   # aggression/threat: loud, low pitch, growling
+var PRANI_INTENT_SOCIAL      = 6;   # social bonding: moderate, varied
+
+var PRANI_INTENT_COUNT = 7;         # number of CallIntent variants
+
+# ================================================================
+# Intent modifier float constants (IEEE-754 hex; decimals in comments).
+# ================================================================
+var PR_F_0_0 = 0x0000000000000000;   # 0.0
+var PR_F_0_2 = 0x3FC999999999999A;   # 0.2
+var PR_F_0_3 = 0x3FD3333333333333;   # 0.3
+var PR_F_0_5 = 0x3FE0000000000000;   # 0.5
+var PR_F_0_7 = 0x3FE6666666666666;   # 0.7
+var PR_F_0_8 = 0x3FE999999999999A;   # 0.8
+var PR_F_0_9 = 0x3FECCCCCCCCCCCCD;   # 0.9
+var PR_F_1_0 = 0x3FF0000000000000;   # 1.0
+var PR_F_1_1 = 0x3FF199999999999A;   # 1.1
+var PR_F_1_2 = 0x3FF3333333333333;   # 1.2
+var PR_F_1_3 = 0x3FF4CCCCCCCCCCCD;   # 1.3
+var PR_F_1_4 = 0x3FF6666666666666;   # 1.4
+var PR_F_1_5 = 0x3FF8000000000000;   # 1.5
+var PR_F_2_0 = 0x4000000000000000;   # 2.0
+
+# ================================================================
+# IntentModifiers -- prosodic modifiers applied to synthesis for an intent.
+#   pitch_scale     : pitch multiplier (1.0 = species default)
+#   amplitude_scale : amplitude multiplier
+#   duration_scale  : duration multiplier
+#   urgency         : jitter/onset-sharpness in [0,1]
+# ================================================================
+#derive(accessors)
+struct IntentModifiers { pitch_scale; amplitude_scale; duration_scale; urgency; }
+
+#must_use
+fn prani_intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urgency) {
+    var m = alloc(sizeof(IntentModifiers));
+    IntentModifiers_set_pitch_scale(m, pitch_scale);
+    IntentModifiers_set_amplitude_scale(m, amplitude_scale);
+    IntentModifiers_set_duration_scale(m, duration_scale);
+    IntentModifiers_set_urgency(m, urgency);
+    return m;
+}
+
+# prani_intent_modifiers -- CallIntent::modifiers(). Fixed lookup per intent
+# (values verbatim from the Rust match arms). Unknown intent -> neutral (Idle-
+# like 1.0/1.0/1.0/0.0), preserving totality (the Rust enum is #[non_exhaustive]).
+#must_use
+fn prani_intent_modifiers(intent) {
+    if (intent == PRANI_INTENT_ALARM)       { return prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_7, PR_F_0_9); }
+    if (intent == PRANI_INTENT_TERRITORIAL) { return prani_intent_modifiers_make(PR_F_0_9, PR_F_1_3, PR_F_1_5, PR_F_0_5); }
+    if (intent == PRANI_INTENT_MATING)      { return prani_intent_modifiers_make(PR_F_1_1, PR_F_1_0, PR_F_2_0, PR_F_0_2); }
+    if (intent == PRANI_INTENT_DISTRESS)    { return prani_intent_modifiers_make(PR_F_1_5, PR_F_1_4, PR_F_0_8, PR_F_1_0); }
+    if (intent == PRANI_INTENT_IDLE)        { return prani_intent_modifiers_make(PR_F_1_0, PR_F_0_5, PR_F_1_0, PR_F_0_0); }
+    if (intent == PRANI_INTENT_THREAT)      { return prani_intent_modifiers_make(PR_F_0_7, PR_F_1_4, PR_F_1_2, PR_F_0_7); }
+    if (intent == PRANI_INTENT_SOCIAL)      { return prani_intent_modifiers_make(PR_F_1_0, PR_F_0_8, PR_F_1_0, PR_F_0_3); }
+    return prani_intent_modifiers_make(PR_F_1_0, PR_F_1_0, PR_F_1_0, PR_F_0_0);
+}

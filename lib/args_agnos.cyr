@@ -1,0 +1,95 @@
+# args_agnos.cyr — command-line argument access on agnos (ring-3 x86_64)
+# Usage: include "lib/args.cyr" (dispatches here under CYRIUS_TARGET_AGNOS)
+#
+# agnos has no /proc/self/cmdline (the Linux source). Its kernel
+# (agnos/kernel/core/elf.cyr `elf_load_from_file`) builds a SysV init stack
+# at exec: [rsp]=argc, [rsp+8+i*8]=argv[i], then a NULL, a staged envp
+# (NUL-terminated KEY=VALUE cstrs, default HOME=/ PWD=/), and AT_NULL-only
+# auxv; rsp lands exactly at argc, 16-byte aligned, argc capped at 8.
+#
+# Like lib/args_macos.cyr's x86-macho path, the init rsp is parked at the entry
+# LANDING into callee-saved r15: cycc emits `mov r15, rsp` as the FIRST runtime
+# instruction (gated _TARGET_AGNOS, src/main.cyr), while rsp still = the kernel
+# init rsp ([rsp]=argc, inline argv/envp). r15 is reserved from regalloc
+# (parse_fn.cyr caps the pool at 4 on _TARGET_AGNOS==1), so it survives from
+# entry through every call into the readers below. args read through r15.
+#
+# v6.1.32: switched from the v6.1.14 `call _agnos_capture_rsp`-after-EMIT_GVAR_INITS
+# scheme. That call was emitted AFTER the gvar-init block, but a call-bearing
+# top-level initializer `var r = main();` is emitted INSIDE that block — so
+# main() ran before the capture and argc() read 0 (attn11 issue
+# 2026-06-10-cyrius-agnos-capture-after-gvar-init-call, the deeper entry shape
+# the v6.1.14 bnrmr fix didn't cover). The landing r15 park happens before any
+# gvar-init code, so it's immune. Mirrors the v6.1.30 x86-macho fix.
+
+# Return the init-stack base pointer the entry prologue parked in r15.
+# Inline asm — mirrors lib/args_macos.cyr's x86 r15 read.
+fn _agnos_argv_base() {
+    var result = 0;
+    asm {
+        0x4C; 0x89; 0xF8;          # mov rax, r15
+        0x48; 0x89; 0x45; 0xF8;    # mov [rbp-8], rax   (-> result, the first local)
+    }
+    return result;
+}
+
+# args_init is a no-op on agnos — the entry parked r15 (kept in the public
+# API so consumer code stays portable across targets).
+fn args_init() {
+    return 0;
+}
+
+# argc = the qword the kernel placed at the init rsp (parked in r15 at entry).
+fn argc() {
+    var base = _agnos_argv_base();
+    if (base == 0) { return 0; }
+    return load64(base);
+}
+
+# argv(n) = the nth pointer above argc (n=0 is the program name). Bounded by
+# the kernel-supplied argc (argv[argc] is the NULL terminator).
+fn argv(n) {
+    if (n < 0) { return 0; }
+    var base = _agnos_argv_base();
+    if (base == 0) { return 0; }
+    var cnt = load64(base);
+    if (n >= cnt) { return 0; }
+    return load64(base + 8 + n * 8);
+}
+
+# v6.0.87: getenv on agnos. agnos has no /proc; the kernel stages envp on the
+# exec init stack (agnos 1.43.2, ABI §4.6): argc=[rsp], the argv NULL is at
+# [rsp+8+argc*8], then envp[j] = [rsp+8+(argc+1+j)*8] (NUL-terminated), each a
+# "KEY=VALUE" cstr (default env HOME=/, PWD=/). lib/io.cyr getenv() delegates
+# here under CYRIUS_TARGET_AGNOS (a forward fn ref — io.cyr precedes args in the
+# stdlib include order). Returns a heap copy of VALUE, or 0 if unset. envc is
+# bounded (256) so a malformed/unterminated envp can't spin.
+fn _agnos_getenv(name) {
+    var base = _agnos_argv_base();
+    if (base == 0) { return 0; }
+    var acnt = load64(base);
+    var nlen = strlen(name);
+    var ebase = base + 8 + (acnt + 1) * 8;   # &envp[0]
+    var j = 0;
+    while (j < 256) {
+        var ep = load64(ebase + j * 8);
+        if (ep == 0) { return 0; }                     # envp NULL terminator
+        var eq = 1;
+        var ci = 0;
+        while (ci < nlen) {
+            if (load8(ep + ci) != load8(name + ci)) { eq = 0; break; }
+            ci = ci + 1;
+        }
+        if (eq == 1) { if (load8(ep + nlen) == 61) {   # 61 = '='
+                var vs = ep + nlen + 1;
+                var vl = 0;
+                while (load8(vs + vl) != 0) { vl = vl + 1; }
+                var res = alloc(vl + 1);
+                memcpy(res, vs, vl);
+                store8(res + vl, 0);
+                return res;
+            } }
+        j = j + 1;
+    }
+    return 0;
+}

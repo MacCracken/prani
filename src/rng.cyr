@@ -1,0 +1,66 @@
+# rng.cyr -- deterministic PCG32 PRNG for stochastic creature synthesis.
+# Ports rust-old/src/rng.rs (Rng struct + PCG32). Seedable for reproducible
+# jitter/shimmer/breathiness across tract turbulence and call-pattern timing.
+# There is no seedable float RNG in the Cyrius stdlib, so this is hand-ported
+# (same PCG32 svara uses; prani's rng.rs and svara's rng.rs are identical).
+#
+# u64 semantics on i64: wrapping_mul/wrapping_add == plain `*`/`+` (i64 wraps
+# two's-complement, bit-identical to u64). `>>` is LOGICAL (zero-fill) == u64
+# shift. u32 truncation == `& 0xFFFFFFFF`.
+#
+# PARITY: next_f32's doc comment claims [-1.0, 1.0] but the Rust CODE yields
+# [0.0, 1.0) -- `(next_u32() >> 1) as i32` is always non-negative. The code
+# (the oracle) is ported, not the comment. Callers wanting bipolar noise do
+# `2*next_f32() - 1` themselves. f32->f64 promotion: Rust used
+# `1.0 / i32::MAX as f32` which rounds i32::MAX to 2^31, so the scale is
+# exactly 2^-31.
+#
+# serde: Rng was Serialize/Deserialize (state persistence). No serde in Cyrius;
+# the round-trip test is dropped (state = two u64 slots).
+
+var PRANI_RNG_DEFAULT_SEED = 42;                    # default deterministic seed
+
+var PRANI_PCG_MULT   = 6_364_136_223_846_793_005;   # PCG32 LCG multiplier
+var PRANI_U32_MASK   = 0xFFFFFFFF;                   # low 32 bits
+var PRANI_INV_I32MAX = 0x3E00000000000000;          # 2^-31 = 1.0 / (i32::MAX as f32)
+
+#derive(accessors)
+struct PrRng { state; inc; }
+
+# next_u32 -- PCG32 output function. Defined before its callers (single-pass).
+# NOT #must_use: it advances internal state, and prani_rng_new intentionally
+# discards two warm-up draws during seeding.
+#inline
+fn prani_rng_next_u32(self) {
+    var old_state = PrRng_state(self);
+    # state = old * MULT + inc  (u64 wrapping via i64 wrap)
+    PrRng_set_state(self, old_state * PRANI_PCG_MULT + PrRng_inc(self));
+    # xor_shifted = (((old >> 18) ^ old) >> 27) as u32
+    var xor_shifted = (((old_state >> 18) ^ old_state) >> 27) & PRANI_U32_MASK;
+    # rot = (old >> 59) as u32   (top 5 bits -> 0..31)
+    var rot = (old_state >> 59) & 31;
+    # rotate-right by rot: (x >> rot) | (x << ((-rot) & 31)), masked to u32
+    var neg = (0 - rot) & 31;
+    return ((xor_shifted >> rot) | (xor_shifted << neg)) & PRANI_U32_MASK;
+}
+
+# new(seed) -- PCG32 seeding (prani's exact sequence). Calls next_u32 twice.
+#must_use
+fn prani_rng_new(seed) {
+    var self = alloc(sizeof(PrRng));
+    PrRng_set_state(self, 0);
+    PrRng_set_inc(self, (seed << 1) | 1);
+    prani_rng_next_u32(self);
+    PrRng_set_state(self, PrRng_state(self) + seed);   # wrapping_add(seed)
+    prani_rng_next_u32(self);
+    return self;
+}
+
+# next_f32 -- value in [0.0, 1.0). bits = (next_u32() >> 1) in [0, 2^31-1],
+# scaled by 2^-31. Matches the Rust code (not its [-1,1] doc comment).
+#inline
+#must_use
+fn prani_rng_next_f32(self) {
+    var bits = prani_rng_next_u32(self) >> 1;
+    return f64_mul(f64_from(bits), PRANI_INV_I32MAX);
+}

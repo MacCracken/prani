@@ -1,0 +1,105 @@
+# alloc_agnos.cyr — AGNOS ring-3 heap allocator (bump, mmap-27 backed).
+# Included by lib/alloc.cyr when CYRIUS_TARGET_AGNOS is defined.
+#
+# agnos has no brk; userspace memory comes from sys_mmap(27) — anonymous,
+# zero-filled, 2 MB-granular, and the kernel picks the base (there are NO
+# address hints, §2/§5 of the agnos userland ABI, so successive mmaps are
+# discontiguous). So this is a bump allocator over a CHAIN of 2 MB+ chunks:
+# bump within the current chunk; on overflow, mmap a fresh chunk and bump
+# there. Old chunks stay mapped + valid — there is no individual free; agnos
+# reclaims everything at process exit. (Contrast: the Linux brk path grows one
+# contiguous region; the macOS path requires hint-honored contiguity. agnos
+# can do neither, so it accepts discontiguity.) Mirrors the lib/alloc.cyr
+# surface: alloc_init / alloc / alloc_reset / alloc_used.
+
+var _heap_base = 0;        # current chunk base
+var _heap_ptr = 0;         # bump pointer within the current chunk
+var _heap_end = 0;         # current chunk end (base + chunk size)
+var _heap_first_base = 0;  # first chunk base (alloc_reset rewind target)
+var _heap_first_end = 0;   # first chunk end
+var _heap_used = 0;        # total bytes handed out since last init/reset
+
+# agnos mmap granularity: 2 MB.
+var AGNOS_CHUNK = 0x200000;
+
+# CVE-26 (v6.1.38): max single allocation (256 MB), mirroring the Linux/Windows/
+# macOS peers (alloc.cyr/alloc_windows.cyr/alloc_macos.cyr all = 0x10000000).
+# Defined here because this peer is compiled standalone for CYRIUS_TARGET_AGNOS —
+# the alloc.cyr ALLOC_MAX is inside the CYRIUS_TARGET_LINUX block, out of scope.
+var ALLOC_MAX = 0x10000000;
+
+# Round `n` up to the next 2 MB multiple (agnos mmap granularity).
+fn _agnos_round_2mb(n): i64 {
+    return (n + (AGNOS_CHUNK - 1)) & (0 - AGNOS_CHUNK);
+}
+
+# mmap a fresh chunk of at least `min` bytes (rounded to 2 MB) via agnos
+# sys_mmap(27) and make it the current chunk. Returns the base, or 0 on
+# failure (agnos mmap returns 0 = MAP_FAILED).
+fn _agnos_new_chunk(min): i64 {
+    var sz = _agnos_round_2mb(min);
+    if (sz < AGNOS_CHUNK) { sz = AGNOS_CHUNK; }
+    var base = sys_mmap(sz);
+    if (base == 0) { return 0; }
+    _heap_base = base;
+    _heap_ptr = base;
+    _heap_end = base + sz;
+    return base;
+}
+
+# Initialize the heap (optional — alloc() lazy-inits on first call).
+# Re-callable; re-mmaps a fresh first chunk. Returns the base.
+fn alloc_init(): i64 {
+    # Idempotent (v6.1.23): re-call is a no-op once the first chunk is up — pre-fix
+    # every recall mmap'd a fresh 2 MB chunk, abandoning the live one. Free via
+    # alloc_reset(). See issue 2026-06-09-chunked-alloc-init-not-idempotent.
+    if (_heap_base != 0) { return _heap_first_base; }
+    var base = _agnos_new_chunk(AGNOS_CHUNK);
+    _heap_first_base = base;
+    _heap_first_end = _heap_end;
+    _heap_used = 0;
+    return base;
+}
+
+# Allocate `size` bytes, 8-byte aligned. Bumps within the current chunk;
+# on overflow, mmaps a new chunk big enough for the request. Returns the
+# pointer, or 0 on out-of-memory.
+fn alloc(size): i64 {
+    # CVE-26 (v6.1.38): reject negative/oversized BEFORE alignment + the lock —
+    # the other 3 backends do this. A negative `size` makes `asz` negative, so
+    # the `_heap_ptr + asz > _heap_end` overflow check is false and the bump
+    # pointer moves BACKWARD → overlaps already-handed-out memory. Pure (no
+    # shared state) so it's validated outside the lock; bad calls never contend.
+    if (size <= 0) { return 0; }
+    if (size > ALLOC_MAX) { return 0; }
+    var asz = (size + 7) & (0 - 8);   # local — outside the v6.0.64 lock
+    # --- critical section (shared chunk state + _agnos_new_chunk) ---
+    _alloc_lock_acquire();
+    if (_heap_base == 0) { alloc_init(); }
+    if (_heap_ptr + asz > _heap_end) {
+        if (_agnos_new_chunk(asz) == 0) { _alloc_lock_release(); return 0; }
+    }
+    var p = _heap_ptr;
+    _heap_ptr = _heap_ptr + asz;
+    _heap_used = _heap_used + asz;
+    _alloc_lock_release();
+    return p;
+}
+
+# Batch-free: rewind to the first chunk. Later chunks stay mapped (and are
+# re-grown by fresh mmaps if needed again — agnos reclaims all at exit), so
+# this is a cheap reuse of the first chunk, not a full munmap sweep.
+fn alloc_reset(): i64 {
+    _alloc_lock_acquire();
+    _heap_base = _heap_first_base;
+    _heap_ptr = _heap_first_base;
+    _heap_end = _heap_first_end;
+    _heap_used = 0;
+    _alloc_lock_release();
+    return 0;
+}
+
+# Total bytes handed out since the last init/reset.
+fn alloc_used(): i64 {
+    return _heap_used;
+}

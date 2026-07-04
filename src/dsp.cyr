@@ -1,0 +1,69 @@
+# dsp.cyr -- shared DSP primitives for creature vocal synthesis.
+# Ports rust-old/src/dsp.rs: a single-pole DC blocker (applied to all
+# synthesis output) + naad error mapping. Was `pub(crate)`.
+#
+# Requires (from the build/test unit): error.cyr (PRANI_ERR_SYNTHESIS_FAILED)
+# + stdlib alloc/vec. The module file itself has no `include` lines.
+#
+# serde: DcBlocker was Serialize/Deserialize; no serde in Cyrius (round-trip
+# test dropped -- state is three f64 slots).
+
+# 0.995 pole radius: R in H(z) = (1 - z^-1) / (1 - R z^-1). Standard DC-block
+# corner (~35 Hz @ 44.1 kHz). Non-integer literal -> module-top hex constant.
+var PRANI_DCBLOCK_R = 0x3fefd70a3d70a3d7;   # 0.995
+
+# ================================================================
+# DcBlocker -- single-pole DC blocker. Removes DC offset that accumulates
+# from asymmetric excitation (purr, stridulation, subharmonics).
+#   x_prev : previous input sample
+#   y_prev : previous output sample
+#   r      : pole radius (~0.995)
+# ================================================================
+#derive(accessors)
+struct DcBlocker { x_prev; y_prev; r; }
+
+# new() -- zeroed state, standard pole radius.
+#must_use
+fn dcblocker_new() {
+    var b = alloc(sizeof(DcBlocker));
+    DcBlocker_set_x_prev(b, 0);
+    DcBlocker_set_y_prev(b, 0);
+    DcBlocker_set_r(b, PRANI_DCBLOCK_R);
+    return b;
+}
+
+# process(x) -- one sample. y = x - x_prev + r*y_prev; then shift state.
+#inline
+fn dcblocker_process(b, x) {
+    # y = x - x_prev + r * y_prev
+    var y = f64_add(f64_sub(x, DcBlocker_x_prev(b)), f64_mul(DcBlocker_r(b), DcBlocker_y_prev(b)));
+    DcBlocker_set_x_prev(b, x);
+    DcBlocker_set_y_prev(b, y);
+    return y;
+}
+
+# process_buffer(samples) -- filter a vec of f64 samples in place.
+fn dcblocker_process_buffer(b, samples) {
+    var n = vec_len(samples);
+    var i = 0;
+    while (i < n) {
+        vec_set(samples, i, dcblocker_process(b, vec_get(samples, i)));
+        i = i + 1;
+    }
+}
+
+# reset() -- clear the filter memory (pole radius preserved).
+fn dcblocker_reset(b) {
+    DcBlocker_set_x_prev(b, 0);
+    DcBlocker_set_y_prev(b, 0);
+}
+
+# map_naad_error -- ports map_naad_error (naad-backend gated). Rust built a
+# "{synth}: {component} init failed: {err}" String and returned
+# PraniError::SynthesisFailed; the Cyrius port collapses to the integer code
+# (diagnostic string dropped -- integer error codes). Any naad failure maps to
+# PRANI_ERR_SYNTHESIS_FAILED.
+#must_use
+fn prani_map_naad_error(naad_code) {
+    return PRANI_ERR_SYNTHESIS_FAILED;
+}

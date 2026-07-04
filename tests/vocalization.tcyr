@@ -1,0 +1,45 @@
+# vocalization.tcyr -- tests for src/vocalization.cyr.
+# rust-old/src/vocalization.rs had no #[test] blocks; parity surface is the
+# enum discriminants + the CallIntent::modifiers() lookup table (values
+# verbatim from the Rust match arms). serde/Display tests dropped.
+
+include "src/error.cyr"
+include "src/vocalization.cyr"
+
+alloc_init();
+
+# ================================================================
+test_group("enum discriminants (declaration order)");
+assert_eq(PRANI_VOC_HOWL, 0, "Howl == 0");
+assert_eq(PRANI_VOC_BUZZ, 13, "Buzz == 13");
+assert_eq(PRANI_VOC_COUNT, 14, "14 vocalizations");
+assert_eq(PRANI_INTENT_ALARM, 0, "Alarm == 0");
+assert_eq(PRANI_INTENT_SOCIAL, 6, "Social == 6");
+assert_eq(PRANI_INTENT_COUNT, 7, "7 intents");
+
+# ================================================================
+test_group("intent modifiers -- Alarm (1.4/1.5/0.7/0.9)");
+var a = prani_intent_modifiers(PRANI_INTENT_ALARM);
+assert_eq(IntentModifiers_pitch_scale(a), PR_F_1_4, "alarm pitch 1.4");
+assert_eq(IntentModifiers_amplitude_scale(a), PR_F_1_5, "alarm amp 1.5");
+assert_eq(IntentModifiers_duration_scale(a), PR_F_0_7, "alarm dur 0.7");
+assert_eq(IntentModifiers_urgency(a), PR_F_0_9, "alarm urgency 0.9");
+
+# ================================================================
+test_group("intent modifiers -- Idle (1.0/0.5/1.0/0.0)");
+var idle = prani_intent_modifiers(PRANI_INTENT_IDLE);
+assert_eq(IntentModifiers_pitch_scale(idle), PR_F_1_0, "idle pitch 1.0");
+assert_eq(IntentModifiers_amplitude_scale(idle), PR_F_0_5, "idle amp 0.5");
+assert_eq(IntentModifiers_urgency(idle), PR_F_0_0, "idle urgency 0.0");
+
+# ================================================================
+test_group("intent modifiers -- Mating longest, Distress most urgent");
+var mating = prani_intent_modifiers(PRANI_INTENT_MATING);
+assert_eq(IntentModifiers_duration_scale(mating), PR_F_2_0, "mating dur 2.0 (longest)");
+var distress = prani_intent_modifiers(PRANI_INTENT_DISTRESS);
+assert_eq(IntentModifiers_urgency(distress), PR_F_1_0, "distress urgency 1.0 (max)");
+var threat = prani_intent_modifiers(PRANI_INTENT_THREAT);
+assert_eq(IntentModifiers_pitch_scale(threat), PR_F_0_7, "threat pitch 0.7 (lowest)");
+
+var rc = assert_summary();
+syscall(60, rc);

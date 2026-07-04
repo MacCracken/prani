@@ -1,0 +1,161 @@
+# bridge.tcyr -- tests for src/bridge.cyr.
+# rust-old/src/bridge.rs had no #[test] blocks; parity surface is 13 pure
+# value-conversion functions. These are mostly exact IEEE-754 arithmetic (asserted
+# bit-exact) with a handful of transcendental / pow paths (asserted within TOL).
+# Every threshold function is probed at each cut and each clamp at its limits.
+#
+# Include order: error, vocalization (PRANI_INTENT_*), species (PRANI_SP_*), bridge.
+# species.cyr pulls sequence.cyr for its bout_template only; those synthesize
+# methods forward-reference crvoice_* (voice.cyr, not here) and are UNREACHABLE in
+# this unit, so undefined-fn WARNINGS for crvoice_* are EXPECTED and fine.
+
+include "src/error.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+
+alloc_init();
+
+# Tolerance ~1e-9 for pow / cos paths that need not be bit-identical to python.
+var TOL = 0x3E112E0BE826D695;   # 1e-9
+
+# ================================================================
+test_group("size_from_body_mass -- cbrt allometry, ref 30 kg");
+# Non-positive -> 0.1 (exact).
+assert_eq(bridge_size_from_body_mass(f64_from(0)), PR_B_0_1, "mass 0 -> 0.1");
+assert_eq(bridge_size_from_body_mass(f64_neg(f64_from(5))), PR_B_0_1, "mass -5 -> 0.1");
+# Perfect cubes of mass/30 -> exact-ish (pow, TOL).
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(f64_from(30)), f64_from(1))), TOL), 1, "mass 30 -> 1.0");
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(f64_from(240)), f64_from(2))), TOL), 1, "mass 240 -> 2.0");
+# 3.75/30 = 0.125 -> cbrt 0.5.
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x400e000000000000), PR_B_0_5)), TOL), 1, "mass 3.75 kg -> cbrt(0.125) = 0.5");
+# mass 1 kg: cbrt(1/30) ~ 0.32183 (positive branch, above 0.1 floor).
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x3ff0000000000000), 0x3fd498dbfef5ae9b)), TOL), 1, "mass 1.0 kg -> ~0.32183");
+assert_eq(f64_gt(bridge_size_from_body_mass(0x3ff0000000000000), PR_B_0_1), 1, "mass 1 kg > 0.1 floor");
+
+# ================================================================
+test_group("f0_offset_from_temperature -- (temp-baseline)*0.03*100");
+assert_eq(bridge_f0_offset_from_temperature(f64_from(25), f64_from(20)), 0x402e000000000000, "+5 degC -> 15.0 Hz");
+assert_eq(bridge_f0_offset_from_temperature(f64_from(20), f64_from(20)), PR_B_0_0, "no delta -> 0.0");
+assert_eq(bridge_f0_offset_from_temperature(f64_from(10), f64_from(25)), 0xc0467fffffffffff, "-15 degC -> -44.999...");
+
+# ================================================================
+test_group("intent_from_threat_level -- descending cuts");
+assert_eq(bridge_intent_from_threat_level(PR_B_0_8), PRANI_INTENT_DISTRESS, "0.8 -> Distress (>= cut)");
+assert_eq(bridge_intent_from_threat_level(0x3ff0000000000000), PRANI_INTENT_DISTRESS, "1.0 -> Distress");
+assert_eq(bridge_intent_from_threat_level(PR_B_0_6), PRANI_INTENT_ALARM, "0.6 -> Alarm (>= cut)");
+assert_eq(bridge_intent_from_threat_level(PR_B_0_4), PRANI_INTENT_THREAT, "0.4 -> Threat (>= cut)");
+assert_eq(bridge_intent_from_threat_level(PR_B_0_2), PRANI_INTENT_TERRITORIAL, "0.2 -> Territorial (>= cut)");
+assert_eq(bridge_intent_from_threat_level(PR_B_0_0), PRANI_INTENT_IDLE, "0.0 -> Idle");
+# Just below each cut falls through to the next lower.
+assert_eq(bridge_intent_from_threat_level(0x3fe9999999999999), PRANI_INTENT_ALARM, "0.7999... -> Alarm (below 0.8)");
+assert_eq(bridge_intent_from_threat_level(0x3fd3333333333333), PRANI_INTENT_TERRITORIAL, "0.3 -> Territorial (below 0.4)");
+assert_eq(bridge_intent_from_threat_level(0x3fc999999999999a), PRANI_INTENT_TERRITORIAL, "0.2 exact -> Territorial");
+assert_eq(bridge_intent_from_threat_level(0x3fb999999999999a), PRANI_INTENT_IDLE, "0.1 -> Idle (below 0.2)");
+
+# ================================================================
+test_group("breathiness_from_arousal -- clamp(arousal*0.3, 0, 1)");
+assert_eq(bridge_breathiness_from_arousal(PR_B_0_5), PR_B_0_15, "0.5 -> 0.15");
+assert_eq(bridge_breathiness_from_arousal(PR_B_0_0), PR_B_0_0, "0.0 -> 0.0");
+assert_eq(bridge_breathiness_from_arousal(f64_from(5)), PR_B_1_0, "5.0 -> clamp to 1.0");
+assert_eq(bridge_breathiness_from_arousal(f64_neg(f64_from(1))), PR_B_0_0, "-1.0 -> clamp to 0.0");
+
+# ================================================================
+test_group("amplitude_from_spl -- 10^((spl-94)/20), clamp [0,10]");
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_amplitude_from_spl(PR_B_94_0), f64_from(1))), TOL), 1, "94 dB -> 1.0");
+assert_eq(bridge_amplitude_from_spl(0x405c800000000000), PR_B_10_0, "114 dB -> clamp to 10.0");
+assert_eq(bridge_amplitude_from_spl(f64_from(200)), PR_B_10_0, "200 dB -> clamp to 10.0");
+# 74 dB -> 0.1 (within TOL of exact).
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_amplitude_from_spl(f64_from(74)), PR_B_0_1)), TOL), 1, "74 dB -> ~0.1");
+# 0 dB -> ~1.995e-5, well above 0 (not clamped low).
+assert_eq(f64_gt(bridge_amplitude_from_spl(PR_B_0_0), PR_B_0_0), 1, "0 dB -> small positive");
+assert_eq(f64_lt(bridge_amplitude_from_spl(PR_B_0_0), PR_B_0_1), 1, "0 dB -> below 0.1");
+
+# ================================================================
+test_group("absorption_factor -- humidity/temp, clamp [0.5, 2.0]");
+# humidity 0, temp 20: 0.8 * 1.0 = 0.8.
+assert_eq(bridge_absorption_factor(PR_B_0_0, f64_from(20)), PR_B_0_8, "hum 0, 20C -> 0.8");
+# humidity 40 (knee, not < 40): factor 1.0; temp 20: 1.0.
+assert_eq(bridge_absorption_factor(f64_from(40), f64_from(20)), PR_B_1_0, "hum 40 (knee), 20C -> 1.0");
+# humidity 20 (<40): 0.8 + 0.5*0.2 = 0.9; temp 20 -> 0.9.
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_absorption_factor(f64_from(20), f64_from(20)), 0x3feccccccccccccd)), TOL), 1, "hum 20, 20C -> 0.9");
+# humidity 100, temp 120: 1.0 * (1 + 100*0.005=1.5) = 1.5.
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_absorption_factor(f64_from(100), f64_from(120)), PR_B_1_5)), TOL), 1, "hum 100, 120C -> 1.5");
+# very cold -> temp_factor negative, product clamps to low 0.5.
+assert_eq(bridge_absorption_factor(PR_B_0_0, f64_neg(f64_from(1000))), PR_B_0_5, "extreme cold -> clamp 0.5");
+
+# ================================================================
+test_group("doppler_velocity_from_wind -- wind*cos(angle)");
+# cos(0) = 1 -> 10.0 (exact for cos(0)).
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_doppler_velocity_from_wind(f64_from(10), PR_B_0_0), f64_from(10))), TOL), 1, "wind 10, angle 0 -> 10.0");
+# cos(pi) = -1 -> -10.0.
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_doppler_velocity_from_wind(f64_from(10), F64_PI), f64_neg(f64_from(10)))), TOL), 1, "wind 10, angle pi -> -10.0");
+# cos(pi/2) ~ 0 -> ~0.
+assert_eq(f64_lt(f64_abs(bridge_doppler_velocity_from_wind(f64_from(5), F64_PI_2)), TOL), 1, "wind 5, angle pi/2 -> ~0");
+
+# ================================================================
+test_group("pitch_scale_from_valence -- clamp(1+v*0.15, 0.7, 1.3)");
+assert_eq(bridge_pitch_scale_from_valence(PR_B_0_0), PR_B_1_0, "valence 0 -> 1.0");
+assert_eq(bridge_pitch_scale_from_valence(f64_from(1)), 0x3ff2666666666666, "valence 1 -> 1.15");
+assert_eq(bridge_pitch_scale_from_valence(f64_neg(f64_from(1))), 0x3feb333333333333, "valence -1 -> 0.85");
+assert_eq(bridge_pitch_scale_from_valence(f64_from(5)), PR_B_1_3, "valence 5 -> clamp 1.3");
+assert_eq(bridge_pitch_scale_from_valence(f64_neg(f64_from(5))), PR_B_0_7, "valence -5 -> clamp 0.7");
+
+# ================================================================
+test_group("vocal_effort_from_arousal -- smoothstep 3a^2-2a^3");
+assert_eq(bridge_vocal_effort_from_arousal(PR_B_0_0), PR_B_0_0, "arousal 0 -> 0.0");
+assert_eq(bridge_vocal_effort_from_arousal(f64_from(1)), PR_B_1_0, "arousal 1 -> 1.0");
+assert_eq(bridge_vocal_effort_from_arousal(PR_B_0_5), PR_B_0_5, "arousal 0.5 -> 0.5 (midpoint)");
+assert_eq(bridge_vocal_effort_from_arousal(f64_from(2)), PR_B_1_0, "arousal 2 -> clamp -> 1.0");
+assert_eq(bridge_vocal_effort_from_arousal(f64_neg(f64_from(1))), PR_B_0_0, "arousal -1 -> clamp -> 0.0");
+
+# ================================================================
+test_group("perturbation_from_urgency -- (1+u*1.5, 1+u*1.0)");
+var p0 = bridge_perturbation_from_urgency(PR_B_0_0);
+assert_eq(PrPerturbation_jitter_scale(p0), PR_B_1_0, "u 0 jitter 1.0");
+assert_eq(PrPerturbation_shimmer_scale(p0), PR_B_1_0, "u 0 shimmer 1.0");
+var p1 = bridge_perturbation_from_urgency(f64_from(1));
+assert_eq(PrPerturbation_jitter_scale(p1), 0x4004000000000000, "u 1 jitter 2.5");
+assert_eq(PrPerturbation_shimmer_scale(p1), 0x4000000000000000, "u 1 shimmer 2.0");
+var ph = bridge_perturbation_from_urgency(PR_B_0_5);
+assert_eq(PrPerturbation_jitter_scale(ph), 0x3ffc000000000000, "u 0.5 jitter 1.75");
+assert_eq(PrPerturbation_shimmer_scale(ph), PR_B_1_5, "u 0.5 shimmer 1.5");
+var phi = bridge_perturbation_from_urgency(f64_from(2));
+assert_eq(PrPerturbation_jitter_scale(phi), 0x4004000000000000, "u 2 clamp jitter 2.5");
+assert_eq(PrPerturbation_shimmer_scale(phi), 0x4000000000000000, "u 2 clamp shimmer 2.0");
+var plo = bridge_perturbation_from_urgency(f64_neg(f64_from(1)));
+assert_eq(PrPerturbation_jitter_scale(plo), PR_B_1_0, "u -1 clamp jitter 1.0");
+assert_eq(PrPerturbation_shimmer_scale(plo), PR_B_1_0, "u -1 clamp shimmer 1.0");
+
+# ================================================================
+test_group("lombard_effort_boost -- baseline 40 dB, clamp [0, 0.5]");
+assert_eq(bridge_lombard_effort_boost(f64_from(40)), PR_B_0_0, "40 dB (baseline) -> 0.0");
+assert_eq(bridge_lombard_effort_boost(f64_from(30)), PR_B_0_0, "30 dB (below) -> 0.0");
+# 50 dB: excess 10 * 0.005 = 0.05.
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_lombard_effort_boost(f64_from(50)), 0x3fa999999999999a)), TOL), 1, "50 dB -> 0.05");
+# 200 dB: excess 160*0.005=0.8 -> clamp 0.5.
+assert_eq(bridge_lombard_effort_boost(f64_from(200)), PR_B_0_5, "200 dB -> clamp 0.5");
+# 140 dB: excess 100*0.005=0.5 -> exactly cap.
+assert_eq(bridge_lombard_effort_boost(f64_from(140)), PR_B_0_5, "140 dB -> 0.5 (cap)");
+
+# ================================================================
+test_group("species_from_f0 -- descending f0 thresholds");
+assert_eq(bridge_species_from_f0(f64_from(3000)), PRANI_SP_CRICKET, "3000 -> Cricket (>= cut)");
+assert_eq(bridge_species_from_f0(f64_from(5000)), PRANI_SP_CRICKET, "5000 -> Cricket");
+assert_eq(bridge_species_from_f0(f64_from(1000)), PRANI_SP_SONGBIRD, "1000 -> Songbird (>= cut)");
+assert_eq(bridge_species_from_f0(f64_from(500)), PRANI_SP_CROW, "500 -> Crow (>= cut)");
+assert_eq(bridge_species_from_f0(f64_from(200)), PRANI_SP_CAT, "200 -> Cat (>= cut)");
+assert_eq(bridge_species_from_f0(f64_from(100)), PRANI_SP_WOLF, "100 -> Wolf (>= cut)");
+assert_eq(bridge_species_from_f0(f64_from(40)), PRANI_SP_LION, "40 -> Lion (>= cut)");
+# > 0 but < 40 -> Crocodilian.
+assert_eq(bridge_species_from_f0(0x3ff0000000000000), PRANI_SP_CROCODILIAN, "1.0 -> Crocodilian (>0, <40)");
+assert_eq(bridge_species_from_f0(PR_B_0_5), PRANI_SP_CROCODILIAN, "0.5 -> Crocodilian");
+# 0 -> Snake (noise-only).
+assert_eq(bridge_species_from_f0(PR_B_0_0), PRANI_SP_SNAKE, "0 -> Snake");
+# Just below each cut falls to the next lower species.
+assert_eq(bridge_species_from_f0(0x40a76fffffffffff), PRANI_SP_SONGBIRD, "2999.99... -> Songbird (below 3000)");
+assert_eq(bridge_species_from_f0(f64_from(39)), PRANI_SP_CROCODILIAN, "39 -> Crocodilian (below 40)");
+
+var rc = assert_summary();
+syscall(60, rc);

@@ -1,0 +1,111 @@
+# args_macos.cyr — command-line argument access on macOS (Mach-O)
+# Usage: include "lib/args.cyr" (dispatches here under CYRIUS_TARGET_MACOS)
+#
+# cyrius Mach-O executables use LC_UNIXTHREAD (backend/macho/emit.cyr): the
+# kernel sets the entry thread state (rip = entry, all GPRs zero) and hands
+# argc/argv/envp on the STACK. The per-arch wrinkle:
+#   - arm64: the kernel passes argc in x0, argv in x1 at entry — REGISTERS —
+#     so main_aarch64_macho.cyr parks x0/x1 (stp ...; mov x28, sp) into the
+#     callee-saved x28, and argc()/argv()/_read_env read through it.
+#   - x86_64: the kernel passes args on the stack the SysV way — [rsp]=argc,
+#     [rsp+8+i*8]=argv[i] (inline char* array), then NULL, then envp — EXACTLY
+#     like agnos/Linux ELF. The GPRs (rdi/rsi/rdx) are ZERO at entry, so there
+#     is nothing to park in a register; instead cycc emits `call
+#     _macho_capture_args` as the FIRST runtime instruction (the EJMP0 landing
+#     site, while rsp still = the init rsp) and that fn records the init rsp.
+# See CHANGELOG [6.0.58], issue 2026-06-02-macos-x86-release-no-compiler.md.
+
+# x86-macОS init-stack pointer ([rsp] at entry: argc, then inline argv). 0 on
+# arm64 (unread there — arm64 uses the x28 base below).
+var _macho_init_rsp = 0;
+
+# Return the argv base pointer that the arm64 entry prologue parked in x28.
+# Inline asm — mirrors lib/fnptr.cyr's pattern for stashing a register into a
+# local slot via [x29, #-8].
+fn _macho_argv_base() {
+    # Guard on the TARGET arch (AARCH64), not CYRIUS_ARCH_X86 — the x86
+    # cross-compiler predefines X86 even when building the arm64 cycc, so
+    # an X86 guard would zero argv on the shipped arm64 binary. See [6.0.42].
+    #ifdef CYRIUS_ARCH_AARCH64
+    var result = 0;
+    asm {
+        0xE0; 0x03; 0x1C; 0xAA;    # mov x0, x28
+        0xA0; 0x83; 0x1F; 0xF8;    # stur x0, [x29, #-8]  (result)
+    }
+    return result;
+    #else
+    # x86-macOS (v6.1.30): the entry parks the init rsp in r15, reserved from
+    # regalloc (parse_fn.cyr caps the pool at 4 on _TARGET_MACHO==1), so r15
+    # survives from entry through every call into here. Read it via inline asm.
+    var result = 0;
+    asm {
+        0x4C; 0x89; 0xF8;          # mov rax, r15
+        0x48; 0x89; 0x45; 0xF8;    # mov [rbp-8], rax   (-> result, first local)
+    }
+    return result;
+    #endif
+}
+
+# x86-macОS: record the init-stack pointer. cycc emits `call
+# _macho_capture_args` from the entry epilogue (the EJMP0 landing site) while
+# rsp still = the init rsp — before any other call. (v6.1.32: agnos moved to an
+# r15 landing park, lib/args_agnos.cyr; this _macho_capture_args path is itself
+# vestigial — _macho_argv_base reads r15 since v6.1.30.) The `call`
+# pushed the return address (8 bytes) and EFNPRO pushed rbp (8 bytes), so the
+# init rsp is rbp + 16. `var ir = 0` only touches rax, so the stack pointer is
+# undisturbed up to the asm. Identical shape to args_agnos.cyr — macOS x86_64
+# and agnos both deliver a SysV init stack ([rsp]=argc, inline argv).
+fn _macho_capture_args() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    # arm64 uses the x28 entry prologue, not this fn.
+    return 0;
+    #else
+    var ir = 0;
+    asm {
+        0x48; 0x8D; 0x45; 0x10;   # lea rax, [rbp+16]   (init rsp)
+        0x48; 0x89; 0x45; 0xF8;   # mov [rbp-8], rax    (-> ir, the first local)
+    }
+    _macho_init_rsp = ir;
+    return 0;
+    #endif
+}
+
+# On Linux the equivalent fn reads /proc/self/cmdline; on macOS the entry
+# prologue (arm64) / _macho_capture_args (x86) has already done the work, so
+# args_init is a no-op. Kept in the public API so caller code stays portable.
+fn args_init() {
+    return 0;
+}
+
+# argc. arm64: the 64-bit value at [x28, #0] (the entry's stp stored x0 there).
+# x86: the qword at the init rsp (the kernel placed argc there).
+fn argc() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    var base = _macho_argv_base();
+    return load64(base);
+    #else
+    var base = _macho_argv_base();
+    if (base == 0) { return 0; }
+    return load64(base);
+    #endif
+}
+
+# argv(n) returns a pointer to the nth NUL-terminated string argument.
+# arm64: argv is a char** at [x28, #8] (double-deref). x86: argv is the inline
+# char* array starting at init_rsp+8 (argv[n] = load64(init_rsp + 8 + n*8)).
+fn argv(n) {
+    if (n < 0) { return 0; }
+    #ifdef CYRIUS_ARCH_AARCH64
+    var base = _macho_argv_base();
+    var cnt = load64(base);
+    if (n >= cnt) { return 0; }
+    var argvp = load64(base + 8);
+    return load64(argvp + n * 8);
+    #else
+    var base = _macho_argv_base();
+    if (base == 0) { return 0; }
+    var cnt = load64(base);
+    if (n >= cnt) { return 0; }
+    return load64(base + 8 + n * 8);
+    #endif
+}

@@ -1,0 +1,245 @@
+# preset.tcyr -- tests for src/preset.cyr (ports rust-old/src/preset.rs).
+#
+# Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
+# prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
+# sequence -> species -> bridge -> tract -> voice -> preset). The prani modules
+# carry no `include` lines -- this entry orders them. voice.cyr / tract.cyr are
+# pulled in because preset_build calls crvoice_new/with_size/with_f0_offset/
+# with_breathiness; species.cyr for PRANI_SP_* and effective_f0/tract_scale.
+#
+# PARITY APPROACH: presets are pure value tables and the builder chain is
+# svara-INDEPENDENT (with_size/with_f0_offset/with_breathiness just clamp and
+# store into the voice/params). So every assertion is an exact f64 bit-pattern
+# comparison, hand-computed against the oracle:
+#   - each preset's fields (species/size/f0_offset/breathiness) verbatim
+#   - preset_all length 11 and order
+#   - preset_build -> CreatureVoice with expected species (crvoice_species),
+#     applied effective_tract_scale (params.tract_scale * size) and effective_f0
+#     ((f0_default + f0_offset)/size clamped to species [f0_min, f0_max]).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+include "src/preset.cyr"
+
+# ---- preset field value constants (IEEE-754 hex; decimals in comments) ------
+var T_1_4  = 0x3ff6666666666666;   # 1.4
+var T_0_4  = 0x3fd999999999999a;   # 0.4
+var T_1_0  = 0x3ff0000000000000;   # 1.0
+var T_1_3  = 0x3ff4cccccccccccd;   # 1.3
+var T_4_0  = 0x4010000000000000;   # 4.0
+var T_0_8  = 0x3fe999999999999a;   # 0.8
+var T_1_2  = 0x3ff3333333333333;   # 1.2
+var T_1_5  = 0x3ff8000000000000;   # 1.5
+
+var T_0_03 = 0x3f9eb851eb851eb8;   # 0.03
+var T_0_12 = 0x3fbeb851eb851eb8;   # 0.12
+var T_0_08 = 0x3fb47ae147ae147b;   # 0.08
+var T_0_15 = 0x3fc3333333333333;   # 0.15
+var T_0_25 = 0x3fd0000000000000;   # 0.25
+var T_0_1  = 0x3fb999999999999a;   # 0.1
+var T_0_2  = 0x3fc999999999999a;   # 0.2
+var T_0_18 = 0x3fc70a3d70a3d70a;   # 0.18
+
+# f0_offsets (negatives via f64_neg(f64_from(n)))
+var T_OFF_200 = 0x4069000000000000;   # 200.0
+var T_OFF_150 = 0x4062c00000000000;   # 150.0
+var T_OFF_50  = 0x4049000000000000;   # 50.0
+
+# ---- expected effective_tract_scale (params.tract_scale * size) -------------
+var T_ETS_ALPHA_WOLF = 0x3ffae147ae147ae1;   # 1.2 * 1.4 = 1.68
+var T_ETS_WOLF_PUP   = 0x3fdeb851eb851eb8;   # 1.2 * 0.4 = 0.48
+var T_ETS_HOUSE_CAT  = 0x3fe0000000000000;   # 0.5 * 1.0 = 0.5
+var T_ETS_KITTEN     = 0x3fc999999999999a;   # 0.5 * 0.4 = 0.2
+var T_ETS_MALE_LION  = 0x4004cccccccccccd;   # 2.0 * 1.3 = 2.6
+var T_ETS_ANC_DRAGON = 0x4028000000000000;   # 3.0 * 4.0 = 12.0
+var T_ETS_YNG_DRAGON = 0x4003333333333334;   # 3.0 * 0.8 = 2.4000000000000004
+var T_ETS_BALD_EAGLE = 0x3fceb851eb851eb8;   # 0.2 * 1.2 = 0.24
+var T_ETS_RAVEN      = 0x3fd8f5c28f5c28f6;   # 0.3 * 1.3 = 0.39
+var T_ETS_CRICKET    = 0x3fa999999999999a;   # 0.05 * 1.0 = 0.05
+var T_ETS_ALLIGATOR  = 0x400e000000000000;   # 2.5 * 1.5 = 3.75
+
+# ---- expected effective_f0 ((f0_default+f0_offset)/size, clamped) -----------
+var T_EF0_ALPHA_WOLF = 0x406c924924924925;   # (400-80)/1.4 = 228.571... in [150,1200]
+var T_EF0_WOLF_PUP   = 0x4092c00000000000;   # (400+200)/0.4 = 1500 -> clamp 1200
+var T_EF0_HOUSE_CAT  = 0x407f400000000000;   # (500+0)/1.0 = 500 in [200,1000]
+var T_EF0_KITTEN     = 0x408f400000000000;   # (500+150)/0.4 = 1625 -> clamp 1000
+var T_EF0_MALE_LION  = 0x4049000000000000;   # (80-15)/1.3 = 50.0 in [40,200]
+var T_EF0_ANC_DRAGON = 0x403e000000000000;   # (70-30)/4.0 = 10 -> clamp 30
+var T_EF0_YNG_DRAGON = 0x4062c00000000000;   # (70+50)/0.8 = 150.0 in [30,500]
+var T_EF0_BALD_EAGLE = 0x409f400000000000;   # (2500-200)/1.2 = 1916.67 -> clamp 2000
+var T_EF0_RAVEN      = 0x4080d3b13b13b13b;   # (800-100)/1.3 = 538.461... in [500,2000]
+var T_EF0_CRICKET    = 0x40b1940000000000;   # (4500+0)/1.0 = 4500 in [3000,8000]
+var T_EF0_ALLIGATOR  = 0x4040aaaaaaaaaaab;   # (60-10)/1.5 = 33.333... -> clamp 30? no, in [30,200]
+
+alloc_init();
+
+# ================================================================
+test_group("preset field values -- verbatim from oracle");
+
+var alpha = preset_alpha_wolf();
+assert_eq(VoicePreset_species(alpha), PRANI_SP_WOLF, "alpha_wolf species Wolf");
+assert_eq(VoicePreset_size(alpha), T_1_4, "alpha_wolf size 1.4");
+assert_eq(VoicePreset_f0_offset(alpha), f64_neg(f64_from(80)), "alpha_wolf f0_offset -80");
+assert_eq(VoicePreset_breathiness(alpha), T_0_03, "alpha_wolf breathiness 0.03");
+
+var pup = preset_wolf_pup();
+assert_eq(VoicePreset_species(pup), PRANI_SP_WOLF, "wolf_pup species Wolf");
+assert_eq(VoicePreset_size(pup), T_0_4, "wolf_pup size 0.4");
+assert_eq(VoicePreset_f0_offset(pup), T_OFF_200, "wolf_pup f0_offset 200");
+assert_eq(VoicePreset_breathiness(pup), T_0_12, "wolf_pup breathiness 0.12");
+
+var cat = preset_house_cat();
+assert_eq(VoicePreset_species(cat), PRANI_SP_CAT, "house_cat species Cat");
+assert_eq(VoicePreset_size(cat), T_1_0, "house_cat size 1.0");
+assert_eq(VoicePreset_f0_offset(cat), 0, "house_cat f0_offset 0");
+assert_eq(VoicePreset_breathiness(cat), T_0_08, "house_cat breathiness 0.08");
+
+var kit = preset_kitten();
+assert_eq(VoicePreset_species(kit), PRANI_SP_CAT, "kitten species Cat");
+assert_eq(VoicePreset_size(kit), T_0_4, "kitten size 0.4");
+assert_eq(VoicePreset_f0_offset(kit), T_OFF_150, "kitten f0_offset 150");
+assert_eq(VoicePreset_breathiness(kit), T_0_15, "kitten breathiness 0.15");
+
+var lion = preset_male_lion();
+assert_eq(VoicePreset_species(lion), PRANI_SP_LION, "male_lion species Lion");
+assert_eq(VoicePreset_size(lion), T_1_3, "male_lion size 1.3");
+assert_eq(VoicePreset_f0_offset(lion), f64_neg(f64_from(15)), "male_lion f0_offset -15");
+assert_eq(VoicePreset_breathiness(lion), T_0_12, "male_lion breathiness 0.12");
+
+var anc = preset_ancient_dragon();
+assert_eq(VoicePreset_species(anc), PRANI_SP_DRAGON, "ancient_dragon species Dragon");
+assert_eq(VoicePreset_size(anc), T_4_0, "ancient_dragon size 4.0");
+assert_eq(VoicePreset_f0_offset(anc), f64_neg(f64_from(30)), "ancient_dragon f0_offset -30");
+assert_eq(VoicePreset_breathiness(anc), T_0_25, "ancient_dragon breathiness 0.25");
+
+var yng = preset_young_dragon();
+assert_eq(VoicePreset_species(yng), PRANI_SP_DRAGON, "young_dragon species Dragon");
+assert_eq(VoicePreset_size(yng), T_0_8, "young_dragon size 0.8");
+assert_eq(VoicePreset_f0_offset(yng), T_OFF_50, "young_dragon f0_offset 50");
+assert_eq(VoicePreset_breathiness(yng), T_0_15, "young_dragon breathiness 0.15");
+
+var eagle = preset_bald_eagle();
+assert_eq(VoicePreset_species(eagle), PRANI_SP_RAPTOR, "bald_eagle species Raptor");
+assert_eq(VoicePreset_size(eagle), T_1_2, "bald_eagle size 1.2");
+assert_eq(VoicePreset_f0_offset(eagle), f64_neg(f64_from(200)), "bald_eagle f0_offset -200");
+assert_eq(VoicePreset_breathiness(eagle), T_0_1, "bald_eagle breathiness 0.1");
+
+var raven = preset_raven();
+assert_eq(VoicePreset_species(raven), PRANI_SP_CROW, "raven species Crow");
+assert_eq(VoicePreset_size(raven), T_1_3, "raven size 1.3");
+assert_eq(VoicePreset_f0_offset(raven), f64_neg(f64_from(100)), "raven f0_offset -100");
+assert_eq(VoicePreset_breathiness(raven), T_0_2, "raven breathiness 0.2");
+
+var cricket = preset_field_cricket();
+assert_eq(VoicePreset_species(cricket), PRANI_SP_CRICKET, "field_cricket species Cricket");
+assert_eq(VoicePreset_size(cricket), T_1_0, "field_cricket size 1.0");
+assert_eq(VoicePreset_f0_offset(cricket), 0, "field_cricket f0_offset 0");
+assert_eq(VoicePreset_breathiness(cricket), 0, "field_cricket breathiness 0.0");
+
+var gator = preset_alligator();
+assert_eq(VoicePreset_species(gator), PRANI_SP_CROCODILIAN, "alligator species Crocodilian");
+assert_eq(VoicePreset_size(gator), T_1_5, "alligator size 1.5");
+assert_eq(VoicePreset_f0_offset(gator), f64_neg(f64_from(10)), "alligator f0_offset -10");
+assert_eq(VoicePreset_breathiness(gator), T_0_18, "alligator breathiness 0.18");
+
+# ================================================================
+test_group("preset_all -- length 11 and oracle order");
+var all = preset_all();
+assert_eq(vec_len(all), 11, "preset_all length 11");
+# order: verify each slot's species matches the oracle ALL[] ordering.
+assert_eq(VoicePreset_species(vec_get(all, 0)), PRANI_SP_WOLF, "all[0] Alpha Wolf");
+assert_eq(VoicePreset_species(vec_get(all, 1)), PRANI_SP_WOLF, "all[1] Wolf Pup");
+assert_eq(VoicePreset_species(vec_get(all, 2)), PRANI_SP_CAT, "all[2] House Cat");
+assert_eq(VoicePreset_species(vec_get(all, 3)), PRANI_SP_CAT, "all[3] Kitten");
+assert_eq(VoicePreset_species(vec_get(all, 4)), PRANI_SP_LION, "all[4] Male Lion");
+assert_eq(VoicePreset_species(vec_get(all, 5)), PRANI_SP_DRAGON, "all[5] Ancient Dragon");
+assert_eq(VoicePreset_species(vec_get(all, 6)), PRANI_SP_DRAGON, "all[6] Young Dragon");
+assert_eq(VoicePreset_species(vec_get(all, 7)), PRANI_SP_RAPTOR, "all[7] Bald Eagle");
+assert_eq(VoicePreset_species(vec_get(all, 8)), PRANI_SP_CROW, "all[8] Raven");
+assert_eq(VoicePreset_species(vec_get(all, 9)), PRANI_SP_CRICKET, "all[9] Field Cricket");
+assert_eq(VoicePreset_species(vec_get(all, 10)), PRANI_SP_CROCODILIAN, "all[10] Alligator");
+# spot-check that all[1] is the pup (distinguishes Wolf Pup from Alpha Wolf by size).
+assert_eq(VoicePreset_size(vec_get(all, 1)), T_0_4, "all[1] size 0.4 (Wolf Pup, not Alpha)");
+assert_eq(VoicePreset_size(vec_get(all, 0)), T_1_4, "all[0] size 1.4 (Alpha Wolf)");
+
+# ================================================================
+test_group("preset_build -- species + effective_tract_scale + effective_f0");
+
+var v_alpha = preset_build(preset_alpha_wolf());
+assert_eq(crvoice_species(v_alpha), PRANI_SP_WOLF, "build alpha_wolf species Wolf");
+assert_eq(crvoice_effective_tract_scale(v_alpha), T_ETS_ALPHA_WOLF, "build alpha_wolf tract_scale 1.68");
+assert_eq(crvoice_effective_f0(v_alpha), T_EF0_ALPHA_WOLF, "build alpha_wolf effective_f0 228.57");
+
+var v_pup = preset_build(preset_wolf_pup());
+assert_eq(crvoice_species(v_pup), PRANI_SP_WOLF, "build wolf_pup species Wolf");
+assert_eq(crvoice_effective_tract_scale(v_pup), T_ETS_WOLF_PUP, "build wolf_pup tract_scale 0.48");
+assert_eq(crvoice_effective_f0(v_pup), T_EF0_WOLF_PUP, "build wolf_pup effective_f0 clamp 1200");
+
+var v_cat = preset_build(preset_house_cat());
+assert_eq(crvoice_species(v_cat), PRANI_SP_CAT, "build house_cat species Cat");
+assert_eq(crvoice_effective_tract_scale(v_cat), T_ETS_HOUSE_CAT, "build house_cat tract_scale 0.5");
+assert_eq(crvoice_effective_f0(v_cat), T_EF0_HOUSE_CAT, "build house_cat effective_f0 500");
+
+var v_kit = preset_build(preset_kitten());
+assert_eq(crvoice_species(v_kit), PRANI_SP_CAT, "build kitten species Cat");
+assert_eq(crvoice_effective_tract_scale(v_kit), T_ETS_KITTEN, "build kitten tract_scale 0.2");
+assert_eq(crvoice_effective_f0(v_kit), T_EF0_KITTEN, "build kitten effective_f0 clamp 1000");
+
+var v_lion = preset_build(preset_male_lion());
+assert_eq(crvoice_species(v_lion), PRANI_SP_LION, "build male_lion species Lion");
+assert_eq(crvoice_effective_tract_scale(v_lion), T_ETS_MALE_LION, "build male_lion tract_scale 2.6");
+assert_eq(crvoice_effective_f0(v_lion), T_EF0_MALE_LION, "build male_lion effective_f0 50");
+
+var v_anc = preset_build(preset_ancient_dragon());
+assert_eq(crvoice_species(v_anc), PRANI_SP_DRAGON, "build ancient_dragon species Dragon");
+assert_eq(crvoice_effective_tract_scale(v_anc), T_ETS_ANC_DRAGON, "build ancient_dragon tract_scale 12.0");
+assert_eq(crvoice_effective_f0(v_anc), T_EF0_ANC_DRAGON, "build ancient_dragon effective_f0 clamp 30");
+
+var v_yng = preset_build(preset_young_dragon());
+assert_eq(crvoice_species(v_yng), PRANI_SP_DRAGON, "build young_dragon species Dragon");
+assert_eq(crvoice_effective_tract_scale(v_yng), T_ETS_YNG_DRAGON, "build young_dragon tract_scale 2.4");
+assert_eq(crvoice_effective_f0(v_yng), T_EF0_YNG_DRAGON, "build young_dragon effective_f0 150");
+
+var v_eagle = preset_build(preset_bald_eagle());
+assert_eq(crvoice_species(v_eagle), PRANI_SP_RAPTOR, "build bald_eagle species Raptor");
+assert_eq(crvoice_effective_tract_scale(v_eagle), T_ETS_BALD_EAGLE, "build bald_eagle tract_scale 0.24");
+assert_eq(crvoice_effective_f0(v_eagle), T_EF0_BALD_EAGLE, "build bald_eagle effective_f0 clamp 2000");
+
+var v_raven = preset_build(preset_raven());
+assert_eq(crvoice_species(v_raven), PRANI_SP_CROW, "build raven species Crow");
+assert_eq(crvoice_effective_tract_scale(v_raven), T_ETS_RAVEN, "build raven tract_scale 0.39");
+assert_eq(crvoice_effective_f0(v_raven), T_EF0_RAVEN, "build raven effective_f0 538.46");
+
+var v_cricket = preset_build(preset_field_cricket());
+assert_eq(crvoice_species(v_cricket), PRANI_SP_CRICKET, "build field_cricket species Cricket");
+assert_eq(crvoice_effective_tract_scale(v_cricket), T_ETS_CRICKET, "build field_cricket tract_scale 0.05");
+assert_eq(crvoice_effective_f0(v_cricket), T_EF0_CRICKET, "build field_cricket effective_f0 4500");
+
+var v_gator = preset_build(preset_alligator());
+assert_eq(crvoice_species(v_gator), PRANI_SP_CROCODILIAN, "build alligator species Crocodilian");
+assert_eq(crvoice_effective_tract_scale(v_gator), T_ETS_ALLIGATOR, "build alligator tract_scale 3.75");
+assert_eq(crvoice_effective_f0(v_gator), T_EF0_ALLIGATOR, "build alligator effective_f0 33.33");
+
+# ================================================================
+test_group("preset_build -- applied breathiness reaches the voice params");
+# with_breathiness mutates the voice's params in place; verify the override
+# lands (svara-independent). Alpha wolf breathiness 0.03.
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_alpha)), T_0_03,
+    "build alpha_wolf breathiness override 0.03 in voice params");
+# Ancient dragon breathiness 0.25.
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_anc)), T_0_25,
+    "build ancient_dragon breathiness override 0.25 in voice params");
+
+var rc = assert_summary();
+syscall(60, rc);
