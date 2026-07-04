@@ -10,6 +10,7 @@
 # serde/Display tests dropped (no serde; integer codes).
 
 include "src/error.cyr"
+include "src/logging.cyr"
 include "src/fatigue.cyr"
 
 alloc_init();
@@ -185,6 +186,45 @@ assert_eq(fatigue_alarm_habituation(rs), 0, "reset habituation == 0");
 assert_eq(FatigueState_bout_calling_time(rs), 0, "reset bout time == 0");
 assert_eq(FatigueState_alarm_count(rs), 0, "reset alarm count == 0");
 assert_eq(FatigueState_alarm_reinforced(rs), 0, "reset reinforced == 0");
+
+# ================================================================
+# serde roundtrip (ports the Rust #[derive(Serialize, Deserialize)] on
+# FatigueState + FatigueModifiers — state persistence).
+test_group("FatigueState serde roundtrip");
+var fs = fatigue_new();
+# advance so every field is non-default: fatigue=64*0.015=0.96, bout=64.0,
+# alarm_count=1, habituation=0.1 (alarm). dur=64 chosen so all f64 fields (and
+# every derived modifier) print to a shortest-decimal that reparses bit-exact.
+fatigue_record_call(fs, f64_from(64), 1);
+var sb = str_builder_new();
+FatigueState_to_json(fs, sb);
+var jstr = str_data(str_builder_build(sb));
+var fs2 = FatigueState_from_json_str(jstr);
+assert_eq(FatigueState_fatigue(fs2), FatigueState_fatigue(fs), "fatigue roundtrips");
+assert_eq(FatigueState_alarm_habituation(fs2), FatigueState_alarm_habituation(fs), "alarm_habituation roundtrips");
+assert_eq(FatigueState_bout_calling_time(fs2), FatigueState_bout_calling_time(fs), "bout_calling_time roundtrips");
+assert_eq(FatigueState_alarm_count(fs2), FatigueState_alarm_count(fs), "alarm_count roundtrips");
+assert_eq(FatigueState_alarm_reinforced(fs2), FatigueState_alarm_reinforced(fs), "alarm_reinforced roundtrips");
+# re-serialize is idempotent
+var sbf = str_builder_new();
+FatigueState_to_json(fs2, sbf);
+assert_eq(memeq(jstr, str_data(str_builder_build(sbf)), strlen(jstr)), 1, "FatigueState json idempotent");
+
+# ================================================================
+test_group("FatigueModifiers serde roundtrip");
+var fm = fatigue_modifiers(fs);   # non-default modifiers from the advanced state above
+var sbm = str_builder_new();
+FatigueModifiers_to_json(fm, sbm);
+var mstr = str_data(str_builder_build(sbm));
+var fm2 = FatigueModifiers_from_json_str(mstr);
+assert_eq(FatigueModifiers_pitch_offset(fm2), FatigueModifiers_pitch_offset(fm), "pitch_offset roundtrips");
+assert_eq(FatigueModifiers_breathiness_delta(fm2), FatigueModifiers_breathiness_delta(fm), "breathiness_delta roundtrips");
+assert_eq(FatigueModifiers_amplitude_scale(fm2), FatigueModifiers_amplitude_scale(fm), "amplitude_scale roundtrips");
+assert_eq(FatigueModifiers_jitter_scale(fm2), FatigueModifiers_jitter_scale(fm), "jitter_scale roundtrips");
+# re-serialize is idempotent
+var sbm2 = str_builder_new();
+FatigueModifiers_to_json(fm2, sbm2);
+assert_eq(memeq(mstr, str_data(str_builder_build(sbm2)), strlen(mstr)), 1, "FatigueModifiers json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

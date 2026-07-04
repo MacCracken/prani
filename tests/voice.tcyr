@@ -23,6 +23,7 @@ include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
 include "src/error.cyr"
+include "src/logging.cyr"
 include "src/rng.cyr"
 include "src/dsp.cyr"
 include "src/vocalization.cyr"
@@ -270,6 +271,29 @@ var br_before = SpeciesParams_breathiness(CreatureVoice_params(vv));
 var _vv = crvoice_with_vocal_effort(vv, T_1_0);   # extreme effort -> breathiness_delta 0.15 (in-place, same ptr)
 crvoice_vocalize(vv, PRANI_VOC_HOWL, T_SR, T_DUR_003);
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(vv)), br_before, "voice params breathiness unchanged after vocalize");
+
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# CreatureVoice — scalars as bit patterns + nested SpeciesParams with the
+# individual breathiness override preserved).
+test_group("CreatureVoice serde roundtrip");
+var vser = crvoice_new(PRANI_SP_WOLF);
+crvoice_with_size(vser, 0x3FF3333333333333);          # 1.2
+crvoice_with_vocal_effort(vser, 0x3FE6666666666666);  # 0.7
+crvoice_with_breathiness(vser, 0x3FC3333333333333);   # 0.15 (mutates params)
+var vsb = str_builder_new();
+crvoice_to_json(vser, vsb);
+var vjson = str_data(str_builder_build(vsb));
+var v2 = crvoice_from_json_str(vjson);
+assert_eq(crvoice_species(v2), PRANI_SP_WOLF, "species roundtrips");
+assert_eq(CreatureVoice_f0_offset(v2), CreatureVoice_f0_offset(vser), "f0_offset roundtrips");
+assert_eq(CreatureVoice_size_scale(v2), CreatureVoice_size_scale(vser), "size_scale (1.2) roundtrips");
+assert_eq(CreatureVoice_vocal_effort(v2), CreatureVoice_vocal_effort(vser), "vocal_effort (0.7) roundtrips");
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v2)), 0x3FC3333333333333, "nested params breathiness override (0.15) roundtrips");
+assert_eq(SpeciesParams_resonance_seed(CreatureVoice_params(v2)), PR_SEED_WOLF, "nested params resonance_seed roundtrips");
+var vsb2 = str_builder_new();
+crvoice_to_json(v2, vsb2);
+assert_eq(memeq(vjson, str_data(str_builder_build(vsb2)), strlen(vjson)), 1, "voice json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -4,6 +4,7 @@
 # DC input toward zero. serde round-trip dropped (no serde).
 
 include "src/error.cyr"
+include "src/logging.cyr"
 include "src/dsp.cyr"
 
 alloc_init();
@@ -55,6 +56,24 @@ assert_eq(vec_get(buf, 1), PRANI_DCBLOCK_R, "buf[1] == R");
 # ================================================================
 test_group("map_naad_error");
 assert_eq(prani_map_naad_error((0 - 1)), PRANI_ERR_SYNTHESIS_FAILED, "naad err -> synthesis failed");
+
+# ================================================================
+# serde roundtrip (ports the Rust #[derive(Serialize, Deserialize)] on DcBlocker).
+test_group("DcBlocker serde roundtrip");
+var dcs = dcblocker_new();
+dcblocker_process(dcs, F64_ONE);   # advance state so fields are non-default
+dcblocker_process(dcs, F64_ONE);
+var sb = str_builder_new();
+DcBlocker_to_json(dcs, sb);
+var jstr = str_data(str_builder_build(sb));
+var dc2 = DcBlocker_from_json_str(jstr);
+assert_eq(DcBlocker_x_prev(dc2), DcBlocker_x_prev(dcs), "x_prev roundtrips");
+assert_eq(DcBlocker_y_prev(dc2), DcBlocker_y_prev(dcs), "y_prev roundtrips");
+assert_eq(DcBlocker_r(dc2), DcBlocker_r(dcs), "r roundtrips");
+# re-serialize is idempotent
+var sb2 = str_builder_new();
+DcBlocker_to_json(dc2, sb2);
+assert_eq(memeq(jstr, str_data(str_builder_build(sb2)), strlen(jstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

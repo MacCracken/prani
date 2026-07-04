@@ -113,5 +113,24 @@ assert_eq(CallBout_vocalization(lion_bout), PRANI_VOC_ROAR, "lion bout roars");
 assert_eq(CallBout_count(lion_bout), 4, "lion bout count 4");
 assert_eq(CallBout_intent(lion_bout), PRANI_INTENT_TERRITORIAL, "lion bout territorial");
 
+# ================================================================
+# serde roundtrip (ports the Rust #[derive(Serialize, Deserialize)] on
+# SpeciesParams — species-preset persistence). Wolf is a representative laryngeal
+# preset with a non-default integer apparatus/seed and non-integer f64 fields.
+test_group("SpeciesParams serde roundtrip");
+var sp = species_params(PRANI_SP_WOLF);
+var sb = str_builder_new();
+SpeciesParams_to_json(sp, sb);
+var jstr = str_data(str_builder_build(sb));
+var sp2 = SpeciesParams_from_json_str(jstr);
+assert_eq(SpeciesParams_apparatus(sp2), SpeciesParams_apparatus(sp), "apparatus roundtrips");
+assert_eq(SpeciesParams_f0_default(sp2), SpeciesParams_f0_default(sp), "f0_default roundtrips");
+assert_eq(SpeciesParams_formant0(sp2), SpeciesParams_formant0(sp), "formant0 roundtrips");
+assert_eq(SpeciesParams_spectral_tilt(sp2), SpeciesParams_spectral_tilt(sp), "spectral_tilt roundtrips");
+assert_eq(SpeciesParams_resonance_seed(sp2), SpeciesParams_resonance_seed(sp), "resonance_seed roundtrips");
+var sb2 = str_builder_new();
+SpeciesParams_to_json(sp2, sb2);
+assert_eq(memeq(jstr, str_data(str_builder_build(sb2)), strlen(jstr)), 1, "json idempotent");
+
 var rc = assert_summary();
 syscall(60, rc);

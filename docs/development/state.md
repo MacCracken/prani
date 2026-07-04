@@ -5,10 +5,13 @@
 
 ## Version
 
-**2.0.0** — Rust → Cyrius port. The Rust line shipped through 1.1.0; the
-language migration is a major break (2.0.0). All 15 modules ported and
-cross-checked function-for-function against the frozen 3,527-line Rust oracle at
-`rust-old/`. Per-module parity ledger: [`port-audit.md`](port-audit.md).
+**2.0.1** — Rust → Cyrius port + logging/serde restoration. The Rust line
+shipped through 1.1.0; the language migration is a major break (2.0.0), and
+2.0.1 restores logging (sakshi) + serde (`#derive(Serialize)`+bayan) that 2.0.0
+wrongly dropped. All 16 modules (15 ported + `logging.cyr`) cross-checked
+function-for-function against the frozen 3,527-line Rust oracle at `rust-old/`.
+**717 parity assertions green across 16 suites** (incl. serde roundtrips).
+Per-module parity ledger: [`port-audit.md`](port-audit.md).
 
 ## Toolchain
 
@@ -42,8 +45,8 @@ Consumed as Cyrius distlib bundles (git+tag in `cyrius.cyml`):
 
 ## Port progress
 
-**15 / 15 modules ported — PORT COMPLETE.** Parity per-module in
-[`port-audit.md`](port-audit.md).
+**15 / 15 Rust modules ported (+ `logging.cyr`) — PORT COMPLETE.** Parity
+per-module in [`port-audit.md`](port-audit.md).
 
 | Layer | Modules | Status |
 |-------|---------|--------|
@@ -62,7 +65,8 @@ each integrated and independently re-verified in the main tree against `rust-old
 ## Tests
 
 One `tests/<module>.tcyr` per module, cross-checked against the Rust oracle
-(serde round-trip + Display-string tests dropped — no serde, integer codes).
+serde roundtrip tests INCLUDED (serde restored in 2.0.1 via `#derive(Serialize)`
++bayan, f64 fields as lossless i64 bit patterns); Display-string tests dropped.
 svara-independent math asserted at exact f64 bit patterns; full synthesis paths
 (through svara's DSP, where f32→f64 diverges) asserted structurally
 (non-error + exact length + all-finite + bit-identical determinism).
@@ -73,6 +77,6 @@ svara-independent math asserted at exact f64 bit patterns; full synthesis paths
 
 ## In flight
 
-Nothing — the 2.0.0 port is complete. Follow-ups for a later cycle:
+Nothing — the 2.0.1 port (with logging + serde) is complete. Follow-ups:
 - Broaden hot-path benchmarks + capture a Rust-vs-Cyrius comparison.
 - Consumer-green (kiran/joshua) once they port up the stack.

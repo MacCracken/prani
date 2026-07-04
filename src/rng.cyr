@@ -15,8 +15,9 @@
 # `1.0 / i32::MAX as f32` which rounds i32::MAX to 2^31, so the scale is
 # exactly 2^-31.
 #
-# serde: Rng was Serialize/Deserialize (state persistence). No serde in Cyrius;
-# the round-trip test is dropped (state = two u64 slots).
+# serde: Rng was Serialize/Deserialize (state persistence). RESTORED via
+# #derive(Serialize) — PrRng_to_json / _from_json_str; the restored generator
+# resumes the exact stream (tested in tests/rng.tcyr).
 
 var PRANI_RNG_DEFAULT_SEED = 42;                    # default deterministic seed
 
@@ -24,8 +25,15 @@ var PRANI_PCG_MULT   = 6_364_136_223_846_793_005;   # PCG32 LCG multiplier
 var PRANI_U32_MASK   = 0xFFFFFFFF;                   # low 32 bits
 var PRANI_INV_I32MAX = 0x3E00000000000000;          # 2^-31 = 1.0 / (i32::MAX as f32)
 
+# Fields TYPED (i64 u64-slots) for #derive(Serialize) — auto-generates
+# PrRng_to_json / PrRng_from_json_str, porting the Rust `#[derive(Serialize,
+# Deserialize)]` on Rng (state persistence for reproducible streams).
 #derive(accessors)
-struct PrRng { state; inc; }
+#derive(Serialize)
+struct PrRng {
+    state: i64;
+    inc: i64;
+}
 
 # next_u32 -- PCG32 output function. Defined before its callers (single-pass).
 # NOT #must_use: it advances internal state, and prani_rng_new intentionally

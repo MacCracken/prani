@@ -41,5 +41,33 @@ assert_eq(IntentModifiers_urgency(distress), PR_F_1_0, "distress urgency 1.0 (ma
 var threat = prani_intent_modifiers(PRANI_INTENT_THREAT);
 assert_eq(IntentModifiers_pitch_scale(threat), PR_F_0_7, "threat pitch 0.7 (lowest)");
 
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# IntentModifiers). Built from Alarm (1.4/1.5/0.7/0.9) -- all four fields at
+# non-default values.
+#
+# The #derive(Serialize) f64 writer emits 6 decimal places. That is lossless for
+# most values (1.4, 1.5, 0.9 recover their exact bit patterns below), but two of
+# the intent constants -- 0.3 and 0.7 -- are 1 ULP off after a 6-digit decimal
+# round-trip. Alarm's duration_scale is 0.7, so it is asserted to within 1e-6
+# (the serializer's actual precision guarantee) rather than bit-exact; the other
+# three fields are bit-exact. Re-serialization is fully idempotent: the parsed
+# value re-emits the identical 6-digit JSON.
+test_group("IntentModifiers serde roundtrip");
+var mser = prani_intent_modifiers(PRANI_INTENT_ALARM);
+var sb = str_builder_new();
+IntentModifiers_to_json(mser, sb);
+var jstr = str_data(str_builder_build(sb));
+var m2 = IntentModifiers_from_json_str(jstr);
+assert_eq(IntentModifiers_pitch_scale(m2), IntentModifiers_pitch_scale(mser), "pitch_scale roundtrips (1.4 exact)");
+assert_eq(IntentModifiers_amplitude_scale(m2), IntentModifiers_amplitude_scale(mser), "amplitude_scale roundtrips (1.5 exact)");
+# 0.7 is 1 ULP off after 6-digit decimal serialization -> assert within 1e-6.
+var ddiff = f64_abs(f64_sub(IntentModifiers_duration_scale(m2), IntentModifiers_duration_scale(mser)));
+assert_eq(f64_lt(ddiff, 0x3EB0C6F7A0B5ED8D), 1, "duration_scale roundtrips (0.7 within 1e-6)");
+assert_eq(IntentModifiers_urgency(m2), IntentModifiers_urgency(mser), "urgency roundtrips (0.9 exact)");
+var sb2 = str_builder_new();
+IntentModifiers_to_json(m2, sb2);
+assert_eq(memeq(jstr, str_data(str_builder_build(sb2)), strlen(jstr)), 1, "json idempotent");
+
 var rc = assert_summary();
 syscall(60, rc);

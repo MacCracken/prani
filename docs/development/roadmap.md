@@ -43,5 +43,5 @@
 - A C ABI compatible with the old Rust `extern "C"` surface — the `ffi` module is
   re-expressed in Cyrius conventions (handles = pointers, buffers = vecs); a raw
   C-ABI shim is a later concern if a non-Cyrius host needs it.
-- serde/JSON persistence of prani types (no serde in Cyrius; revisit if a
-  consumer needs on-disk voice presets).
+  (serde/JSON persistence IS supported — restored in 2.0.1 via
+  `#derive(Serialize)`+bayan on all 14 types that had it.)

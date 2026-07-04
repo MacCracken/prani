@@ -5,8 +5,9 @@
 # Requires (from the build/test unit): error.cyr (PRANI_ERR_SYNTHESIS_FAILED)
 # + stdlib alloc/vec. The module file itself has no `include` lines.
 #
-# serde: DcBlocker was Serialize/Deserialize; no serde in Cyrius (round-trip
-# test dropped -- state is three f64 slots).
+# serde: DcBlocker was Serialize/Deserialize in Rust; RESTORED via
+# #derive(Serialize) (f64 fields typed i64 so their exact bit patterns
+# serialize losslessly). Roundtrip tested in tests/dsp.tcyr.
 
 # 0.995 pole radius: R in H(z) = (1 - z^-1) / (1 - R z^-1). Standard DC-block
 # corner (~35 Hz @ 44.1 kHz). Non-integer literal -> module-top hex constant.
@@ -19,8 +20,18 @@ var PRANI_DCBLOCK_R = 0x3fefd70a3d70a3d7;   # 0.995
 #   y_prev : previous output sample
 #   r      : pole radius (~0.995)
 # ================================================================
+# Fields TYPED as i64 for #derive(Serialize): each holds an f64 BIT PATTERN, and
+# serializing it as an int emits the exact 64-bit value (lossless). Typing as
+# f64 would use the derive's 6-decimal float writer, which loses ~1 ULP on many
+# values. Auto-generates DcBlocker_to_json / _from_json_str — ports the Rust
+# `#[derive(Serialize, Deserialize)]` on DcBlocker.
 #derive(accessors)
-struct DcBlocker { x_prev; y_prev; r; }
+#derive(Serialize)
+struct DcBlocker {
+    x_prev: i64;
+    y_prev: i64;
+    r: i64;
+}
 
 # new() -- zeroed state, standard pole radius.
 #must_use
@@ -58,12 +69,12 @@ fn dcblocker_reset(b) {
     DcBlocker_set_y_prev(b, 0);
 }
 
-# map_naad_error -- ports map_naad_error (naad-backend gated). Rust built a
-# "{synth}: {component} init failed: {err}" String and returned
-# PraniError::SynthesisFailed; the Cyrius port collapses to the integer code
-# (diagnostic string dropped -- integer error codes). Any naad failure maps to
-# PRANI_ERR_SYNTHESIS_FAILED.
+# map_naad_error -- ports map_naad_error (naad-backend gated). Rust emitted a
+# `tracing::error!(... "naad backend error")` and returned
+# PraniError::SynthesisFailed; the Cyrius port wires the diagnostic to sakshi
+# (prani_log_error) and returns PRANI_ERR_SYNTHESIS_FAILED.
 #must_use
 fn prani_map_naad_error(naad_code) {
+    prani_log_error("prani: naad backend synthesis init failed");
     return PRANI_ERR_SYNTHESIS_FAILED;
 }

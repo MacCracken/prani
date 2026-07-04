@@ -13,7 +13,9 @@
 #
 # RESULT convention: synthesize* return a heap vec pointer on success or a
 # negative PRANI_ERR_* on failure (propagated from crvoice_vocalize_with_intent).
-# Callers check prani_is_err(result). serde/Display tests dropped (no serde).
+# Callers check prani_is_err(result). serde RESTORED: CallElement/CallBout via
+# #derive(Serialize); CallPhrase's element vec hand-rolled (see below). Display
+# tests dropped (no Display in Cyrius).
 
 var PRANI_CHORUS_PRIME = 7919;   # seed multiplier for chorus RNG (voices.len * 7919)
 
@@ -23,8 +25,16 @@ var PRANI_CHORUS_PRIME = 7919;   # seed multiplier for chorus RNG (voices.len * 
 #   duration     : f64 seconds
 #   gap          : f64 seconds of silence after this call
 # ================================================================
+# TYPED i64 for #derive(Serialize) → auto CallElement_to_json / _from_json_str.
+# f64 fields (duration/gap) are typed i64 so their exact bit patterns serialize
+# losslessly (the derive's 6-digit float writer would lose precision).
 #derive(accessors)
-struct CallElement { vocalization; duration; gap; }
+#derive(Serialize)
+struct CallElement {
+    vocalization: i64;
+    duration: i64;
+    gap: i64;
+}
 
 #must_use
 fn sequence_call_element_new(vocalization, duration, gap) {
@@ -43,8 +53,17 @@ fn sequence_call_element_new(vocalization, duration, gap) {
 #   interval      : f64 inter-call interval (seconds)
 #   intent        : PRANI_INTENT_* constant
 # ================================================================
+# TYPED i64 for #derive(Serialize) → auto CallBout_to_json / _from_json_str.
+# f64 fields (call_duration/interval) typed i64 → exact bit-pattern serialization.
 #derive(accessors)
-struct CallBout { vocalization; count; call_duration; interval; intent; }
+#derive(Serialize)
+struct CallBout {
+    vocalization: i64;
+    count: i64;
+    call_duration: i64;
+    interval: i64;
+    intent: i64;
+}
 
 #must_use
 fn sequence_call_bout_new(vocalization, count, call_duration, interval, intent) {
@@ -95,6 +114,49 @@ fn sequence_call_phrase_new(elements, intent) {
     CallPhrase_set_elements(p, elements);
     CallPhrase_set_intent(p, intent);
     return p;
+}
+
+# CallPhrase serde -- restores the Rust `#[derive(Serialize, Deserialize)]`.
+# `elements` is a vec of CallElement, which #derive(Serialize) can't express, so
+# the codec is hand-rolled: emit {"intent":N,"elements":[<CallElement json>,…]}
+# (delegating each element to its auto CallElement_to_json), and parse with
+# bayan's value-tree, rebuilding each element via CallElement_from_json_str
+# (re-serializing the array-element node). Roundtrip is idempotent.
+fn sequence_call_phrase_to_json(self, sb) {
+    str_builder_add_cstr(sb, "{\"intent\":");
+    str_builder_add_int(sb, CallPhrase_intent(self));
+    str_builder_add_cstr(sb, ",\"elements\":[");
+    var elems = CallPhrase_elements(self);
+    var n = vec_len(elems);
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        CallElement_to_json(vec_get(elems, i), sb);
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return 0;
+}
+
+fn sequence_call_phrase_from_json_str(json) {
+    var root = bayan_json_v_parse_str(json, strlen(json));
+    var intent = bayan_json_v_int(bayan_json_v_obj_get(root, "intent"));
+    var elems_val = bayan_json_v_obj_get(root, "elements");
+    var n = bayan_json_v_arr_len(elems_val);
+    var elems = vec_new();
+    var i = 0;
+    while (i < n) {
+        # Read each element's fields DIRECTLY from the parsed array-element node
+        # (duration/gap are i64 bit patterns). Avoids re-serializing the node.
+        var ev = bayan_json_v_arr_get(elems_val, i);
+        var e = alloc(sizeof(CallElement));
+        CallElement_set_vocalization(e, bayan_json_v_int(bayan_json_v_obj_get(ev, "vocalization")));
+        CallElement_set_duration(e, bayan_json_v_int(bayan_json_v_obj_get(ev, "duration")));
+        CallElement_set_gap(e, bayan_json_v_int(bayan_json_v_obj_get(ev, "gap")));
+        vec_push(elems, e);
+        i = i + 1;
+    }
+    return sequence_call_phrase_new(elems, intent);
 }
 
 # CallPhrase::synthesize -- render each element then append `gap * sr` silence.

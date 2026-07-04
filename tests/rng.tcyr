@@ -52,5 +52,22 @@ while (i < 256) {
 }
 assert_eq(in_range, 1, "256 next_f32 draws all in [0.0, 1.0)");
 
+# ================================================================
+# serde roundtrip (ports the Rust #[derive(Serialize, Deserialize)] on Rng —
+# state persistence for reproducible streams).
+test_group("PrRng serde roundtrip");
+var rser = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
+prani_rng_next_u32(rser);   # advance state off the seed
+prani_rng_next_u32(rser);
+var sb = str_builder_new();
+PrRng_to_json(rser, sb);
+var jstr = str_data(str_builder_build(sb));
+var r2 = PrRng_from_json_str(jstr);
+assert_eq(PrRng_state(r2), PrRng_state(rser), "state roundtrips");
+assert_eq(PrRng_inc(r2), PrRng_inc(rser), "inc roundtrips");
+# the restored generator resumes the EXACT same stream
+assert_eq(prani_rng_next_u32(r2), prani_rng_next_u32(rser), "restored rng resumes u32 stream");
+assert_eq(prani_rng_next_u32(r2), prani_rng_next_u32(rser), "…and stays in lockstep");
+
 var rc = assert_summary();
 syscall(60, rc);

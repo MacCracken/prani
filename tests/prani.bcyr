@@ -8,6 +8,7 @@
 # Batch pattern: bench_new → bench_batch_start → tight loop → bench_batch_stop
 # → bench_report. Per-sample ops use large N to amortize clock overhead.
 
+include "lib/sakshi.cyr"
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"

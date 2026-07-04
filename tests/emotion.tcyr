@@ -21,6 +21,7 @@ var T_POS_0_3 = 0x3fd3333333333333;   #  0.3
 var T_0_0     = 0x0000000000000000;   #  0.0
 var T_0_1     = 0x3fb999999999999a;   #  0.1
 var T_0_2     = 0x3fc999999999999a;   #  0.2
+var T_0_25    = 0x3fd0000000000000;   #  0.25
 var T_0_5     = 0x3fe0000000000000;   #  0.5
 var T_0_9     = 0x3feccccccccccccd;   #  0.9
 var T_1_0     = 0x3ff0000000000000;   #  1.0
@@ -203,6 +204,49 @@ assert_eq(PrEmotionOut_vocal_effort(ol), 0x3fd147ae147ae148, "effort 0.27");
 assert_eq(PrEmotionOut_pitch_scale(ol), 0x3ff1ae147ae147ae, "pitch 1.105");
 # breath = (0.2-0.1)*0.5 = 0.05
 assert_eq(PrEmotionOut_breathiness_delta(ol), 0x3fa999999999999a, "breath 0.05 (low)");
+
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# EmotionState -- valence/arousal/smoothing, all f64).
+# The #derive(Serialize) f64 formatter emits 6 decimal places, so field values
+# are chosen to survive a 6-digit decimal round-trip exactly: valence 0.5,
+# arousal 0.25, smoothing 0.1 (all distinct, non-zero, and != the new() defaults
+# of 0.0 / 0.2 / 0.1).
+test_group("PrEmotion serde roundtrip");
+var pe = emotion_with_values(T_0_5, T_0_25);
+var pesb = str_builder_new();
+PrEmotion_to_json(pe, pesb);
+var pejstr = str_data(str_builder_build(pesb));
+var pe2 = PrEmotion_from_json_str(pejstr);
+assert_eq(PrEmotion_valence(pe2), PrEmotion_valence(pe), "valence roundtrips");
+assert_eq(PrEmotion_arousal(pe2), PrEmotion_arousal(pe), "arousal roundtrips");
+assert_eq(PrEmotion_smoothing(pe2), PrEmotion_smoothing(pe), "smoothing roundtrips");
+var pesb2 = str_builder_new();
+PrEmotion_to_json(pe2, pesb2);
+assert_eq(memeq(pejstr, str_data(str_builder_build(pesb2)), strlen(pejstr)), 1, "json idempotent");
+
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# EmotionOutput -- vocalization/intent i64 codes + three f64 modulation params).
+# State v=-0.5, a=0.1 (Neg/Low) -> vocalization Growl + intent Threat (both
+# non-default) and evaluate() yields effort 0.27, pitch 0.925, breath 0.05 --
+# all three floats non-zero AND 6-digit-decimal-stable so they roundtrip exactly.
+test_group("PrEmotionOut serde roundtrip");
+var poe = emotion_new();
+emotion_set(poe, T_NEG_0_5, T_0_1);
+var po = emotion_evaluate(poe);
+var posb = str_builder_new();
+PrEmotionOut_to_json(po, posb);
+var pojstr = str_data(str_builder_build(posb));
+var po2 = PrEmotionOut_from_json_str(pojstr);
+assert_eq(PrEmotionOut_vocalization(po2), PrEmotionOut_vocalization(po), "vocalization roundtrips");
+assert_eq(PrEmotionOut_intent(po2), PrEmotionOut_intent(po), "intent roundtrips");
+assert_eq(PrEmotionOut_vocal_effort(po2), PrEmotionOut_vocal_effort(po), "vocal_effort roundtrips");
+assert_eq(PrEmotionOut_pitch_scale(po2), PrEmotionOut_pitch_scale(po), "pitch_scale roundtrips");
+assert_eq(PrEmotionOut_breathiness_delta(po2), PrEmotionOut_breathiness_delta(po), "breathiness_delta roundtrips");
+var posb2 = str_builder_new();
+PrEmotionOut_to_json(po2, posb2);
+assert_eq(memeq(pojstr, str_data(str_builder_build(posb2)), strlen(pojstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

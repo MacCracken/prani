@@ -2,7 +2,8 @@
 # Ports rust-old/src/species.rs. Two enums (Species, VocalApparatus) -> integer
 # constants, the SpeciesParams struct, the big per-species params() lookup, the
 # supports_vocalization() bioacoustic gate, and bout_template() (a CallBout per
-# species). No serde (round-trip tests dropped); integer codes throughout.
+# species). serde RESTORED on SpeciesParams via #derive(Serialize) (all fields
+# typed i64 for lossless bit-pattern roundtrip); integer codes throughout.
 #
 # Requires (in the build/test unit): vocalization.cyr (PRANI_VOC_*/PRANI_INTENT_*)
 # and sequence.cyr (CallBout struct + sequence_call_bout_new). The module file
@@ -147,16 +148,31 @@ var PR_SEED_FANTASY     = 3551275586278653953;
 #   spectral_tilt : spectral tilt in dB/octave (negative = darker)
 #   resonance_seed: precomputed deterministic seed (f32-bit-pattern parity)
 # ================================================================
+# Fields TYPED i64 for #derive(Serialize): apparatus + resonance_seed are genuine
+# integers; every physical vocal parameter is an f64 bit pattern serialized as an
+# int → exact 64-bit lossless roundtrip (f64 typing = the derive's 6-decimal
+# float writer, which is lossy). Auto-generates SpeciesParams_to_json(
+# self, sb) + SpeciesParams_from_json_str(json) — ports the Rust `#[derive(Serialize,
+# Deserialize)]` on SpeciesParams (species-preset persistence).
 #derive(accessors)
+#derive(Serialize)
 struct SpeciesParams {
-    apparatus;
-    f0_min; f0_max; f0_default;
-    tract_scale;
-    formant0; formant1; formant2;
-    bandwidth0; bandwidth1; bandwidth2;
-    breathiness; jitter; shimmer;
-    spectral_tilt;
-    resonance_seed;
+    apparatus: i64;
+    f0_min: i64;
+    f0_max: i64;
+    f0_default: i64;
+    tract_scale: i64;
+    formant0: i64;
+    formant1: i64;
+    formant2: i64;
+    bandwidth0: i64;
+    bandwidth1: i64;
+    bandwidth2: i64;
+    breathiness: i64;
+    jitter: i64;
+    shimmer: i64;
+    spectral_tilt: i64;
+    resonance_seed: i64;
 }
 
 # Internal builder -- fills every field in declaration order.
@@ -361,4 +377,31 @@ fn species_bout_template(species) {
     }
     # PRANI_SP_FANTASY (default / fallthrough).
     return sequence_call_bout_new(PRANI_VOC_GROWL, 3, f64_from(1), f64_from(1), PRANI_INTENT_IDLE);
+}
+
+# species_params_from_node -- rebuild a SpeciesParams from a parsed bayan JSON
+# object node (all 16 fields are i64: enum consts / f64 bit patterns). Shared by
+# the nested-serde reconstruction in voice.cyr (CreatureVoice) and tract.cyr
+# (CreatureTract), which embed a SpeciesParams as a sub-object. (SpeciesParams_
+# from_json_str parses a top-level string; this reads an already-parsed node.)
+#must_use
+fn species_params_from_node(node) {
+    var p = alloc(sizeof(SpeciesParams));
+    SpeciesParams_set_apparatus(p, bayan_json_v_int(bayan_json_v_obj_get(node, "apparatus")));
+    SpeciesParams_set_f0_min(p, bayan_json_v_int(bayan_json_v_obj_get(node, "f0_min")));
+    SpeciesParams_set_f0_max(p, bayan_json_v_int(bayan_json_v_obj_get(node, "f0_max")));
+    SpeciesParams_set_f0_default(p, bayan_json_v_int(bayan_json_v_obj_get(node, "f0_default")));
+    SpeciesParams_set_tract_scale(p, bayan_json_v_int(bayan_json_v_obj_get(node, "tract_scale")));
+    SpeciesParams_set_formant0(p, bayan_json_v_int(bayan_json_v_obj_get(node, "formant0")));
+    SpeciesParams_set_formant1(p, bayan_json_v_int(bayan_json_v_obj_get(node, "formant1")));
+    SpeciesParams_set_formant2(p, bayan_json_v_int(bayan_json_v_obj_get(node, "formant2")));
+    SpeciesParams_set_bandwidth0(p, bayan_json_v_int(bayan_json_v_obj_get(node, "bandwidth0")));
+    SpeciesParams_set_bandwidth1(p, bayan_json_v_int(bayan_json_v_obj_get(node, "bandwidth1")));
+    SpeciesParams_set_bandwidth2(p, bayan_json_v_int(bayan_json_v_obj_get(node, "bandwidth2")));
+    SpeciesParams_set_breathiness(p, bayan_json_v_int(bayan_json_v_obj_get(node, "breathiness")));
+    SpeciesParams_set_jitter(p, bayan_json_v_int(bayan_json_v_obj_get(node, "jitter")));
+    SpeciesParams_set_shimmer(p, bayan_json_v_int(bayan_json_v_obj_get(node, "shimmer")));
+    SpeciesParams_set_spectral_tilt(p, bayan_json_v_int(bayan_json_v_obj_get(node, "spectral_tilt")));
+    SpeciesParams_set_resonance_seed(p, bayan_json_v_int(bayan_json_v_obj_get(node, "resonance_seed")));
+    return p;
 }

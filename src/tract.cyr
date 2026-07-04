@@ -84,7 +84,8 @@ fn crtract_options_new(subharmonic_amp, perturbation_scale) {
 #   phase        : running phase accumulator (sample-accurate across blocks)
 #   dc_blocker   : DcBlocker ptr (applied to all synthesis output)
 #   noise_filter : naad BiquadFilter ptr for noise shaping, or 0 (== None)
-# serde dropped (integer/pointer state).
+# serde RESTORED via crtract_to_json / crtract_from_json_str (below): the
+# reconstructable state roundtrips; the opaque svara tract is rebuilt from params.
 # ================================================================
 #derive(accessors)
 struct CreatureTract {
@@ -111,9 +112,12 @@ fn crtract_new(params, sample_rate) {
     var target = svara_vowel_target_with_bandwidths(
         f0, f1, f2, f64_mul(f2, PR_TR_1_3), f64_mul(f2, PR_TR_1_5),
         b0, b1, b2, f64_mul(b2, PR_TR_1_2), f64_mul(b2, PR_TR_1_4));
-    # Rust: `if let Err(e) = ... { warn!(...) }` -- ignore the return, continue.
-    # (Bind-and-drop to consume the #must_use result; parity = warn-then-continue.)
+    # Rust: `if let Err(e) = ... { warn!(...) }` then continue. Ports the
+    # tracing::warn! to sakshi (prani_log_warn), preserving warn-then-continue.
     var _fmt_rc = svara_tract_set_formants_from_target(tract, target);
+    if (prani_is_err(_fmt_rc) == 1) {
+        prani_log_warn("prani: species formants out of range, using defaults");
+    }
 
     # naad-backend: pre-build a bandpass for NoiseOnly (snakes). Error -> None(0).
     var noise_filter = 0;
@@ -130,6 +134,61 @@ fn crtract_new(params, sample_rate) {
     CreatureTract_set_phase(self, 0);
     CreatureTract_set_dc_blocker(self, dcblocker_new());
     CreatureTract_set_noise_filter(self, noise_filter);
+    return self;
+}
+
+# CreatureTract serde -- restores the Rust `#[derive(Serialize, Deserialize)]`.
+# The inner svara VocalTract + naad BiquadFilter are opaque (no Cyrius serialize
+# surface), so only the RECONSTRUCTABLE state is serialized: sample_rate, phase,
+# the rng (state/inc), the dc_blocker (x_prev/y_prev/r), and the SpeciesParams
+# (nested). On deserialize, crtract_new(params, sample_rate) rebuilds the svara
+# tract + naad filter + a fresh rng/dc_blocker, then the serialized rng/phase/
+# dc_blocker state is restored over them. f64 scalars serialize as exact i64 bit
+# patterns (lossless).
+#
+# DEVIATION (documented, not hidden): the Rust derive serialized the svara
+# tract's live filter history; the port rebuilds it from params instead (svara
+# is f64-opaque here). The species-determined response is bit-identical after
+# rebuild; only in-flight filter memory (which decays within a few samples) is
+# reset. Same tradeoff garjan makes rebuilding naad from config.
+fn crtract_to_json(self, sb) {
+    var rng = CreatureTract_rng(self);
+    var dc = CreatureTract_dc_blocker(self);
+    str_builder_add_cstr(sb, "{\"sample_rate\":");
+    str_builder_add_int(sb, CreatureTract_sample_rate(self));
+    str_builder_add_cstr(sb, ",\"phase\":");
+    str_builder_add_int(sb, CreatureTract_phase(self));
+    str_builder_add_cstr(sb, ",\"rng_state\":");
+    str_builder_add_int(sb, PrRng_state(rng));
+    str_builder_add_cstr(sb, ",\"rng_inc\":");
+    str_builder_add_int(sb, PrRng_inc(rng));
+    str_builder_add_cstr(sb, ",\"dcb_x_prev\":");
+    str_builder_add_int(sb, DcBlocker_x_prev(dc));
+    str_builder_add_cstr(sb, ",\"dcb_y_prev\":");
+    str_builder_add_int(sb, DcBlocker_y_prev(dc));
+    str_builder_add_cstr(sb, ",\"dcb_r\":");
+    str_builder_add_int(sb, DcBlocker_r(dc));
+    str_builder_add_cstr(sb, ",\"params\":");
+    SpeciesParams_to_json(CreatureTract_params(self), sb);
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+fn crtract_from_json_str(json) {
+    var root = bayan_json_v_parse_str(json, strlen(json));
+    var params = species_params_from_node(bayan_json_v_obj_get(root, "params"));
+    var sample_rate = bayan_json_v_int(bayan_json_v_obj_get(root, "sample_rate"));
+    # rebuild the svara tract + naad filter + fresh rng/dc_blocker from params
+    var self = crtract_new(params, sample_rate);
+    # then restore the serialized rng / phase / dc_blocker state over the rebuild
+    CreatureTract_set_phase(self, bayan_json_v_int(bayan_json_v_obj_get(root, "phase")));
+    var rng = CreatureTract_rng(self);
+    PrRng_set_state(rng, bayan_json_v_int(bayan_json_v_obj_get(root, "rng_state")));
+    PrRng_set_inc(rng, bayan_json_v_int(bayan_json_v_obj_get(root, "rng_inc")));
+    var dc = CreatureTract_dc_blocker(self);
+    DcBlocker_set_x_prev(dc, bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_x_prev")));
+    DcBlocker_set_y_prev(dc, bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_y_prev")));
+    DcBlocker_set_r(dc, bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_r")));
     return self;
 }
 

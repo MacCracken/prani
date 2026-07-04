@@ -6,6 +6,7 @@
 # Library modules live in src/*.cyr (validated per-module via tests/*.tcyr);
 # this entry is not what those suites include.
 
+include "lib/sakshi.cyr"
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"

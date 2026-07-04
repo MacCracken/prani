@@ -44,8 +44,12 @@ Proven reference template: **`src/error.cyr`, `src/rng.cyr`, `src/dsp.cyr`**
 - **Module files do NOT `include` each other** — the build/test entry includes them
   in dependency order (stdlib auto-prepends from `cyrius.cyml`; svara/naad/hisab via
   `include "lib/<dep>.cyr"` only in `src/main.cyr`, not in test units).
-- **serde round-trip tests dropped** (no serde). Display-string tests dropped
-  (integer codes). All other `#[test]` blocks ported one-for-one. Where a Rust
+- **serde RESTORED** (2.0.1) via `#derive(Serialize)` + `bayan`: every type that
+  had `#[derive(Serialize, Deserialize)]` gets a `*_to_json` / `*_from_json_str`
+  codec + a roundtrip test. f64 fields are typed `i64` so they serialize as exact
+  bit patterns (lossless; the derive's 6-digit float writer is not). Display-string
+  tests dropped (no Display in Cyrius). Logging RESTORED via sakshi (`src/logging.cyr`).
+  All other `#[test]` blocks ported one-for-one. Where a Rust
   module had NO `#[test]` block (its behaviour lives in `tests/integration.rs`),
   write focused behavioural tests that lock parity (golden values from the oracle).
 - **`math.rs`** (thin f32 sin/cos/exp/sqrt/powf wrappers) is folded into direct
@@ -146,13 +150,16 @@ tolerance. stdlib (assert/vec/math/alloc) auto-resolves — do not include it.
 |--------|----:|--------|------|-------|
 | ffi    | 265 | ✅ 37 | species, stream, vocalization, voice | `prani_ffi_*` C buffer-callback API. Handles=pointers, buffers=vecs, destroy=no-op (arena), index mappers=range checks. `voice_set_size` rebuilds+copies fields; `stream_start` shares the voice handle (read-only). ABI machinery (`extern "C"`/Box) doesn't translate — logic ported. |
 
-**Totals:** 17 Rust files (15 `.cyr` modules; `math.rs` folded into `f64_*`
-builtins, `lib.rs` carries only organization/prelude) · 3,527 Rust lines →
-3,760-line `dist/prani.cyr` bundle. **✅ PORT COMPLETE — 15/15 modules, zero
-deferrals. 627 parity assertions green across 15 suites** (all oracle behaviour
-ported minus serde round-trips + Display strings). `dist/prani.cyr` assembled
-(collision-audited to zero across all fns/structs/consts), `src/main.cyr` smoke
-links + runs the bundle, hot-path benchmarks captured, VERSION bumped 1.1.0→2.0.0.
+**Totals:** 17 Rust files → 16 `.cyr` modules (15 ported + `logging.cyr`;
+`math.rs` folded into `f64_*` builtins, `lib.rs` carries only organization/
+prelude) · 3,527 Rust lines → ~4,090-line `dist/prani.cyr` bundle. **✅ PORT
+COMPLETE — 16/16 modules, zero deferrals. 717 parity assertions green across 16
+suites** (all oracle behaviour ported — including serde roundtrips + logging;
+only Display-string tests dropped). `dist/prani.cyr` assembled (collision-audited
+to zero across all fns/structs/consts), `src/main.cyr` smoke links + runs the
+bundle, hot-path benchmarks captured. VERSION 1.1.0 → 2.0.0 (port) → **2.0.1**
+(logging via sakshi + serde via `#derive(Serialize)`+bayan, lossless i64 bit
+patterns).
 
 ### Parity method
 

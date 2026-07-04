@@ -22,6 +22,7 @@ include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
 include "src/error.cyr"
+include "src/logging.cyr"
 include "src/rng.cyr"
 include "src/dsp.cyr"
 include "src/vocalization.cyr"
@@ -240,6 +241,24 @@ assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_alpha)), T_0_03,
 # Ancient dragon breathiness 0.25.
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_anc)), T_0_25,
     "build ancient_dragon breathiness override 0.25 in voice params");
+
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# VoicePreset — name string + scalars, via bayan's value tree).
+test_group("VoicePreset serde roundtrip");
+var pre = preset_alpha_wolf();
+var sbp = str_builder_new();
+preset_to_json(pre, sbp);
+var jstr = str_data(str_builder_build(sbp));
+var pre2 = preset_from_json_str(jstr);
+assert_eq(memeq(VoicePreset_name(pre2), "Alpha Wolf", 10), 1, "name string roundtrips");
+assert_eq(VoicePreset_species(pre2), PRANI_SP_WOLF, "species roundtrips");
+assert_eq(VoicePreset_size(pre2), VoicePreset_size(pre), "size roundtrips");
+assert_eq(VoicePreset_f0_offset(pre2), VoicePreset_f0_offset(pre), "f0_offset roundtrips");
+assert_eq(VoicePreset_breathiness(pre2), VoicePreset_breathiness(pre), "breathiness roundtrips");
+var sbp2 = str_builder_new();
+preset_to_json(pre2, sbp2);
+assert_eq(memeq(jstr, str_data(str_builder_build(sbp2)), strlen(jstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

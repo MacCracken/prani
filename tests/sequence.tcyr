@@ -10,6 +10,7 @@
 # Cyrius resolves forward refs across the unit).
 
 include "src/error.cyr"
+include "src/logging.cyr"
 include "src/rng.cyr"
 include "src/dsp.cyr"
 include "src/vocalization.cyr"
@@ -117,6 +118,43 @@ assert_eq(chorus_finite, 1, "all chorus samples finite");
 # empty chorus early return
 var empty_chorus = sequence_synthesize_chorus(vec_new(), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, F64_ONE, F64_HALF);
 assert_eq(vec_len(empty_chorus), 0, "empty voices -> empty chorus");
+
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# CallElement / CallBout / CallPhrase). CallPhrase's element vec is hand-rolled.
+test_group("sequence serde roundtrip");
+var elser = sequence_call_element_new(PRANI_VOC_TRILL, 0x3FE6666666666666, 0x3FD3333333333333);   # 0.7, 0.3
+var esb = str_builder_new();
+CallElement_to_json(elser, esb);
+var el2 = CallElement_from_json_str(str_data(str_builder_build(esb)));
+assert_eq(CallElement_vocalization(el2), PRANI_VOC_TRILL, "element voc roundtrips");
+assert_eq(CallElement_duration(el2), 0x3FE6666666666666, "element duration roundtrips");
+assert_eq(CallElement_gap(el2), 0x3FD3333333333333, "element gap roundtrips");
+
+var bser = sequence_call_bout_new(PRANI_VOC_HOWL, 3, 0x4008000000000000, f64_from(2), PRANI_INTENT_SOCIAL);   # 3.0, 2
+var bsb = str_builder_new();
+CallBout_to_json(bser, bsb);
+var bo2 = CallBout_from_json_str(str_data(str_builder_build(bsb)));
+assert_eq(CallBout_vocalization(bo2), PRANI_VOC_HOWL, "bout voc roundtrips");
+assert_eq(CallBout_count(bo2), 3, "bout count roundtrips");
+assert_eq(CallBout_call_duration(bo2), 0x4008000000000000, "bout call_duration roundtrips");
+assert_eq(CallBout_intent(bo2), PRANI_INTENT_SOCIAL, "bout intent roundtrips");
+
+var pelems2 = vec_new();
+vec_push(pelems2, sequence_call_element_new(PRANI_VOC_CHIRP, F64_HALF, f64_from(0)));
+vec_push(pelems2, sequence_call_element_new(PRANI_VOC_TRILL, F64_ONE, F64_HALF));
+var pser = sequence_call_phrase_new(pelems2, PRANI_INTENT_MATING);
+var psb = str_builder_new();
+sequence_call_phrase_to_json(pser, psb);
+var pjson = str_data(str_builder_build(psb));
+var ph2 = sequence_call_phrase_from_json_str(pjson);
+assert_eq(CallPhrase_intent(ph2), PRANI_INTENT_MATING, "phrase intent roundtrips");
+assert_eq(vec_len(CallPhrase_elements(ph2)), 2, "phrase 2 elements roundtrip");
+assert_eq(CallElement_vocalization(vec_get(CallPhrase_elements(ph2), 1)), PRANI_VOC_TRILL, "phrase elem[1] voc roundtrips");
+assert_eq(CallElement_gap(vec_get(CallPhrase_elements(ph2), 1)), F64_HALF, "phrase elem[1] gap roundtrips");
+var psb2 = str_builder_new();
+sequence_call_phrase_to_json(ph2, psb2);
+assert_eq(memeq(pjson, str_data(str_builder_build(psb2)), strlen(pjson)), 1, "phrase json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

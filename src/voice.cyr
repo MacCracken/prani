@@ -86,7 +86,8 @@ var PR_V_0_02  = 0x3f947ae147ae147b;   # 0.02  synthesis block duration (20ms)
 #   f0_offset    : individual f0 offset from species default (Hz)
 #   size_scale   : individual size scaling (tract length + f0)
 #   vocal_effort : 0.0 = whisper, 0.5 = normal, 1.0 = shout
-# serde dropped (integer/pointer state).
+# serde RESTORED via crvoice_to_json / crvoice_from_json_str (below): scalars as
+# bit patterns + nested SpeciesParams (individual overrides preserved).
 # ================================================================
 #derive(accessors)
 struct CreatureVoice {
@@ -103,6 +104,37 @@ fn crvoice_new(species) {
     CreatureVoice_set_f0_offset(self, 0);
     CreatureVoice_set_size_scale(self, F64_ONE);
     CreatureVoice_set_vocal_effort(self, PR_V_0_5);
+    return self;
+}
+
+# CreatureVoice serde -- restores the Rust `#[derive(Serialize, Deserialize)]`.
+# f64 scalars (f0_offset/size_scale/vocal_effort) emitted as exact i64 BIT
+# PATTERNS (lossless); `params` nested as a sub-object via the auto
+# SpeciesParams_to_json and rebuilt with species_params_from_node (so individual
+# breathiness/jitter/shimmer overrides survive the roundtrip). Idempotent.
+fn crvoice_to_json(self, sb) {
+    str_builder_add_cstr(sb, "{\"species\":");
+    str_builder_add_int(sb, CreatureVoice_species(self));
+    str_builder_add_cstr(sb, ",\"f0_offset\":");
+    str_builder_add_int(sb, CreatureVoice_f0_offset(self));
+    str_builder_add_cstr(sb, ",\"size_scale\":");
+    str_builder_add_int(sb, CreatureVoice_size_scale(self));
+    str_builder_add_cstr(sb, ",\"vocal_effort\":");
+    str_builder_add_int(sb, CreatureVoice_vocal_effort(self));
+    str_builder_add_cstr(sb, ",\"params\":");
+    SpeciesParams_to_json(CreatureVoice_params(self), sb);
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+fn crvoice_from_json_str(json) {
+    var root = bayan_json_v_parse_str(json, strlen(json));
+    var self = alloc(sizeof(CreatureVoice));
+    CreatureVoice_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));
+    CreatureVoice_set_f0_offset(self, bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset")));
+    CreatureVoice_set_size_scale(self, bayan_json_v_int(bayan_json_v_obj_get(root, "size_scale")));
+    CreatureVoice_set_vocal_effort(self, bayan_json_v_int(bayan_json_v_obj_get(root, "vocal_effort")));
+    CreatureVoice_set_params(self, species_params_from_node(bayan_json_v_obj_get(root, "params")));
     return self;
 }
 
@@ -734,6 +766,9 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     var effort_amp = f64_add(PR_V_0_3, f64_mul(effort, PR_V_1_2));
     var effort_tilt_offset = f64_mul(f64_sub(effort, PR_V_0_5), PR_V_6_0);        # -3..+3
     var effort_breathiness_delta = f64_mul(f64_abs(f64_sub(effort, PR_V_0_5)), PR_V_0_3);
+
+    # Ports voice.rs `trace!(... "synthesizing creature vocalization")` → sakshi.
+    prani_log_debug("prani: synthesizing creature vocalization");
 
     # cat purr special path (25-30 Hz laryngeal muscle cycling)
     if (voc == PRANI_VOC_PURR) {

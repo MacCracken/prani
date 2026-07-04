@@ -4,6 +4,7 @@
 # the lib deps + the single concatenated bundle, exercised across layers. Proves
 # the bundle exposes every layer's symbols coherently in one flat namespace.
 
+include "lib/sakshi.cyr"
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"

@@ -4,8 +4,8 @@
 # CallIntent::modifiers() -> a fixed lookup returning that struct.
 #
 # Keystone base module: emotion, species, voice, sequence, stream, ffi all lean
-# on these constants. No internal deps. serde/Display tests dropped (no serde,
-# integer codes).
+# on these constants. No internal deps. serde RESTORED on IntentModifiers via
+# #derive(Serialize) (i64 bit-pattern fields, lossless). Display tests dropped.
 
 # ================================================================
 # Vocalization -- the shape/character of a creature call (was `enum
@@ -68,8 +68,19 @@ var PR_F_2_0 = 0x4000000000000000;   # 2.0
 #   duration_scale  : duration multiplier
 #   urgency         : jitter/onset-sharpness in [0,1]
 # ================================================================
+# Fields TYPED i64 for #derive(Serialize): each f64 is an i64 bit pattern,
+# serialized as an int → exact 64-bit lossless roundtrip (f64 typing would use
+# the derive's 6-decimal float writer, which is lossy). Auto-generates
+# IntentModifiers_to_json(self, sb) + IntentModifiers_from_json_str(json),
+# restoring the Rust `#[derive(Serialize, Deserialize)]` on IntentModifiers.
 #derive(accessors)
-struct IntentModifiers { pitch_scale; amplitude_scale; duration_scale; urgency; }
+#derive(Serialize)
+struct IntentModifiers {
+    pitch_scale: i64;
+    amplitude_scale: i64;
+    duration_scale: i64;
+    urgency: i64;
+}
 
 #must_use
 fn prani_intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urgency) {

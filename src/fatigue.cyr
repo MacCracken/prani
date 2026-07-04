@@ -14,7 +14,8 @@
 # IEEE-754 hex constants (decimal in comment). Integer floats via f64_from.
 # `.clamp(0,1)` -> f64_clamp(x,0,F64_ONE); `.max(0)` -> f64_max(x,0).
 #
-# serde/Display tests dropped (no serde; state is five f64/int slots).
+# serde RESTORED on FatigueState + FatigueModifiers via #derive(Serialize)
+# (i64 bit-pattern fields, lossless roundtrip). Display tests dropped.
 
 # ================================================================
 # Rate + scale constants (IEEE-754 hex bit patterns; decimals in comments).
@@ -40,8 +41,21 @@ var PR_FAT_JITTER_SPAN      = 0x3ff8000000000000;   # 1.5    fatigue jitter incr
 #   alarm_count       : unreinforced alarm calls in the current window (u32)
 #   alarm_reinforced  : whether the last alarm was reinforced (0/1 bool)
 # ================================================================
+# Fields TYPED i64 for #derive(Serialize): the f64 fields (fatigue/
+# alarm_habituation/bout_calling_time) are stored as i64 bit patterns and
+# serialized as ints → exact 64-bit lossless roundtrip (f64 typing = the derive's
+# 6-decimal float writer, lossy). Auto-generates FatigueState_to_json(self, sb) +
+# FatigueState_from_json_str(json) — ports the Rust `#[derive(Serialize,
+# Deserialize)]` on FatigueState (state persistence).
 #derive(accessors)
-struct FatigueState { fatigue; alarm_habituation; bout_calling_time; alarm_count; alarm_reinforced; }
+#derive(Serialize)
+struct FatigueState {
+    fatigue: i64;
+    alarm_habituation: i64;
+    bout_calling_time: i64;
+    alarm_count: i64;
+    alarm_reinforced: i64;
+}
 
 # new() -- fresh (non-fatigued) state. Also serves as Default::default().
 #must_use
@@ -140,8 +154,17 @@ fn fatigue_reset(self) {
 #   amplitude_scale   : amplitude multiplier (1.0 normal, <1.0 fatigued/habituated)
 #   jitter_scale      : jitter multiplier (1.0 normal, >1.0 fatigued)
 # ================================================================
+# Fields TYPED i64 for #derive(Serialize) (each f64 as an exact bit pattern →
+# lossless) — auto-generates FatigueModifiers_to_json / _from_json_str, porting
+# the Rust `#[derive(Serialize, Deserialize)]` on FatigueModifiers.
 #derive(accessors)
-struct FatigueModifiers { pitch_offset; breathiness_delta; amplitude_scale; jitter_scale; }
+#derive(Serialize)
+struct FatigueModifiers {
+    pitch_offset: i64;
+    breathiness_delta: i64;
+    amplitude_scale: i64;
+    jitter_scale: i64;
+}
 
 #must_use
 fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) {

@@ -21,6 +21,7 @@ include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
 include "src/error.cyr"
+include "src/logging.cyr"
 include "src/rng.cyr"
 include "src/dsp.cyr"
 include "src/vocalization.cyr"
@@ -219,6 +220,32 @@ test_group("options -- default is (0, 0)");
 var od = crtract_options_default();
 assert_eq(SynthesisOptions_subharmonic_amp(od), 0, "default subharmonic_amp 0");
 assert_eq(SynthesisOptions_perturbation_scale(od), 0, "default perturbation_scale 0");
+
+# ================================================================
+# serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
+# CreatureTract). The opaque svara tract + naad filter are rebuilt from params;
+# rng/phase/dc_blocker/sample_rate/params roundtrip exactly (bit patterns).
+test_group("CreatureTract serde roundtrip");
+var tser = crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000));
+crtract_synthesize_purr(tser, 100, f64_from(27));   # advances phase + rng + dc_blocker
+var tsb = str_builder_new();
+crtract_to_json(tser, tsb);
+var tjson = str_data(str_builder_build(tsb));
+var t2 = crtract_from_json_str(tjson);
+assert_eq(CreatureTract_sample_rate(t2), CreatureTract_sample_rate(tser), "sample_rate roundtrips");
+assert_eq(CreatureTract_phase(t2), CreatureTract_phase(tser), "phase roundtrips");
+assert_eq(PrRng_state(CreatureTract_rng(t2)), PrRng_state(CreatureTract_rng(tser)), "rng state roundtrips");
+assert_eq(PrRng_inc(CreatureTract_rng(t2)), PrRng_inc(CreatureTract_rng(tser)), "rng inc roundtrips");
+assert_eq(DcBlocker_r(CreatureTract_dc_blocker(t2)), DcBlocker_r(CreatureTract_dc_blocker(tser)), "dc_blocker r roundtrips");
+assert_eq(SpeciesParams_formant0(CreatureTract_params(t2)), SpeciesParams_formant0(CreatureTract_params(tser)), "params formant0 roundtrips");
+assert_neq(CreatureTract_tract(t2), 0, "rebuilt svara tract non-null");
+# idempotency BEFORE any further synthesis (which would advance t2's state)
+var tsb2 = str_builder_new();
+crtract_to_json(t2, tsb2);
+assert_eq(memeq(tjson, str_data(str_builder_build(tsb2)), strlen(tjson)), 1, "tract json idempotent");
+# the rebuilt svara tract produces finite output post-restore
+var post = crtract_synthesize_purr(t2, 16, f64_from(27));
+assert_eq(prani_is_finite(vec_get(post, 8)), 1, "rebuilt tract synthesizes finite output");
 
 var rc = assert_summary();
 syscall(60, rc);

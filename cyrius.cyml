@@ -29,6 +29,7 @@ output = "build/prani"
 modules = [
     # L0 foundations (no internal deps)
     "src/error.cyr",
+    "src/logging.cyr",   # sakshi-backed structured logging (tracing replacement)
     "src/rng.cyr",
     "src/dsp.cyr",
     "src/spatial.cyr",

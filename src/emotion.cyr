@@ -10,8 +10,9 @@
 #
 # f32 -> f64 throughout. Non-integer literals -> module-top hex constants
 # (IEEE-754 bit patterns, decimals in comments). Zone enums (ValenceZone,
-# ArousalZone) were private Rust enums -> local integer var consts. serde /
-# Display tests dropped (no serde, integer codes).
+# ArousalZone) were private Rust enums -> local integer var consts. serde
+# RESTORED on PrEmotion + PrEmotionOut via #derive(Serialize) (i64 bit-pattern
+# fields, lossless roundtrip). Display tests dropped (no Display in Cyrius).
 
 # ================================================================
 # Float constants (IEEE-754 hex bit patterns; decimals in comments).
@@ -52,8 +53,18 @@ var PRE_AZ_HIGH = 2;
 #   smoothing : transition smoothing factor (0.0 instant .. 0.95 sluggish)
 # Distinct struct name (PrEmotion) so accessors don't collide with svara/naad.
 # ================================================================
+# Fields TYPED i64 for #derive(Serialize): each f64 is stored as an i64 bit
+# pattern, serialized as an int → the exact 64-bit value roundtrips (lossless).
+# Typing them f64 would use the derive's 6-decimal float writer (lossy). Auto-
+# generates PrEmotion_to_json / _from_json_str, restoring the Rust
+# `#[derive(Serialize, Deserialize)]` on EmotionState.
 #derive(accessors)
-struct PrEmotion { valence; arousal; smoothing; }
+#derive(Serialize)
+struct PrEmotion {
+    valence: i64;
+    arousal: i64;
+    smoothing: i64;
+}
 
 # new() -- neutral point (idle, calm): valence 0.0, arousal 0.2, smoothing 0.1.
 # Also serves as Default (impl Default -> Self::new()).
@@ -203,8 +214,20 @@ fn emotion_select_intent(self) {
 #   breathiness_delta : additive breathiness, from arousal extremes
 # Distinct struct name (PrEmotionOut) to avoid accessor collisions.
 # ================================================================
+# Fields TYPED for #derive(Serialize): vocalization/intent are enum-const codes
+# (i64), the three modulation params are f64. Untyped fields would serialize as
+# raw bit patterns and fail to roundtrip. Auto-generates PrEmotionOut_to_json /
+# PrEmotionOut_from_json_str, restoring the Rust `#[derive(Serialize,
+# Deserialize)]` on EmotionOutput.
 #derive(accessors)
-struct PrEmotionOut { vocalization; intent; vocal_effort; pitch_scale; breathiness_delta; }
+#derive(Serialize)
+struct PrEmotionOut {
+    vocalization: i64;
+    intent: i64;
+    vocal_effort: i64;
+    pitch_scale: i64;
+    breathiness_delta: i64;
+}
 
 # evaluate(self) -- core mapping from the 2D emotion space to concrete
 # vocalization choices and parameter values. Returns a fresh PrEmotionOut.

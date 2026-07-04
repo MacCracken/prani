@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - Restore logging + serde
+
+The 2.0.0 port **wrongly dropped logging and serde** — Cyrius has first-class
+replacements for both, so this restores them to full parity.
+
+### Added
+
+- **Structured logging via sakshi** (`src/logging.cyr`, `prani_log_*`). All three
+  Rust `tracing` sites are now wired for real (not dropped): `dsp` naad-error
+  (`error!`), `tract` out-of-range-formant (`warn!`), and `voice` synthesis
+  (`trace!` → `debug`). Always compiled in; runtime verbosity via `sakshi_set_level`.
+- **serde restored on all 14 types** that had `#[derive(Serialize, Deserialize)]`
+  — DcBlocker, Rng, IntentModifiers, EmotionState/Output, CallElement/Bout/Phrase,
+  FatigueState/Modifiers, SpeciesParams, VoicePreset (incl. its display `name`),
+  CreatureTract, CreatureVoice — via `#derive(Serialize)` + `bayan`. Each has a
+  JSON `*_to_json` / `*_from_json_str` codec and a roundtrip test (**+90 assertions,
+  717 total, all green**).
+- **Lossless f64 serde**: f64 fields are typed `i64` so they serialize as their
+  exact 64-bit bit patterns (bayan handles full 64-bit ints losslessly). The
+  `#derive(Serialize)` float writer is only 6 decimal places (loses ~1 ULP on
+  values like 0.7/0.15/0.05); the bit-pattern encoding roundtrips bit-exact.
+  Restored `Rng` state roundtrips resume the identical stream.
+
+### Notes
+
+- `VoicePreset.name` (a `Cow<str>` display string) is serialized as a JSON string
+  and restored — no longer stored as `0`.
+- **Deviation (documented):** `CreatureTract` serde serializes the reconstructable
+  state (params, rng, phase, dc_blocker, sample_rate) and rebuilds the opaque svara
+  `VocalTract` + naad filter from params on deserialize — svara/naad have no Cyrius
+  serialize surface. The species-determined response is bit-identical after rebuild;
+  only a few samples of in-flight filter memory reset. `SynthStream` carries no
+  serde (the Rust oracle never derived Serialize on it).
+
 ## [2.0.0] - Cyrius port
 
 Complete rewrite from Rust to **Cyrius**. prani's Rust line shipped through 1.1.0;
@@ -43,8 +77,9 @@ cross-checked against it function-for-function. Per-module ledger in
   svara's DSP isn't meaningful.
 - **Dependencies**: svara (glottal/formant/vocal-tract), naad (biquad filters),
   hisab (`ease_in_out_smooth`), goonj, sakshi consumed as Cyrius distlib bundles.
-  `serde`/`thiserror`/`tracing`/`libm`/`criterion` dropped (`Vec` → stdlib `vec`;
-  no serde in Cyrius; transcendentals via ganita builtins).
+  `thiserror`/`libm`/`criterion` dropped (`Vec` → stdlib `vec`; transcendentals
+  via ganita builtins). serde and `tracing` were also dropped here — **incorrectly;
+  restored in 2.0.1** via `#derive(Serialize)`+bayan and sakshi.
 
 ### Added
 
@@ -65,8 +100,10 @@ cross-checked against it function-for-function. Per-module ledger in
 
 ### Removed
 
-- `serde` derives + all serde round-trip tests (no serde in Cyrius).
-- `thiserror`, `tracing`, `tracing-subscriber`, `libm`, `criterion` dependencies;
+- `thiserror`, `libm`, `criterion` dependencies. (serde and `tracing` were also
+  dropped here but that was a mistake — **restored in 2.0.1**; Cyrius provides
+  both via `#derive(Serialize)`+bayan and sakshi.)
+- `tracing-subscriber` dependency;
   the Cargo `std`/`naad-backend`/`logging`/`ffi` feature flags (Cyrius uses
   `cyrius.cyml` dep resolution instead).
 
