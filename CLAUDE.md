@@ -38,6 +38,13 @@ This file (`CLAUDE.md`) is durable rules.
 
 Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the reference oracle — do not modify it; cross-check the port against it.
 
+Roadmap **2.0.8** removes `rust-old/` from the working tree; after that the oracle is read out of git history. The rule for citing it — in force now, not at 2.0.8 — is [ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md):
+
+```sh
+git show 2.0.3:rust-old/src/voice.rs   # port era (2.0.0+)
+git show 1.1.0:src/voice.rs            # Rust era (1.1.0 and earlier) — the Rust WAS src/
+```
+
 ## Quick Start
 
 ```sh
@@ -61,6 +68,7 @@ cyrius test                              # run tests/*.tcyr
 - **Do not commit or push** — the user handles all git operations
 - **Never use `gh` CLI** — use `curl` to the GitHub API if needed
 - Do not modify `rust-old/` — it's the parity oracle
+- **Cite the oracle by tag, not a bare path** — write `2.0.3:rust-old/src/tract.rs:104`, never `rust-old/src/tract.rs:104`. A bare path stops resolving at 2.0.8 ([ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md))
 - Do not skip tests before claiming changes work
 - Do not modify `lib/` files (vendored stdlib / dep symlinks)
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth

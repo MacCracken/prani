@@ -77,5 +77,12 @@ one that does.** The comparison needs the oracle present and buildable; after
 removal it can only be run from a tag, and it depends on `svara 1.0.0` /
 `naad 1.0.0` / `hisab 1.2.0` staying published on crates.io. `cargo fetch
 --locked` succeeds as of 2026-08-31 — that is a window, not a guarantee. The Rust
-harness's 10 benchmarks also cover every vocal apparatus, so mirroring them
+harness's **14** benchmarks also cover every vocal apparatus, so mirroring them
 closes the coverage gap and makes the comparison like-for-like at the same time.
+
+⚠ **The wolf-howl row above is not comparable to the oracle's `wolf_howl_1s`.**
+This harness runs 0.05 s at 8 kHz (400 samples); the Rust runs 1.0 s at 44100 Hz
+(44,100 samples) — 1/880th of the work, at a sample rate that changes which svara
+code path runs. Of the four benchmarks here, only `emotion_evaluate` already
+matches its Rust counterpart. 2.0.7 either adds a 1 s @ 44100 Hz synthesis row
+alongside the existing one or drops wolf howl from the comparison.

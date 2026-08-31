@@ -24,9 +24,13 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0001](0001-check-svara-tract-constructor.md) | `crtract_new` reports svara's rejection instead of assuming it cannot fail | Accepted |
 | [0002](0002-deserializers-report-parse-failure.md) | Deserializers report a parse failure instead of returning a zero-filled struct | Accepted |
 | [0003](0003-failed-fill-reports-zero-and-retires.md) | A failed stream fill reports 0 written and retires the stream | Accepted |
+| [0004](0004-cite-the-oracle-by-tag.md) | Cite the Rust oracle by tag, never by working-tree path | Accepted |
 
-All three come out of the 2.0.3 P(-1) sweep
+0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
-place where the port's behaviour now differs from `rust-old/` — 0001 and 0003
+place where the port's behaviour now differs from the Rust oracle — 0001 and 0003
 because the oracle's own assumption stopped holding, 0002 because the port had
 dropped half of a contract the oracle did have.
+
+0004 is different in kind: it is not a behavioural divergence but the rule for
+reading the oracle after roadmap 2.0.8 removes it from the working tree.

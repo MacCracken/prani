@@ -47,4 +47,33 @@ jobs:
         # `cyrius test src/test.cyr` form that hard-failed when the
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
+        #
+        # Kept as its own step even though `cyrius audit` below re-runs it:
+        # a test failure should read as "Test", not as "Audit". The extra
+        # run costs seconds.
         run: cyrius test
+
+      - name: Audit — fmt · lint · docs · tests · bench
+        # THE gate. CONTRIBUTING.md names this as the single command a PR
+        # must pass, and until 2.0.4 it ran only on contributors' machines —
+        # so fmt, lint, docs and bench were never actually enforced anywhere.
+        #
+        # Note the fmt stage here is STRICTER than `cyrius fmt <file> --check`:
+        # the per-file check accepts 4-space continuation indents, this
+        # requires the canonical 2 spaces per open paren (cyrfmt became
+        # paren-aware in 6.5.28). Trust this one.
+        run: cyrius audit
+
+      - name: Bundle coherence — dist/ matches src/
+        # dist/prani.cyr and dist/prani.deps are TRACKED build products,
+        # regenerated from [lib].modules. A PR that edits src/ without
+        # re-running `cyrius distlib` ships a bundle that disagrees with the
+        # source — and consumers (kiran, joshua) build against the bundle,
+        # not against src/. `cyrius distlib` is deterministic, so any diff
+        # here is a stale commit, not run-to-run noise.
+        run: |
+          cyrius distlib
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/ is stale — run 'cyrius distlib' and commit the result."
+            exit 1
+          fi
