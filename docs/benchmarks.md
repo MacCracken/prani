@@ -62,6 +62,20 @@ process.*
 
 The Rust oracle (1.1.0) reported ~1000× realtime for full synthesis in f32; the
 Cyrius port is f64 throughout (svara/naad/hisab are f64-only) and routes through
-the ported svara stack, so absolute numbers differ. A like-for-like Rust-vs-Cyrius
-comparison on identical hardware is a follow-up (see
-[`development/state.md`](development/state.md)).
+the ported svara stack, so absolute numbers differ. Until the two are measured on
+one host with one method, neither number means anything next to the other — and
+note that `lib/bench.cyr` has measured and subtracted the timer floor since
+cyrius 6.5.19, which a Rust harness will not.
+
+That comparison, and the coverage gap behind it (no benchmark touches syringeal,
+stridulatory, vibratile or noise-only synthesis, the streaming path, or the
+sequence/chorus paths), are owned by **roadmap 2.0.7** —
+[`development/roadmap.md`](development/roadmap.md).
+
+⚠ **That item gates `rust-old/`'s retirement (roadmap 2.0.8), and it is the only
+one that does.** The comparison needs the oracle present and buildable; after
+removal it can only be run from a tag, and it depends on `svara 1.0.0` /
+`naad 1.0.0` / `hisab 1.2.0` staying published on crates.io. `cargo fetch
+--locked` succeeds as of 2026-08-31 — that is a window, not a guarantee. The Rust
+harness's 10 benchmarks also cover every vocal apparatus, so mirroring them
+closes the coverage gap and makes the comparison like-for-like at the same time.

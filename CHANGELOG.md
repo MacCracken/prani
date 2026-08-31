@@ -177,6 +177,56 @@ it cannot pass vacuously by rejecting everything.
   with fmt and lint already clean **`cyrius audit` now exits 0** — it had exited
   1 on the docs gate since the port landed.
 
+### Changed — the roadmap is open work only, in two arcs
+
+A sweep for deferment language across the tree (source, tests, docs, CI, manifest
+— `lib/` and `rust-old/` excluded) found **no TODO, FIXME or deferral marker in
+any source file**; every open item lives in prose. Each was checked against the
+tree rather than taken at its word, and three had gone stale:
+
+- `port-audit.md` marked **sequence** 🟡 partial with *"synthesize parity test
+  lands with voice/stream"*. It landed — `tests/sequence.tcyr` covers
+  `CallBout::synthesize`, its error propagation, `CallPhrase::synthesize` and
+  `synthesize_chorus`. Now ✅ 33, and **no partial or pending rows remain**.
+- `port-audit.md`'s tract row still cited `filter_biquad_new(FILTER_BANDPASS,…)`,
+  renamed by naad 2.2.0 and absorbed in 2.0.2.
+- `port-audit.md`'s *"Deferred / follow-up work"* section listed two items that
+  were both completed at port close-out (the distlib bundle, the 1.1.0 → 2.0.0
+  bump).
+
+One gap surfaced that nothing had recorded: **`CLAUDE.md` advertises
+`docs/examples/` as "Runnable examples" and the directory holds a `.gitkeep` and
+nothing else** — the same gap svara closed before its own oracle retirement.
+
+[`roadmap.md`](docs/development/roadmap.md) is rewritten to carry **open work
+only** — completed milestones are not restated there, they are in this file — and
+**2.0.x is now one arc with one destination: retiring `rust-old/`** at 2.0.8,
+under the preserve-first gate svara and goonj both used. **2.0.4 is a port parity
+re-verification**, because the port was verified module-by-module against the
+oracle's *source* and has never been checked against its *tests* — two different
+questions, and svara found five real gaps when it asked the second one. Every gap
+2.0.4 finds becomes a new 2.0.x item. The previously-listed items move back
+behind it: input-range validation (2.0.5), runnable examples (2.0.6), benchmark
+breadth and the Rust comparison (2.0.7). **2.x** keeps what changes the public
+surface (the allocation-failure contract from audit F9) or is blocked outside
+this repo (consumer-green), and four **watch items** carry the condition that
+would schedule each.
+
+The arc rests on facts measured rather than assumed: **73** Rust `#[test]` blocks
+(72 of them in one `tests/integration.rs`) against 770 Cyrius assertions; **10**
+Rust benchmarks against 4, and the Rust ten happen to cover every vocal apparatus
+the Cyrius four miss; **176** `rust-old/…` citations across 45 tracked files that
+become unresolvable on removal; and a recovery path that **splits by era** —
+`git show 2.0.3:rust-old/src/voice.rs` works, but 1.1.0 and earlier predate the
+port and carry the Rust at `src/` instead, so `git show 1.1.0:src/voice.rs` is
+the form there. Both were run. `rust-old` still builds (`cargo fetch --locked`
+resolves `svara 1.0.0` / `naad 1.0.0` / `hisab 1.2.0` from crates.io), which is
+what makes 2.0.7's comparison possible — and is a window rather than a guarantee,
+so 2.0.7 is the one item that must land before 2.0.8.
+
+Every entry cites its source in the tree, and `state.md` now points at the
+roadmap instead of duplicating it.
+
 ### Notes
 
 - **No performance claim.** `dcblocker_process` 19 ns/sample, `prani_rng_next_f32`

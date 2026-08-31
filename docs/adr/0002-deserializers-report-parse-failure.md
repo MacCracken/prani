@@ -47,7 +47,7 @@ in the port already returns.
 Field-level validation is explicitly **out of scope**. A document that parses but
 carries nonsense values still produces a struct; only a failure to parse is
 reported. Ranging every field is a larger decision about whether prani validates
-its own serialized output, and it is on the roadmap rather than smuggled in here.
+its own serialized output, and it is roadmap 2.0.5 rather than smuggled in here.
 
 ## Consequences
 
@@ -65,6 +65,6 @@ its own serialized output, and it is on the roadmap rather than smuggled in here
 
 - **Return a struct populated with species defaults on failure.** Rejected for
   the same reason as clamping in ADR-0001: it is a fabricated plausible answer.
-- **Validate every field's range as well.** Deferred, not rejected — see the
-  roadmap. Doing it here would have mixed a much larger behavioural change into a
+- **Validate every field's range as well.** Deferred, not rejected — roadmap
+  2.0.5. Doing it here would have mixed a much larger behavioural change into a
   repair release, and the field ranges are not all documented.

@@ -55,7 +55,8 @@ and darker rather than absent, which is worse than leaving it untouched.
 - **Negative** — a stream that fails once is finished for good; there is no
   retry. Given both failure causes are configuration properties fixed at
   `stream_new` time, a retry would fail identically, so this costs nothing today.
-  It would need revisiting if a transient failure mode is ever introduced.
+  It would need revisiting if a transient failure mode is ever introduced —
+  carried as a watch item in [`roadmap.md`](../development/roadmap.md).
 - **Neutral** — the return value now means "samples actually written", which is
   what the name says but not what the oracle did. Consumers that summed the
   return to track position get a different (correct) total on the failure path.

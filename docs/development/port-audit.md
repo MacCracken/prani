@@ -121,13 +121,13 @@ tolerance. stdlib (assert/vec/math/alloc) auto-resolves — do not include it.
 |---------|----:|--------|------|-------|
 | emotion | 245 | ✅ 62 | vocalization | `PrEmotion`/`PrEmotionOut`; valence/arousal zones → vocalization+intent+output. |
 | species | 426 | ✅ 60 | vocalization, sequence(CallBout struct) | `PRANI_SP_*` (13) + `PRANI_APP_*` (5); 13-species param table; `resonance_seed` stored as precomputed f32-bit-hash consts (all 13 independently verified vs oracle). `bout_template` constructs `CallBout`. |
-| sequence| 138 | 🟡 13 | error, rng, vocalization; voice (synth methods, deferred) | `CallElement`/`CallBout`/`CallPhrase` structs + constructors + chorus tested now; `synthesize*` methods reference `crvoice_*` (unreachable until voice) — full parity test lands with voice/stream. |
+| sequence| 138 | ✅ 33 | error, rng, dsp, vocalization, voice | `CallElement`/`CallBout`/`CallPhrase` structs + constructors + `synthesize*` + chorus. The synthesize parity tests were deferred until voice landed and **did land with it** — `tests/sequence.tcyr` now covers `CallBout::synthesize` (structure + finiteness), its error propagation (Snake cannot howl), `CallPhrase::synthesize`, and `synthesize_chorus`. |
 
 ### L2 — svara vocal-tract bridge
 
 | Module | LOC | Status | Deps | Notes |
 |--------|----:|--------|------|-------|
-| tract  | 436 | ✅ 43 | dsp, error, rng, species, **svara**, **naad** | `CreatureTract`/`SynthesisOptions`, `crtract_*`. All 5 apparatus paths + purr + formant-blend + spectral-tilt. svara glottal/tract/formant + naad `filter_biquad_new(FILTER_BANDPASS,…)`. Structural+determinism parity (f32→f64 diverges through svara internals). Dropped the svara FormantFilter fallback (naad bandpass always present for NoiseOnly under default features). |
+| tract  | 436 | ✅ 43 | dsp, error, rng, species, **svara**, **naad** | `CreatureTract`/`SynthesisOptions`, `crtract_*`. All 5 apparatus paths + purr + formant-blend + spectral-tilt. svara glottal/tract/formant + naad `filter_biquad_new(NAAD_FILTER_BANDPASS,…)` (renamed from `FILTER_BANDPASS` by naad 2.2.0, absorbed in 2.0.2). Structural+determinism parity (f32→f64 diverges through svara internals). Dropped the svara FormantFilter fallback (naad bandpass always present for NoiseOnly under default features). |
 | bridge | 213 | ✅ 75 | species, vocalization | 13 pure value-conversion fns, `bridge_*`. `PrPerturbation` struct for the `(f32,f32)` tuple return; cbrt via `f64_pow(x,1/3)`. NOT a voice dep (its `crate::voice::` refs are doc-links). |
 
 ### L3 — voice/bridge (mutually referential, one flat-namespace unit)
@@ -186,7 +186,8 @@ parity bar once the port widens f32→f64 through a dependency compiled in f64.
 
 ## Deferred / follow-up work
 
-- **`[lib]` distlib bundle** (`dist/prani.cyr`) — assemble in dependency order once
-  modules land; cross-module symbol-collision audit at close-out.
-- **Version 2.0.0** — bump `VERSION` at port completion (per user directive). Held at
-  1.1.0 during the port.
+None outstanding from the port itself. Both items this section carried were
+completed at close-out: the `[lib]` distlib bundle is assembled and
+collision-audited (`dist/prani.cyr`), and `VERSION` was bumped 1.1.0 → 2.0.0.
+Open work of every kind now lives in one place —
+[`roadmap.md`](roadmap.md).

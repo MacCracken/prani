@@ -107,20 +107,27 @@ svara-independent math asserted at exact f64 bit patterns; full synthesis paths
 
 ## In flight
 
-Nothing — the port is complete, current on toolchain and dependencies, and
-audited. Follow-ups, in the order they are worth doing:
+Nothing. The port is complete, current on toolchain and dependencies, and
+audited.
 
-- **Unchecked allocation (audit F9).** `alloc()` returns 0 on exhaustion and
-  prani stores through it at 27 sites; `vec_push` returns -1 and no call site
-  checks. The fix is an error return on every constructor, which is an API
-  decision rather than a repair — deliberately not bundled into 2.0.3.
-- **Input-range validation (deferred by ADR-0002).** The deserializers now reject
-  input that does not PARSE; a document that parses with nonsense values is still
-  accepted. Same decision covers audit F10 (chorus length overflow at absurd
-  `timing_spread`) and F11 (NaN passing through `f64_clamp`).
-- **Two duplications waiting for a third instance**, per CLAUDE.md's rule:
-  `crtract_synthesize_stridulatory`'s bee branch is byte-identical to
-  `crtract_synthesize_vibratile`, and the `boundary_boost` block is duplicated
-  verbatim between `voice.cyr` and `stream.cyr`.
-- Broaden hot-path benchmarks + capture a Rust-vs-Cyrius comparison.
-- Consumer-green (kiran/joshua) once they port up the stack.
+**Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
+only, and **2.0.x is now one arc with one destination: retiring `rust-old/`**
+(2.0.8). The gate is preserve-first, the same one svara and goonj used — nothing
+the oracle still holds may be lost:
+
+| | |
+|---|---|
+| **2.0.4** | Port parity re-verification — audit all **73** Rust `#[test]` blocks against the 17 Cyrius suites. The port was verified against the oracle's *source*, never against its *tests*. Every gap found becomes a new 2.0.x item. Also establishes the recovery rule (`git show <tag>:…`). |
+| **2.0.5** | Input-range validation beyond parse success (ADR-0002's deferral + audit F10/F11). |
+| **2.0.6** | Runnable examples — `CLAUDE.md` advertises `docs/examples/` and it holds only a `.gitkeep`. A gate item: after the oracle goes, an example is the only executable statement of how the API is driven. |
+| **2.0.7** | Benchmark breadth + the Rust comparison. ⚠ **Must complete before 2.0.8** — it is the only item that must; it needs the oracle buildable. |
+| **2.0.8** | Retire `rust-old/`. Gated on the above plus a **176-citation** reference sweep and a green tree with the directory moved aside. |
+
+One decision is open and should be made before 2.0.4 starts: **whether
+consumer-green is a hard gate on 2.0.8.** svara treated it as one; for prani it
+would block the arc indefinitely on kiran/joshua. The roadmap carries the
+argument both ways and a recommendation.
+
+**2.x** carries what changes the public surface (the allocation-failure contract
+from audit F9) or is blocked outside this repo (consumer-green). Four watch items
+are recorded there too, with the condition that would schedule each.
