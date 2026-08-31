@@ -73,7 +73,11 @@ assert_eq(DcBlocker_r(dc2), DcBlocker_r(dcs), "r roundtrips");
 # re-serialize is idempotent
 var sb2 = str_builder_new();
 DcBlocker_to_json(dc2, sb2);
-assert_eq(memeq(jstr, str_data(str_builder_build(sb2)), strlen(jstr)), 1, "json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var jstr_2 = str_data(str_builder_build(sb2));
+assert_eq(strlen(jstr_2), strlen(jstr), "json idempotent -- same length");
+assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

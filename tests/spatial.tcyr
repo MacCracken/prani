@@ -14,6 +14,30 @@ alloc_init();
 # where operation ordering may differ by an ULP from the reference computation.
 var SP_TOL = 0x3E112E0BE826D695;   # 1e-9
 
+# Expected sum-of-squares energies for the 400-sample synthetic buffer built in
+# the "energy integral" group below. Computed independently in f64 straight from
+# the algorithm spec (spatial.cyr:34-39 / rust-old/src/spatial.rs:16-42, read via
+# `git show 2.0.3:rust-old/src/spatial.rs`) -- NOT read back out of this port.
+var SP_E_NEAR = 0x40A718FD9A07A7AA;   # 2956.4953157798927  energy @ 1 m
+var SP_E_FAR  = 0x3FE48CFBC21121FB;   # 0.642209891354525   energy @ 50 m
+var SP_E_TOL  = 0x3EB0C6F7A0B5ED8D;   # 1e-6, generous against a 400-term sum
+
+# ---- helpers ---------------------------------------------------------------
+# t_energy(v) -- sum of s^2 over v, accumulated low index to high (the oracle's
+# `samples.iter().map(|s| s * s).sum()`).
+#must_use
+fn t_energy(v) {
+    var n = vec_len(v);
+    var i = 0;
+    var acc = 0;
+    while (i < n) {
+        var s = vec_get(v, i);
+        acc = f64_add(acc, f64_mul(s, s));
+        i = i + 1;
+    }
+    return acc;
+}
+
 # ================================================================
 test_group("distance attenuation: gain == 1.0 at distance == reference");
 # distance == reference_distance => dist clamped to reference => gain = ref/ref = 1.0.
@@ -74,6 +98,48 @@ assert_eq(vec_len(d_two), 2, "two in -> two out");
 var out1_expected = 0x3fed7c0767c3d54d;     # 0.9213902498874319
 assert_eq(f64_lt(f64_abs(f64_sub(vec_get(d_two, 1), out1_expected)), SP_TOL), 1, "out[1] charges toward 1.0");
 assert_eq(f64_gt(vec_get(d_two, 1), vec_get(d_two, 0)), 1, "out[1] > out[0] (charging)");
+
+# ================================================================
+test_group("distance attenuation: energy integral, near (1 m) vs far (50 m)");
+# Reproduces the oracle's own bar (`git show 2.0.3:rust-old/tests/integration.rs`,
+# test_distance_attenuation :478-493): sum s^2 over a whole vocalization at 1 m
+# and at 50 m, assert near_energy > far_energy * 10. This file has no voice
+# dependency by design, so the signal is synthetic instead of a Wolf howl:
+# 400 samples, sign flipping every sample, magnitude ((i mod 7) + 1) -- so the
+# buffer is non-trivial in BOTH sign and amplitude, and its own energy is the
+# exact integer 57*(1+4+9+16+25+36+49) + 1 = 7981.
+# Distance 50 is reached nowhere else in this suite (only 0.5, 1 and 100): its
+# gain is 1/50 = 0.02 and its cutoff max(20000/(1+50*0.02), 200) = 10000 Hz.
+var att_in = vec_new();
+var ai = 0;
+while (ai < 400) {
+    var mag = f64_from((ai % 7) + 1);
+    if ((ai % 2) == 0) { vec_push(att_in, mag); } else { vec_push(att_in, f64_neg(mag)); }
+    ai = ai + 1;
+}
+# Generator controls -- an all-zero or constant input would make the ratio below
+# vacuous, so pin the shape of the input first.
+assert_eq(vec_len(att_in), 400, "synthetic input is 400 samples");
+assert_eq(vec_get(att_in, 0), f64_from(1), "input[0] == +1");
+assert_eq(vec_get(att_in, 1), f64_neg(f64_from(2)), "input[1] == -2 (sign flips, magnitude rises)");
+assert_eq(vec_get(att_in, 7), f64_neg(f64_from(1)), "input[7] == -1 (magnitude wraps at 7)");
+assert_eq(t_energy(att_in), f64_from(7981), "input energy == 7981 (exact, small integers)");
+
+var att_near = spatial_apply_distance_attenuation(att_in, F64_ONE, F64_ONE, f64_from(44100));
+var att_far = spatial_apply_distance_attenuation(att_in, f64_from(50), F64_ONE, f64_from(44100));
+assert_eq(vec_len(att_near), 400, "near output length preserved (400)");
+assert_eq(vec_len(att_far), 400, "far output length preserved (400)");
+var e_near = t_energy(att_near);
+var e_far = t_energy(att_far);
+# Controls: a no-op (identity) attenuator gives e_near == e_far and fails the
+# ratio; an attenuator that zeroed the buffer gives e_far == 0 and fails "> 0".
+assert_eq(f64_gt(e_near, 0), 1, "near energy > 0 (output is not silent)");
+assert_eq(f64_gt(e_far, 0), 1, "far energy > 0 (attenuator does not zero the buffer)");
+assert_eq(f64_lt(e_far, e_near), 1, "far energy < near energy");
+assert_eq(f64_gt(e_near, f64_mul(e_far, f64_from(10))), 1, "near energy > 10x far energy (oracle bar)");
+# Exact integrals, hand-computed from the algorithm (see SP_E_NEAR/SP_E_FAR).
+assert_eq(f64_lt(f64_abs(f64_sub(e_near, SP_E_NEAR)), SP_E_TOL), 1, "near energy ~ 2956.49531578");
+assert_eq(f64_lt(f64_abs(f64_sub(e_far, SP_E_FAR)), SP_E_TOL), 1, "far energy ~ 0.642209891355");
 
 # ================================================================
 test_group("doppler: v == 0 -> ratio 1 -> identity length + values");

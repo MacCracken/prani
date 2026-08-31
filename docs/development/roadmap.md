@@ -43,35 +43,6 @@ Measured facts this arc rests on, all verified 2026-08-31:
 > gates. Every number in this table now carries the command that reproduces it;
 > a gate figure with no reproducible command does not belong here.
 
-### 2.0.4 — Port parity re-verification (the gate's first half)
-
-**Source**: this arc. Removal is only safe if the Cyrius suites assert everything
-the Rust suites assert; nothing has checked that claim directly.
-
-The port was verified module-by-module against the oracle's *source*. It has
-never been verified against the oracle's *tests*. Those are different questions,
-and svara found five real gaps when it asked the second one (its 3.5.1).
-
-- **Audit all 73 Rust `#[test]` blocks against the 17 Cyrius suites.** For each,
-  identify the assertion that covers it, or record that none does. The output is
-  a table with a row per Rust test — that table is the artifact, not a summary.
-- **Every gap found becomes a new 2.0.x item**, sequenced after this one. A gap
-  that turns out to be a real behavioural difference is a defect, not a test gap,
-  and takes priority over everything else in the arc.
-- **Establish how to read the oracle after it is gone.** This is the release that
-  reads `rust-old/` most closely, so it is where the recovery rule belongs:
-  add an ADR plus a `CONTRIBUTING.md` note carrying the incantation, and make
-  "cite a tag, not a bare path" a standing instruction. The era split above is
-  part of the rule, and both halves are verified to work today:
-
-  ```sh
-  git show 2.0.3:rust-old/src/voice.rs    # the port era — rust-old/ exists
-  git show 1.1.0:src/voice.rs             # the Rust era — the Rust WAS src/
-  ```
-
-**Done when**: the per-test table exists in `docs/development/`, every gap is
-either closed or filed as a 2.0.x item, and the recovery rule is written down.
-
 ### 2.0.5 — Input-range validation beyond parse success
 
 **Source**: [ADR-0002](../adr/0002-deserializers-report-parse-failure.md)
@@ -175,7 +146,9 @@ after this, parity is asserted by the suites alone.
 
 **Gate — every one of these before the directory goes:**
 
-- [ ] 2.0.4 complete; every gap it found closed, not merely filed
+- [x] **2.0.4 complete** — all 73 Rust tests audited and all 41 shortfalls closed,
+      not merely filed. Ledger: [`rust-test-parity.md`](rust-test-parity.md).
+      Zero behavioural defects; suite 770 → 1200 assertions
 - [ ] 2.0.6 complete — examples exist and CI runs them
 - [ ] **2.0.7 complete — the comparison captured while the oracle still builds**
 - [ ] **Reference sweep**: all **83** `rust-old/…` citations across the 42

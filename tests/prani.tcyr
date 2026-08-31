@@ -18,6 +18,16 @@ alloc_init();
 var SR = f64_from(8000);
 var DUR = 0x3FA999999999999A;   # 0.05 s
 
+# Oracle-matching rate/duration for the emotion -> synthesis composition below.
+var SR44    = f64_from(44100);
+var DUR_0_5 = 0x3FE0000000000000;   # 0.5 s
+var E_NEG_0_5 = 0xBFE0000000000000;   # -0.5  (valence, exactly on the Bark/Screech bound)
+var E_NEG_0_8 = 0xBFE999999999999A;   # -0.8  (valence, past both bounds)
+var E_0_8     = 0x3FE999999999999A;   #  0.8  (arousal, High zone)
+var E_0_76    = 0x3FE851EB851EB852;   #  0.76 (= 0.2 + 0.8*0.7, expected vocal_effort)
+var E_0_925   = 0x3FED99999999999A;   #  0.925 (= 1.0 + -0.5*0.15, expected pitch_scale)
+var E_0_001   = 0x3F50624DD2F1A9FC;   #  0.001 (audibility floor)
+
 # ================================================================
 test_group("bundle: L0/L1 constants + tables");
 assert_eq(PRANI_VOC_COUNT, 14, "14 vocalizations");
@@ -66,6 +76,53 @@ test_group("bundle: ffi surface");
 assert_neq(prani_ffi_voice_create(0), 0, "ffi voice_create(Wolf) non-null");
 assert_eq(prani_ffi_voice_create(99), 0, "ffi voice_create(99) null");
 assert_eq(prani_ffi_species_from_index(13), (0 - 1), "ffi species index 13 -> -1");
+
+# ================================================================
+# Ports `test_emotion_state_drives_synthesis`
+# (git show 2.0.3:rust-old/tests/integration.rs, lines 755-765): an emotion
+# state is evaluated and its vocalization / intent / vocal effort drive a Wolf
+# synthesis end to end. Only the bundle suite has both layers in scope.
+test_group("bundle: emotion state drives synthesis");
+var dstate = emotion_with_values(E_NEG_0_5, E_0_8);
+var dout = emotion_evaluate(dstate);
+# valence is exactly -0.5 and both sub-branch bounds are a strict `<`
+# (emotion_select_vocalization / emotion_select_intent), so this state lands on
+# the Bark + Alarm arm, not Screech + Distress.
+assert_eq(PrEmotionOut_vocalization(dout), PRANI_VOC_BARK, "(-0.5, 0.8) -> Bark");
+assert_eq(PrEmotionOut_intent(dout), PRANI_INTENT_ALARM, "(-0.5, 0.8) -> Alarm");
+assert_eq(PrEmotionOut_vocal_effort(dout), E_0_76, "vocal_effort = 0.2 + 0.8*0.7 = 0.76");
+assert_eq(PrEmotionOut_pitch_scale(dout), E_0_925, "pitch_scale = 1.0 + -0.5*0.15 = 0.925");
+# control: at the same arousal, a valence past both bounds takes the other arm
+var dstate2 = emotion_with_values(E_NEG_0_8, E_0_8);
+var dout2 = emotion_evaluate(dstate2);
+assert_eq(PrEmotionOut_vocalization(dout2), PRANI_VOC_SCREECH, "(-0.8, 0.8) -> Screech");
+assert_eq(PrEmotionOut_intent(dout2), PRANI_INTENT_DISTRESS, "(-0.8, 0.8) -> Distress");
+
+# the composition itself: evaluated effort + vocalization + intent -> a Wolf
+var dvoice = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), PrEmotionOut_vocal_effort(dout));
+assert_eq(crvoice_vocal_effort(dvoice), E_0_76, "emotion effort reaches the voice");
+var dvoc = PrEmotionOut_vocalization(dout);
+var dint = PrEmotionOut_intent(dout);
+var dsam = crvoice_vocalize_with_intent(dvoice, dvoc, dint, SR44, DUR_0_5);
+assert_eq(prani_is_err(dsam), 0, "emotion-driven wolf bark synthesizes");
+# 0.5 s * Alarm duration_scale 0.7 = 0.35 s, and 0.35*44100 = 15434.999999999998
+assert_eq(vec_len(dsam), 15434, "0.5 s * 0.7 * 44100 truncates to 15434 samples");
+var di = 0;
+var dfin = 1;
+var dmax = 0;
+while (di < vec_len(dsam)) { if (prani_is_finite(vec_get(dsam, di)) == 0) { dfin = 0; } di = di + 1; }
+assert_eq(dfin, 1, "all emotion-driven samples finite");
+di = 0;
+while (di < vec_len(dsam)) { var da = f64_abs(vec_get(dsam, di)); if (f64_gt(da, dmax) == 1) { dmax = da; } di = di + 1; }
+assert_eq(f64_gt(dmax, E_0_001), 1, "emotion-driven bark is audible (max |s| > 0.001)");
+# control: the identical call at the default 0.5 effort renders a different
+# waveform, so the emotion-derived 0.76 demonstrably reaches synthesis.
+var dbase = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_WOLF), dvoc, dint, SR44, DUR_0_5);
+assert_eq(vec_len(dbase), 15434, "control render has the same length");
+var dj = 0;
+var dmax2 = 0;
+while (dj < vec_len(dbase)) { var db = f64_abs(vec_get(dbase, dj)); if (f64_gt(db, dmax2) == 1) { dmax2 = db; } dj = dj + 1; }
+assert_neq(dmax2, dmax, "effort 0.5 and effort 0.76 render differently");
 
 var rc = assert_summary();
 syscall(60, rc);

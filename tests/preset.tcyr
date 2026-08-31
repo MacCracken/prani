@@ -83,7 +83,55 @@ var T_EF0_RAVEN      = 0x4080d3b13b13b13b;   # (800-100)/1.3 = 538.461... in [50
 var T_EF0_CRICKET    = 0x40b1940000000000;   # (4500+0)/1.0 = 4500 in [3000,8000]
 var T_EF0_ALLIGATOR  = 0x4040aaaaaaaaaaab;   # (60-10)/1.5 = 33.333... -> clamp 30? no, in [30,200]
 
+# ---- synthesis constants (the oracle's own arguments: 44100 Hz, 0.3 s) ------
+var T_SR    = 0x40e5888000000000;   # 44100.0
+var T_0_3   = 0x3fd3333333333333;   # 0.3   (0.3 * 44100 == 13230.0 exactly)
+var T_0_001 = 0x3f50624dd2f1a9fc;   # 0.001 -- the oracle's audibility floor
+var T_NAN   = 0x7ff8000000000000;   # NaN   -- control for t_all_finite
+var T_INF   = 0x7ff0000000000000;   # +inf  -- control for t_all_finite
+
 alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# all_finite(vec) -- 1 iff every element passes prani_is_finite.
+#must_use
+fn t_all_finite(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (prani_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# max_abs(vec) -- peak |sample|. non-error + exact length + all-finite are ALL
+# satisfied by an all-zero buffer (2.0.4 audit, theme T1), so the synthesis
+# group below gates on this too, against the oracle's own 0.001 floor.
+#must_use
+fn t_max_abs(v) {
+    var n = vec_len(v);
+    var i = 0;
+    var m = 0;
+    while (i < n) {
+        var a = f64_abs(vec_get(v, i));
+        if (f64_gt(a, m) == 1) { m = a; }
+        i = i + 1;
+    }
+    return m;
+}
+
+# t_preset_voc(species) -- the oracle's OWN selection chain, transcribed from
+# `git show 2.0.3:rust-old/tests/integration.rs` (test_voice_presets, 573-583):
+# Howl else Roar else Growl else Chirp else Buzz, gated on supports_vocalization.
+#must_use
+fn t_preset_voc(sp) {
+    if (species_supports_vocalization(sp, PRANI_VOC_HOWL) == 1) { return PRANI_VOC_HOWL; }
+    if (species_supports_vocalization(sp, PRANI_VOC_ROAR) == 1) { return PRANI_VOC_ROAR; }
+    if (species_supports_vocalization(sp, PRANI_VOC_GROWL) == 1) { return PRANI_VOC_GROWL; }
+    if (species_supports_vocalization(sp, PRANI_VOC_CHIRP) == 1) { return PRANI_VOC_CHIRP; }
+    return PRANI_VOC_BUZZ;
+}
 
 # ================================================================
 test_group("preset field values -- verbatim from oracle");
@@ -243,6 +291,83 @@ assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_anc)), T_0_25,
   "build ancient_dragon breathiness override 0.25 in voice params");
 
 # ================================================================
+# Ports rust-old/tests/integration.rs:567-592 (test_voice_presets), the one
+# oracle test that SYNTHESIZES from a preset-built voice -- read it with
+# `git show 2.0.3:rust-old/tests/integration.rs` (ADR-0004). Every other suite
+# only vocalizes crvoice_new voices, so this is the sole voice-level synthesis
+# coverage for Raptor, Crow and Crocodilian, for Cat+Howl (the nasal
+# anti-formant and cat formant-transition table), and for Cricket+Chirp.
+#
+# The oracle asserts finite-only; this is stronger -- non-error, EXACT length
+# and a peak-amplitude gate, since an all-zero buffer passes the first three.
+test_group("t_max_abs / t_all_finite controls (the gates below can fail)");
+var zbuf = vec_new();
+var zi = 0;
+while (zi < 8) { vec_push(zbuf, 0); zi = zi + 1; }
+assert_eq(t_all_finite(zbuf), 1, "control: all-zero buffer IS all-finite");
+assert_eq(vec_len(zbuf), 8, "control: all-zero buffer has the expected length");
+assert_eq(f64_gt(t_max_abs(zbuf), T_0_001), 0, "control: all-zero buffer FAILS the peak gate");
+vec_set(zbuf, 3, T_1_0);
+assert_eq(f64_gt(t_max_abs(zbuf), T_0_001), 1, "control: t_max_abs sees a +1.0 sample");
+vec_set(zbuf, 3, f64_neg(T_1_0));
+assert_eq(f64_gt(t_max_abs(zbuf), T_0_001), 1, "control: t_max_abs sees a -1.0 sample (abs)");
+vec_set(zbuf, 3, 0);
+vec_set(zbuf, 5, T_NAN);
+assert_eq(t_all_finite(zbuf), 0, "control: t_all_finite rejects NaN");
+vec_set(zbuf, 5, T_INF);
+assert_eq(t_all_finite(zbuf), 0, "control: t_all_finite rejects +inf");
+
+# ================================================================
+test_group("preset_build -- every preset synthesizes (oracle test_voice_presets)");
+# The chain's two outcomes, pinned so the loop below cannot silently degenerate
+# to one vocalization: Laryngeal/Syringeal species take Howl at the first arm,
+# Stridulatory Cricket rejects Howl/Roar/Growl and falls through to Chirp.
+assert_eq(t_preset_voc(PRANI_SP_WOLF), PRANI_VOC_HOWL, "chain picks Howl for Wolf");
+assert_eq(t_preset_voc(PRANI_SP_CRICKET), PRANI_VOC_CHIRP, "chain picks Chirp for Cricket");
+
+var n_presets = vec_len(all);
+assert_eq(n_presets, 11, "synthesis loop is over all 11 presets (non-vacuous)");
+
+# Per-property failure bitmasks over the preset index, so a failure names the
+# preset rather than just the property. `bit` doubles once per iteration.
+var f_err = 0;
+var f_len = 0;
+var f_fin = 0;
+var f_amp = 0;
+var n_ok = 0;
+var n_howl = 0;
+var n_chirp = 0;
+var bit = 1;
+var pi = 0;
+while (pi < n_presets) {
+    var pp = vec_get(all, pi);
+    var voc = t_preset_voc(VoicePreset_species(pp));
+    if (voc == PRANI_VOC_HOWL) { n_howl = n_howl + 1; }
+    if (voc == PRANI_VOC_CHIRP) { n_chirp = n_chirp + 1; }
+    var buf = crvoice_vocalize(preset_build(pp), voc, T_SR, T_0_3);
+    var bad = 0;
+    if (prani_is_err(buf) == 1) {
+        f_err = f_err + bit;
+        bad = 1;
+    } else {
+        if (vec_len(buf) != 13230) { f_len = f_len + bit; bad = 1; }
+        if (t_all_finite(buf) != 1) { f_fin = f_fin + bit; bad = 1; }
+        if (f64_gt(t_max_abs(buf), T_0_001) == 0) { f_amp = f_amp + bit; bad = 1; }
+    }
+    if (bad == 0) { n_ok = n_ok + 1; }
+    bit = bit + bit;
+    pi = pi + 1;
+}
+assert_eq(f_err, 0, "every preset vocalizes without error (bitmask of preset indices)");
+# Idle duration_scale is 1.0, so num_samples = (0.3 * 44100) as usize = 13230.
+assert_eq(f_len, 0, "every preset yields exactly 13230 samples (bitmask)");
+assert_eq(f_fin, 0, "every preset yields all-finite samples (bitmask)");
+assert_eq(f_amp, 0, "every preset yields peak |s| > 0.001, not silence (bitmask)");
+assert_eq(n_howl, 10, "10 presets took the Howl arm");
+assert_eq(n_chirp, 1, "Field Cricket took the Chirp arm");
+assert_eq(n_ok, 11, "all 11 presets synthesized and passed all four gates");
+
+# ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
 # VoicePreset — name string + scalars, via bayan's value tree).
 test_group("VoicePreset serde roundtrip");
@@ -258,7 +383,11 @@ assert_eq(VoicePreset_f0_offset(pre2), VoicePreset_f0_offset(pre), "f0_offset ro
 assert_eq(VoicePreset_breathiness(pre2), VoicePreset_breathiness(pre), "breathiness roundtrips");
 var sbp2 = str_builder_new();
 preset_to_json(pre2, sbp2);
-assert_eq(memeq(jstr, str_data(str_builder_build(sbp2)), strlen(jstr)), 1, "json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var jstr_2 = str_data(str_builder_build(sbp2));
+assert_eq(strlen(jstr_2), strlen(jstr), "json idempotent -- same length");
+assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -5,6 +5,163 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] - Parity re-verification: the oracle's tests, not just its source
+
+The port was verified module-by-module against `rust-old/`'s **source**. It had
+never been verified against its **tests** — a different question, and the one
+that decides whether 2.0.8 can safely remove the directory, because after that
+parity is asserted by prani's own suites alone. This release asks it, closes what
+it found, and writes down how to read the oracle once it is gone. Suite
+**770 → 1200 assertions / 17 suites**; `cyrius audit` exits 0. **No file under
+`src/` changed.**
+
+### The result: zero behavioural defects
+
+All **73** Rust `#[test]` blocks audited against the 17 Cyrius suites, one row
+each, in [`docs/development/rust-test-parity.md`](docs/development/rust-test-parity.md).
+
+| | |
+|---|--:|
+| ✅ Covered | 30 |
+| 🟡 Partial | 30 |
+| 🔴 Gap | 11 |
+| ⬜ N/A (Rust-only language properties) | 2 |
+
+The roadmap said a gap that turns out to be a real behavioural difference is a
+defect and outranks everything else in the arc. **None was found.** Every
+shortfall was a test gap: the port does the right thing, nothing asserted it.
+Where reading both implementations was not conclusive, the verifying pass built a
+throwaway probe and *measured* the port at the oracle's exact arguments.
+
+### Fixed — the suite could not tell audio from silence
+
+⭐ **The headline finding.** Every synthesis assertion in all 17 suites was
+*non-error + exact length + all-finite*. **An all-zero buffer satisfied all
+three.** No suite computed a peak, an RMS or an energy over a `crvoice_vocalize`
+result — `f64_abs` appeared only inside tolerance comparisons on scalar helpers.
+The oracle checks `max_amp > 0.001`, `near_energy > 10 * far_energy`,
+Alarm-louder-than-Idle and shout-louder-than-whisper; none of it survived the
+port. `t_max_abs` / `t_energy` helpers now exist and the oracle's own bars are
+asserted.
+
+This is the same shape as 2.0.3's lesson one level up: there, *a contract derived
+from a dependency is a measurement*. Here — **an assertion that cannot fail is
+not a test**, and 770 of them had been counted as if they were.
+
+### Fixed — 6 of 13 species and 6 vocalizations never synthesized
+
+Dog, Crow, Raptor, Crocodilian, Bee and Fantasy never reached `crvoice_vocalize`;
+several never constructed a `CreatureTract` at all. SCREECH, RUMBLE, GROWL, BARK
+and CHIRP were never synthesized, and the Cat+HOWL pair that drives the nasal
+anti-formant and the cat formant-transition table was never built. All 13 species
+now synthesize under the oracle's own selection ladder, asserted 13/13 on four
+counters plus support-matrix cells so a wrong matrix cannot silently reroute a
+species and still count as a success.
+
+### Fixed — four serde roundtrips that could not fail, and eleven prefix compares
+
+bayan's value accessors are null-safe by design (`bayan_json_v_int(0)` returns
+0), so **a roundtrip asserted on a discriminant-0 value passes even if the derive
+dropped the key entirely.** `CallBout` was round-tripped only with `HOWL` (= 0);
+`VocalApparatus` only as Laryngeal (= 0), 1 of 5 variants. The oracle uses `Bark`
+and `Dragon`. Now so does prani.
+
+Chasing that, the systemic version: **all 11 idempotency checks were prefix
+compares** — `memeq(json, json2, strlen(json))` — so a re-serialization that
+*appended* a field passed. Each now asserts length equality first. This is the
+same null-safe composition behind 2.0.3's HIGH finding
+([ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)), surfacing in
+the tests this time instead of the source.
+
+### Fixed — edge inputs the oracle probed and the suites did not
+
+Zero duration was never passed to any synthesis entry point. No stream was ever
+drained in more than two `fill_buffer` calls, leaving the `t > 0.85`
+release-boundary arm **dead in both `voice.cyr` and `stream.cyr`**. `fatigue` was
+never read after more than one `record_call`, so an implementation that
+**assigned instead of accumulated** would have passed. `emotion_update` was never
+called on a non-default smoothing, so one that ignored the field would have
+passed. `crvoice_with_jitter` and `crvoice_with_shimmer` had **zero test
+callers**. No preset was ever synthesized; only 3 of 13 bout templates were even
+constructed; every chorus mixed two bit-identical Wolves.
+
+### Added — [ADR-0005](docs/adr/0005-serialized-tract-rebuilds-dsp-state.md): a serialized `CreatureTract` rebuilds svara's state
+
+The one genuine oracle divergence in the tree that no ADR covered — it lived only
+in source comments. The Rust derived `Serialize` over the whole struct, svara's
+`VocalTract` included, and resumed seamlessly. svara hands prani an **opaque
+handle with no state accessors**, so the port serializes eight fields and
+*rebuilds* the svara tract and naad biquad from `params`. A tract serialized
+mid-call resumes with **cleared filter memory**. `tests/tract.tcyr` now pins this
+in both directions: the deserialized tract is bit-identical to a fresh one
+carrying the restored scalars (proving rebuild), *and* differs from the
+original's own continuation (proving the first assertion is not vacuous). Same
+root cause as [ADR-0001](docs/adr/0001-check-svara-tract-constructor.md).
+
+### Added — [ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md): cite the oracle by tag
+
+2.0.8 removes `rust-old/` from the working tree, and a bare
+`rust-old/src/x.rs:NN` in a comment stops resolving that day. The rule, in force
+now: **a citation names a tag.** The path changed at 2.0.0 — the port *created*
+`rust-old/` — so the recovery incantation differs by era, and both halves are
+verified:
+
+```sh
+git show 2.0.3:rust-old/src/voice.rs   # port era (2.0.0+)
+git show 1.1.0:src/voice.rs            # Rust era — the Rust WAS src/
+```
+
+### Fixed — two release-gate numbers were wrong
+
+Both were measurements 2.0.8 depends on. The `rust-old/` citation count read
+**176 across 45 files**; it had counted the vendored `lib/` bundles prani must
+not modify (143 citations belonging to naad, goonj, svara and hisab) and
+under-counted by exactly the 56 in `lib/naad.cyr`. The real figure is **83 across
+42** maintained files. The Rust benchmark count read **10**; `criterion_group!`
+registers **14**. Every number in the roadmap's facts table now carries the
+command that reproduces it.
+
+A third, found while correcting the second: `crvoice_vocalize
+wolf_howl_0.05s@8k` **is not comparable** to the oracle's `wolf_howl_1s` — 400
+samples against 44,100, at a sample rate that changes which svara path runs. 2.0.7
+must add a matching row or drop wolf howl from the comparison.
+
+### Fixed — CI ran three gates of five, and the contributor doc was still Rust
+
+CI ran `deps` → `build` → `test`, so **fmt, lint, docs and bench were enforced
+nowhere but contributors' machines**. It now runs `cyrius audit`, plus a **bundle
+coherence** gate (`cyrius distlib` then `git diff --exit-code -- dist/`) — `dist/`
+is a tracked build product that consumers build against, and it is deterministic,
+so any diff is a stale commit.
+
+`CONTRIBUTING.md` still told contributors to run `cargo fmt`, `cargo clippy` and
+`cargo audit` and to install Rust 1.89+. It is now a Cyrius document.
+`scripts/bench-history.sh` ran `cargo bench` into `benches/history.csv`, a path
+that does not exist in this tree; it now drives `cyrius bench`, records the
+measured timer floor alongside each figure, and refuses to write on a parse of
+zero benchmarks.
+
+### Decided — consumer-green does not gate `rust-old/`'s retirement
+
+svara treated it as a hard gate. For prani it would block 2.0.8 indefinitely on
+kiran/joshua ports that have no date. **Not a hard gate**, on one condition, now
+a hard requirement on 2.0.6: `streaming.cyr` must drive the full FFI lifecycle
+(create → start → fill to completion → is_finished → destroy). That lifecycle is
+what consumer-green was standing in for, and an example runs in CI on every push,
+which a consumer port does not.
+
+### Note — one ledger row was wrong, and closing it caught that
+
+The audit proposed asserting the cricket inter-chirp silence gap through a 0.2 s
+`crvoice_vocalize` call. **That is impossible in the port and the oracle alike**:
+`pos_in_chirp` is the index *within one synthesize call*, and vocalize renders in
+882-sample blocks, so it never reaches `chirp_active` = 5880. The oracle's own
+test passes on the per-syllable envelope, not the gap its comment names. The port
+now carries the oracle's bar verbatim, and the silence arm is asserted where it
+is reachable — a direct 12000-sample `crtract_synthesize_stridulatory` call, with
+controls. A faithful port of an oracle quirk, and a reminder that a suggested fix
+is a hypothesis until the code runs.
+
 ## [2.0.3] - The P(-1) sweep: one segfault on the primary API, and the contract that changed underneath it
 
 Scaffold-hardening and security sweep of the whole tree, closing the one unmet

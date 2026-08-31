@@ -5,17 +5,22 @@
 
 ## Version
 
-**2.0.3** — the P(-1) scaffold-hardening + security sweep, on top of the
-completed port. 1.1.0 was the last Rust release; 2.0.0 was the language port;
-2.0.1 restored logging + serde; 2.0.2 was the toolchain and dependency catch-up;
-2.0.3 audits the whole tree and repairs what it found. **11 findings, 8 repaired,
-3 accepted and documented** — report in
-[`../audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md), three oracle
-divergences in [`../adr/`](../adr/). Headline: `crvoice_vocalize` **segfaulted**
-on any sample rate svara rejects (<= 1000 Hz), because svara 3.x turned an
-infallible constructor into a checkable code and the port kept using the return
-as a pointer. **770 assertions across 17 suites**, and `cyrius audit` **exits 0
-for the first time**. Per-module parity ledger:
+**2.0.4** — parity re-verification against the oracle's **tests**. 1.1.0 was the
+last Rust release; 2.0.0 was the language port; 2.0.1 restored logging + serde;
+2.0.2 was the toolchain and dependency catch-up; 2.0.3 audited the whole tree and
+repaired what it found; 2.0.4 asks the question 2.0.3 did not — *do the Cyrius
+suites assert what the Rust suites assert?*
+
+All **73** Rust `#[test]` blocks audited, one row each in
+[`rust-test-parity.md`](rust-test-parity.md): **30 covered · 30 partial · 11 gaps
+· 2 n/a**, and **zero behavioural defects** — every shortfall was a test gap, not
+a difference. Headline: **every synthesis assertion in the project was
+non-error + length + all-finite, so an all-zero buffer passed all three**; the
+suite could not tell audio from silence. All seven themes closed. **770 → 1200
+assertions across 17 suites**, `cyrius audit` exits 0, and **no file under `src/`
+changed**. Two new ADRs ([0004](../adr/0004-cite-the-oracle-by-tag.md) — cite the
+oracle by tag; [0005](../adr/0005-serialized-tract-rebuilds-dsp-state.md) — a
+serialized `CreatureTract` rebuilds svara's state). Per-module parity ledger:
 [`port-audit.md`](port-audit.md).
 
 ## Toolchain
@@ -85,8 +90,11 @@ each integrated and independently re-verified in the main tree against `rust-old
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.3: fmt · lint · docs · tests · bench,
-**exit 0**. 17 suites / **770 assertions**.
+`cyrius audit` is green end to end as of 2.0.4: fmt · lint · docs · tests · bench,
+**exit 0**. 17 suites / **1200 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
+the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
+the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4; before
+that it ran only build + test, so fmt · lint · docs · bench were local-only.
 
 `tests/hardening.tcyr` (53 assertions, added 2.0.3) is the P(-1) sweep's
 regression suite — one group per repaired finding, each written so it FAILS on
@@ -99,7 +107,9 @@ serde roundtrip tests INCLUDED (serde restored in 2.0.1 via `#derive(Serialize)`
 +bayan, f64 fields as lossless i64 bit patterns); Display-string tests dropped.
 svara-independent math asserted at exact f64 bit patterns; full synthesis paths
 (through svara's DSP, where f32→f64 diverges) asserted structurally
-(non-error + exact length + all-finite + bit-identical determinism).
+(non-error + exact length + all-finite + bit-identical determinism) **and, since
+2.0.4, by magnitude** — peak / energy against the oracle's own bars. Before that,
+an all-zero buffer satisfied every synthesis assertion in the project.
 
 ## Consumers
 
@@ -107,26 +117,25 @@ svara-independent math asserted at exact f64 bit patterns; full synthesis paths
 
 ## In flight
 
-Nothing. The port is complete, current on toolchain and dependencies, and
-audited.
+Nothing. The port is complete, current on toolchain and dependencies, audited
+(2.0.3), and re-verified against the oracle's tests (2.0.4).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
-only, and **2.0.x is now one arc with one destination: retiring `rust-old/`**
+only, and **2.0.x is one arc with one destination: retiring `rust-old/`**
 (2.0.8). The gate is preserve-first, the same one svara and goonj used — nothing
 the oracle still holds may be lost:
 
 | | |
 |---|---|
-| **2.0.4** | Port parity re-verification — audit all **73** Rust `#[test]` blocks against the 17 Cyrius suites. The port was verified against the oracle's *source*, never against its *tests*. Every gap found becomes a new 2.0.x item. Also establishes the recovery rule (`git show <tag>:…`). |
+| ~~**2.0.4**~~ | ✅ **Done** — parity re-verification + all 41 shortfalls closed; recovery rule in [ADR-0004](../adr/0004-cite-the-oracle-by-tag.md). Ledger: [`rust-test-parity.md`](rust-test-parity.md). |
 | **2.0.5** | Input-range validation beyond parse success (ADR-0002's deferral + audit F10/F11). |
-| **2.0.6** | Runnable examples — `CLAUDE.md` advertises `docs/examples/` and it holds only a `.gitkeep`. A gate item: after the oracle goes, an example is the only executable statement of how the API is driven. |
-| **2.0.7** | Benchmark breadth + the Rust comparison. ⚠ **Must complete before 2.0.8** — it is the only item that must; it needs the oracle buildable. |
-| **2.0.8** | Retire `rust-old/`. Gated on the above plus a **176-citation** reference sweep and a green tree with the directory moved aside. |
+| **2.0.6** | Runnable examples — `CLAUDE.md` advertises `docs/examples/` and it holds only a `.gitkeep`. A gate item: after the oracle goes, an example is the only executable statement of how the API is driven. ⚠ `streaming.cyr` **must** drive the full FFI lifecycle — that is the condition consumer-green's removal from 2.0.8's gate rests on. |
+| **2.0.7** | Benchmark breadth + the Rust comparison. ⚠ **Must complete before 2.0.8** — it is the only item that must; it needs the oracle buildable. Mirror the oracle's **14** benchmarks (not 10, as previously recorded). |
+| **2.0.8** | Retire `rust-old/`. Gated on the above plus an **83-citation** reference sweep across 42 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
 
-One decision is open and should be made before 2.0.4 starts: **whether
-consumer-green is a hard gate on 2.0.8.** svara treated it as one; for prani it
-would block the arc indefinitely on kiran/joshua. The roadmap carries the
-argument both ways and a recommendation.
+**Decided 2026-08-31: consumer-green is not a hard gate on 2.0.8**, on the
+condition that 2.0.6's `streaming.cyr` drives the full FFI lifecycle. The arc now
+has an end date rather than being blocked on kiran/joshua ports with no date.
 
 **2.x** carries what changes the public surface (the allocation-failure contract
 from audit F9) or is blocked outside this repo (consumer-green). Four watch items

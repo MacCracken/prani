@@ -23,6 +23,9 @@ var T_0_1     = 0x3fb999999999999a;   #  0.1
 var T_0_2     = 0x3fc999999999999a;   #  0.2
 var T_0_25    = 0x3fd0000000000000;   #  0.25
 var T_0_5     = 0x3fe0000000000000;   #  0.5
+var T_0_625   = 0x3fe4000000000000;   #  0.625
+var T_0_75    = 0x3fe8000000000000;   #  0.75
+var T_0_875   = 0x3fec000000000000;   #  0.875
 var T_0_9     = 0x3feccccccccccccd;   #  0.9
 var T_1_0     = 0x3ff0000000000000;   #  1.0
 var T_2_0     = 0x4000000000000000;   #  2.0
@@ -80,6 +83,55 @@ emotion_update(eu2, T_NEG_2_0, T_NEG_2_0);
 # v = 0.0*0.1 + (-1.0)*0.9 = -0.9 ; a = 0.2*0.1 + 0.0*0.9 = 0.02
 assert_eq(emotion_valence(eu2), 0xbfeccccccccccccd, "update valence clamped tgt -> -0.9");
 assert_eq(emotion_arousal(eu2), 0x3f947ae147ae147c, "update arousal clamped tgt -> 0.02");
+
+# ================================================================
+# The oracle's test_emotion_state_smooth_update
+# (`git show 2.0.3:rust-old/tests/integration.rs`, lines 746-753) builds
+# with_values(0.0, 0.5).with_smoothing(0.5), updates toward (1.0, 1.0) and
+# asserts the result lands in (0.4, 0.6) x (0.7, 0.8). update() reads the
+# per-state smoothing (src/emotion.cyr:117), so the halfway point is exact in
+# binary and is pinned here as a bit pattern instead of a window.
+test_group("update -- non-default smoothing (s=0.5)");
+var eu3 = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), T_0_5);
+emotion_update(eu3, T_1_0, T_1_0);
+# v = 0.0*0.5 + 1.0*0.5 = 0.5 ; a = 0.5*0.5 + 1.0*0.5 = 0.75
+assert_eq(emotion_valence(eu3), T_0_5, "s=0.5 -> valence halfway (0.5)");
+assert_eq(emotion_arousal(eu3), T_0_75, "s=0.5 -> arousal 0.75");
+# Control: an update that ignored the field and used the hardcoded PRE_0_1
+# would land on 0.9 / 0.95 from this same start and target.
+assert_neq(emotion_valence(eu3), 0x3feccccccccccccd, "valence is not the s=0.1 result 0.9");
+assert_neq(emotion_arousal(eu3), 0x3fee666666666667, "arousal is not the s=0.1 result 0.95");
+assert_eq(PrEmotion_smoothing(eu3), T_0_5, "smoothing unchanged by update");
+var eu3v1 = emotion_valence(eu3);
+# a second step blends from the updated state, not from the original
+emotion_update(eu3, T_1_0, T_1_0);
+assert_eq(emotion_valence(eu3), T_0_75, "s=0.5 step 2 -> valence 0.75");
+assert_eq(emotion_arousal(eu3), T_0_875, "s=0.5 step 2 -> arousal 0.875");
+
+# ================================================================
+# Three more smoothing values, so the group above cannot pass by coincidence.
+# Same start (0.0, 0.5) and same target (1.0, 1.0) as above unless noted --
+# only s differs, and every expected value below differs from every other.
+test_group("update -- smoothing controls (s=0.75, s=0.0, s=0.95 clamp)");
+var eu4 = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), T_0_75);
+emotion_update(eu4, T_1_0, T_1_0);
+# v = 0.0*0.75 + 1.0*0.25 = 0.25 ; a = 0.5*0.75 + 1.0*0.25 = 0.625
+assert_eq(emotion_valence(eu4), T_0_25, "s=0.75 -> valence 0.25");
+assert_eq(emotion_arousal(eu4), T_0_625, "s=0.75 -> arousal 0.625");
+# more smoothing = less movement toward the target in one step
+assert_eq(f64_lt(emotion_valence(eu4), eu3v1), 1, "s=0.75 moves less than s=0.5");
+# s=0.0 is instant: one step lands exactly on the (clamped) target
+var eu5 = emotion_with_smoothing(emotion_with_values(T_POS_0_7, T_0_5), T_0_0);
+emotion_update(eu5, T_0_25, T_0_9);
+assert_eq(emotion_valence(eu5), T_0_25, "s=0.0 -> valence snaps to target 0.25");
+assert_eq(emotion_arousal(eu5), T_0_9, "s=0.0 -> arousal snaps to target 0.9");
+# with_smoothing clamps 2.0 to 0.95, and update blends with the clamped value
+var eu6 = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), T_2_0);
+emotion_update(eu6, T_1_0, T_1_0);
+# 1.0-0.95 rounds to 0.050000000000000044, so v is that and a is 0.525
+assert_eq(emotion_valence(eu6), 0x3fa99999999999a0, "s clamped to 0.95 -> valence 0.05");
+assert_eq(emotion_arousal(eu6), 0x3fe0cccccccccccd, "s clamped to 0.95 -> arousal 0.525");
+assert_eq(f64_lt(emotion_valence(eu6), emotion_valence(eu4)), 1, "s=0.95 moves less than s=0.75");
 
 # ================================================================
 test_group("valence_zone / arousal_zone boundaries");
@@ -223,7 +275,11 @@ assert_eq(PrEmotion_arousal(pe2), PrEmotion_arousal(pe), "arousal roundtrips");
 assert_eq(PrEmotion_smoothing(pe2), PrEmotion_smoothing(pe), "smoothing roundtrips");
 var pesb2 = str_builder_new();
 PrEmotion_to_json(pe2, pesb2);
-assert_eq(memeq(pejstr, str_data(str_builder_build(pesb2)), strlen(pejstr)), 1, "json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var pejstr_2 = str_data(str_builder_build(pesb2));
+assert_eq(strlen(pejstr_2), strlen(pejstr), "json idempotent -- same length");
+assert_eq(memeq(pejstr, pejstr_2, strlen(pejstr)), 1, "json idempotent");
 
 # ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
@@ -246,7 +302,11 @@ assert_eq(PrEmotionOut_pitch_scale(po2), PrEmotionOut_pitch_scale(po), "pitch_sc
 assert_eq(PrEmotionOut_breathiness_delta(po2), PrEmotionOut_breathiness_delta(po), "breathiness_delta roundtrips");
 var posb2 = str_builder_new();
 PrEmotionOut_to_json(po2, posb2);
-assert_eq(memeq(pojstr, str_data(str_builder_build(posb2)), strlen(pojstr)), 1, "json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var pojstr_2 = str_data(str_builder_build(posb2));
+assert_eq(strlen(pojstr_2), strlen(pojstr), "json idempotent -- same length");
+assert_eq(memeq(pojstr, pojstr_2, strlen(pojstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

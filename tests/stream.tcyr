@@ -39,8 +39,15 @@ var T_SR       = 0x40e5888000000000;   # 44100.0 sample rate
 var T_DUR_005  = 0x3fa999999999999a;   # 0.05 s -> 2205 samples @ 44100 (scale 1.0)
 var T_400      = 0x4079000000000000;   # 400.0  wolf effective_f0 / HOWL contour base
 var T_320      = 0x4074000000000000;   # 320.0  HOWL contour at t=0 == base*0.8
-var T_0_1      = 0x3fb999999999999a;   # 0.1
+var T_0_1      = 0x3fb999999999999a;   # 0.1   (also used as a 0.1 s duration)
 var T_1_0      = 0x3ff0000000000000;   # 1.0
+var T_DUR_500  = 0x3fe0000000000000;   # 0.5 s -> 22050 samples @ 44100 (scale 1.0)
+var T_DUR_300  = 0x3fd3333333333333;   # 0.3 s -> 13230 samples @ 44100 (scale 1.0)
+var T_480      = 0x407e000000000000;   # 480.0  BARK contour at t=0 == base*1.2
+# 400 * (1.2 + (1.0-1.2)*0.5) is NOT exactly 440 in f64 -- the BARK midpoint
+# lands one ulp above it. Hand-computed following stream_pitch_contour_at's own
+# operation order (frac = 0.05/0.1 = 0.5 exactly; v0 + (v1-v0)*frac = 1.1).
+var T_440_ULP  = 0x407b800000000001;   # 440.00000000000006  BARK contour at t=0.05
 
 alloc_init();
 
@@ -91,6 +98,21 @@ assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, f64_neg(T_1_0)), T_320,
 assert_eq(stream_pitch_contour_at(PRANI_VOC_GROWL, T_400, T_0_1), T_400, "FLAT (growl) t=0.1 == base == 400");
 
 # ================================================================
+test_group("stream_pitch_contour_at -- hand-computed BARK/YELP (base 400)");
+# BARK/YELP table (src/stream.cyr stream_contour_bark, transcribed from
+# `git show 2.0.3:rust-old/src/stream.rs`): (0.0,1.2),(0.1,1.0),(1.0,0.8). It is
+# the only contour with an early knee (0.1), so the first segment is 10x steeper
+# than the second -- a table swapped with HOWL's or ROAR's fails every row below.
+assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, 0), T_480, "BARK t=0 == base*1.2 == 480");
+# t=0.05 is the midpoint of the steep first segment: 1.2 + (1.0-1.2)*0.5 == 1.1.
+assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, T_DUR_005), T_440_ULP, "BARK t=0.05 == base*1.1");
+# the knee itself: frac == 1 on segment 0 -> exactly base*1.0.
+assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, T_0_1), T_400, "BARK knee t=0.1 == base == 400");
+assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, T_1_0), T_320, "BARK t=1 == base*0.8 == 320");
+# YELP shares the BARK table (both dispatch to stream_contour_bark).
+assert_eq(stream_pitch_contour_at(PRANI_VOC_YELP, T_400, 0), T_480, "YELP t=0 shares BARK table == 480");
+
+# ================================================================
 test_group("fill_buffer -- writes min(buf,remaining), advances rendered");
 # Small buffer (512) over a 2205-sample stream: first fill writes 512.
 var sf = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
@@ -125,6 +147,7 @@ var blk1 = stream_next_block(sn, 1000);
 assert_eq(vec_len(blk1), 1000, "next_block(1000) -> 1000 samples");
 assert_eq(stream_samples_rendered(sn), 1000, "rendered advanced to 1000");
 assert_eq(t_all_finite(blk1), 1, "next_block output finite");
+assert_eq(stream_is_finished(sn), 0, "not finished after a partial next_block");
 # block_size 5000 > remaining 1205 -> clamped to 1205.
 var blk2 = stream_next_block(sn, 5000);
 assert_eq(vec_len(blk2), 1205, "next_block(5000) clamps to remaining 1205");
@@ -180,6 +203,124 @@ while (ck < 2205) {
 }
 assert_eq(same, 1, "identical streams -> bit-identical full-pass output");
 assert_eq(t_all_finite(refa), 1, "full-pass output all finite");
+
+# ================================================================
+test_group("full drain -- 512-sample buffer over 0.5 s (release-boundary arm)");
+# Mirrors `git show 2.0.3:rust-old/tests/integration.rs`
+# test_stream_produces_same_length_as_batch: Wolf/HOWL/Social, 44100 Hz, 0.5 s.
+# Social duration_scale 1.0 -> 22050 samples; a 512-sample buffer drains it in
+# 43 full passes plus a 34-sample tail. Passes 37..43 start at t >= 18944/22050
+# == 0.859, so this is the only assertion in the suite that reaches the
+# `t > 0.85` release-boundary arm of stream_fill_buffer -- every other fill in
+# the suite starts at t = 0, 0.2322 or 0.4535.
+var sdr = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_500);
+assert_eq(prani_is_err(sdr), 0, "wolf howl 0.5 s stream_new -> non-error");
+assert_eq(stream_total_samples(sdr), 22050, "total_samples == 22050 (0.5*1.0*44100)");
+var dbuf = vec_new();
+prani_vec_push_zeros(dbuf, 512);
+var streamed = vec_new();
+var passes = 0;
+var dfinite = 1;
+# Bounded drain: 44 passes are expected, the guard trips at 64. A regression
+# that stops advancing samples_rendered exits here and fails `passes == 44`
+# rather than hanging the suite.
+while (stream_is_finished(sdr) == 0 && passes < 64) {
+    var n = stream_fill_buffer(sdr, dbuf);
+    if (t_all_finite(dbuf) == 0) { dfinite = 0; }
+    var di = 0;
+    while (di < n) {
+        vec_push(streamed, vec_get(dbuf, di));
+        di = di + 1;
+    }
+    passes = passes + 1;
+}
+assert_eq(passes, 44, "drained in exactly 44 fill_buffer passes (43x512 + 34)");
+assert_eq(stream_is_finished(sdr), 1, "drain loop terminated -- stream finished");
+assert_eq(vec_len(streamed), 22050, "accumulated 22050 samples across the drain");
+assert_eq(vec_len(streamed), stream_total_samples(sdr), "accumulated == stream_total_samples()");
+assert_eq(dfinite, 1, "every pass all finite (incl. the t > 0.85 release blocks)");
+# batch/stream length parity in ONE assertion, on the oracle's own species and
+# intent (previously split across two literal assertions in two suites).
+var vbatch = crvoice_new(PRANI_SP_WOLF);
+var batch = crvoice_vocalize_with_intent(vbatch, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_500);
+assert_eq(prani_is_err(batch), 0, "wolf howl 0.5 s social batch -> non-error");
+assert_eq(vec_len(batch), vec_len(streamed), "batch length == streamed length");
+assert_eq(t_all_finite(batch), 1, "batch output all finite");
+
+# ================================================================
+test_group("full drain -- control: block-wise render diverges from single-pass");
+# A single 22050-sample fill renders the whole stream at t = 0: one contour
+# point (400*0.8 == 320) and one boundary_boost (the t < 0.1 attack arm). The
+# 512-block drain above re-evaluates t on every pass. The two outputs must
+# therefore differ -- if fill_buffer ever stopped advancing t per block, this is
+# the assertion that catches it, since length and finiteness would still hold.
+var sone = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_500);
+var obuf = vec_new();
+prani_vec_push_zeros(obuf, 22050);
+assert_eq(stream_fill_buffer(sone, obuf), 22050, "single-pass fill writes all 22050");
+var ndiff = 0;
+var oi = 0;
+while (oi < 22050) {
+    if (vec_get(obuf, oi) != vec_get(streamed, oi)) { ndiff = ndiff + 1; }
+    oi = oi + 1;
+}
+assert_gt(ndiff, 0, "block-wise drain diverges from single-pass (t advances per block)");
+
+# ================================================================
+test_group("stream_finishes -- Wolf BARK drained by next_block (oracle case)");
+# Mirrors `git show 2.0.3:rust-old/tests/integration.rs` test_stream_finishes:
+# Wolf/BARK/Idle, 44100 Hz, 0.1 s. Idle duration_scale 1.0 -> 4410 samples. This
+# is the only BARK stream in the suite, so it is what executes the BARK/YELP
+# branch of stream_pitch_contour_at end-to-end.
+var sbk = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, T_0_1);
+assert_eq(prani_is_err(sbk), 0, "wolf bark stream_new -> non-error");
+assert_eq(stream_total_samples(sbk), 4410, "bark total_samples == 4410 (0.1*1.0*44100)");
+var bk_blocks = 0;
+var bk_total = 0;
+var bk_finite = 1;
+# Bounded drain: 5 blocks are expected (4x1024 + 314), the guard trips at 16.
+while (stream_is_finished(sbk) == 0 && bk_blocks < 16) {
+    var bblk = stream_next_block(sbk, 1024);
+    bk_total = bk_total + vec_len(bblk);
+    if (t_all_finite(bblk) == 0) { bk_finite = 0; }
+    bk_blocks = bk_blocks + 1;
+}
+assert_eq(bk_blocks, 5, "drained in exactly 5 next_block(1024) calls (4x1024 + 314)");
+assert_eq(bk_total, 4410, "next_block drain yields exactly total_samples");
+assert_eq(bk_finite, 1, "every bark block all finite");
+assert_eq(stream_is_finished(sbk), 1, "is_finished flips after the drain loop");
+# the oracle's closing assertion: fill_buffer on a next_block-retired stream.
+var tiny = vec_new();
+prani_vec_push_zeros(tiny, 64);
+assert_eq(stream_fill_buffer(sbk, tiny), 0, "fill_buffer on a next_block-retired stream writes 0");
+
+# ================================================================
+test_group("next_block -- cat purr special path (oracle: Cat/PURR/Idle, 0.3 s)");
+# Mirrors `git show 2.0.3:rust-old/tests/integration.rs` test_stream_next_block,
+# which deliberately picks Cat + Purr. The purr path was previously reached only
+# through stream_fill_buffer, never through stream_next_block.
+var scp = stream_new(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, PRANI_INTENT_IDLE, T_SR, T_DUR_300);
+assert_eq(prani_is_err(scp), 0, "cat purr 0.3 s stream_new -> non-error");
+assert_eq(stream_total_samples(scp), 13230, "cat purr total_samples == 13230 (0.3*1.0*44100)");
+var cblk = stream_next_block(scp, 256);
+assert_eq(vec_len(cblk), 256, "cat purr next_block(256) -> 256 samples");
+assert_eq(t_all_finite(cblk), 1, "cat purr next_block output all finite");
+assert_eq(stream_samples_rendered(scp), 256, "cat purr rendered advanced to 256");
+assert_eq(stream_is_finished(scp), 0, "not finished after a partial next_block");
+# Control: the purr generator carries laryngeal phase, rng and DC-blocker state
+# across calls (src/tract.cyr crtract_synthesize_purr), so a second block cannot
+# repeat the first. A stream that rebuilt its tract per call, or reset phase,
+# would emit an identical block and still pass every assertion above.
+var cblk2 = stream_next_block(scp, 256);
+assert_eq(vec_len(cblk2), 256, "cat purr second next_block(256) -> 256 samples");
+assert_eq(stream_samples_rendered(scp), 512, "cat purr rendered advanced to 512");
+var cdiff = 0;
+var cq = 0;
+while (cq < 256) {
+    if (vec_get(cblk, cq) != vec_get(cblk2, cq)) { cdiff = cdiff + 1; }
+    cq = cq + 1;
+}
+assert_gt(cdiff, 0, "purr stream advances state -- block 2 differs from block 1");
 
 var rc = assert_summary();
 syscall(60, rc);

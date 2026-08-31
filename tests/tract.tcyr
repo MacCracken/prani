@@ -38,6 +38,7 @@ var T_0_125    = 0x3fc0000000000000;   # 0.125
 var T_220      = 0x406b800000000000;   # 220.0
 var T_2500     = 0x40a3880000000000;   # 2500.0 (unused sentinel; see below)
 var T_TOL_1EM6 = 0x3eb0c6f7a0b5ed8d;   # 1e-6
+var T_1EM3     = 0x3f50624dd2f1a9fc;   # 0.001 (the oracle's near-silence bar)
 
 alloc_init();
 
@@ -71,6 +72,31 @@ fn t_vecs_equal(a, b) {
 #must_use
 fn t_approx(a, b, eps) {
     return f64_lt(f64_abs(f64_sub(a, b)), eps);
+}
+
+# max_abs_range(v, lo, hi) -- peak |s| over v[lo..hi).
+#must_use
+fn t_max_abs_range(v, lo, hi) {
+    var m = 0;
+    var i = lo;
+    while (i < hi) {
+        var a = f64_abs(vec_get(v, i));
+        if (f64_gt(a, m) == 1) { m = a; }
+        i = i + 1;
+    }
+    return m;
+}
+
+# count_below(v, eps, lo, hi) -- how many of v[lo..hi) satisfy |s| < eps.
+#must_use
+fn t_count_below(v, eps, lo, hi) {
+    var n = 0;
+    var i = lo;
+    while (i < hi) {
+        if (f64_lt(f64_abs(vec_get(v, i)), eps) == 1) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
 }
 
 # ================================================================
@@ -145,6 +171,34 @@ var out_strid_lo = crtract_synthesize_stridulatory(ct_cricket2, T_220, 64, opts)
 assert_eq(prani_is_err(out_strid_lo), 0, "stridulatory low-carrier non-error");
 assert_eq(vec_len(out_strid_lo), 64, "stridulatory low-carrier length 64");
 assert_eq(t_all_finite(out_strid_lo), 1, "stridulatory low-carrier all finite");
+
+# ================================================================
+# The inter-chirp silence arm (src/tract.cyr:389-391, porting
+# 2.0.3:rust-old/src/tract.rs:277-279) is UNREACHABLE through crvoice_vocalize
+# at any duration, in the port and in the oracle alike: pos_in_chirp is
+# `i % chirp_period` over the index WITHIN one synthesize call, and vocalize
+# renders in blocks of sample_rate*0.02 = 882 samples at 44100, so pos_in_chirp
+# never exceeds 881 while chirp_active is 5880. The oracle's own
+# test_cricket_pulse_train passes on the per-syllable envelope, not on the gap
+# its comment names. Reaching the arm needs ONE synthesize call longer than
+# chirp_active, which is what this group does.
+test_group("stridulatory inter-chirp silence (direct call past chirp_active)");
+# At 44100: chirp_period = 44100/2.5 = 17640, chirp_active = (44100/30)*4 = 5880.
+# 12000 samples therefore spans one full active chirp then 6120 samples of gap.
+var ct_gap = crtract_new(cricket, T_SR);
+var out_gap = crtract_synthesize_stridulatory(ct_gap, f64_from(4500), 12000, opts);
+assert_eq(prani_is_err(out_gap), 0, "gap-spanning stridulatory non-error");
+assert_eq(vec_len(out_gap), 12000, "gap-spanning stridulatory length 12000");
+assert_eq(t_all_finite(out_gap), 1, "gap-spanning stridulatory all finite");
+# The arm pushes exact 0, but dcblocker_process_buffer runs over the whole buffer
+# (src/tract.cyr:410) and its pole is 0.995, so the tail decays rather than
+# snapping to zero -- ~1100 samples to fall below 1e-3 from a 0.25-scale signal.
+# Sample well past that: [10000, 12000) must be near-silent to the last sample.
+assert_eq(t_count_below(out_gap, T_1EM3, 10000, 12000), 2000, "inter-chirp gap is silent end to end (2000/2000)");
+# Control, same window width inside the active chirp: if the branch were never
+# taken, or the whole buffer were silent, this would match the count above.
+assert_lt(t_count_below(out_gap, T_1EM3, 1000, 3000), 2000, "active chirp is NOT silent (control)");
+assert_eq(f64_gt(t_max_abs_range(out_gap, 1000, 3000), T_1EM3), 1, "active chirp carries real signal (control)");
 
 # ================================================================
 test_group("vibratile -- continuous wing-beat AM (bee)");
@@ -237,15 +291,57 @@ assert_eq(CreatureTract_phase(t2), CreatureTract_phase(tser), "phase roundtrips"
 assert_eq(PrRng_state(CreatureTract_rng(t2)), PrRng_state(CreatureTract_rng(tser)), "rng state roundtrips");
 assert_eq(PrRng_inc(CreatureTract_rng(t2)), PrRng_inc(CreatureTract_rng(tser)), "rng inc roundtrips");
 assert_eq(DcBlocker_r(CreatureTract_dc_blocker(t2)), DcBlocker_r(CreatureTract_dc_blocker(tser)), "dc_blocker r roundtrips");
+# r alone cannot catch a lost restore -- the constructor sets it to a constant,
+# so it survives even if from_json_str dropped the restore entirely. x_prev/y_prev
+# are what the purr above advanced, and they are the fields that can actually fail.
+assert_neq(DcBlocker_x_prev(CreatureTract_dc_blocker(tser)), 0, "control: purr moved dc_blocker x_prev off 0");
+assert_eq(DcBlocker_x_prev(CreatureTract_dc_blocker(t2)), DcBlocker_x_prev(CreatureTract_dc_blocker(tser)), "dc_blocker x_prev roundtrips");
+assert_eq(DcBlocker_y_prev(CreatureTract_dc_blocker(t2)), DcBlocker_y_prev(CreatureTract_dc_blocker(tser)), "dc_blocker y_prev roundtrips");
 assert_eq(SpeciesParams_formant0(CreatureTract_params(t2)), SpeciesParams_formant0(CreatureTract_params(tser)), "params formant0 roundtrips");
 assert_neq(CreatureTract_tract(t2), 0, "rebuilt svara tract non-null");
 # idempotency BEFORE any further synthesis (which would advance t2's state)
 var tsb2 = str_builder_new();
 crtract_to_json(t2, tsb2);
-assert_eq(memeq(tjson, str_data(str_builder_build(tsb2)), strlen(tjson)), 1, "tract json idempotent");
+var tjson2 = str_data(str_builder_build(tsb2));
+# length first: memeq over strlen(tjson) is a PREFIX compare, so a json2 that
+# appended a field would pass it. The oracle compared whole strings.
+assert_eq(strlen(tjson2), strlen(tjson), "tract json same length (prefix compare alone is not enough)");
+assert_eq(memeq(tjson, tjson2, strlen(tjson)), 1, "tract json idempotent");
 # the rebuilt svara tract produces finite output post-restore
 var post = crtract_synthesize_purr(t2, 16, f64_from(27));
 assert_eq(prani_is_finite(vec_get(post, 8)), 1, "rebuilt tract synthesizes finite output");
+
+# ================================================================
+# ADR-0005: the svara tract + naad filter are REBUILT from params, not restored.
+# The Rust oracle serialized svara's VocalTract in full and resumed seamlessly
+# (2.0.3:rust-old/src/tract.rs:28-44, and its json == json2 at
+# 2.0.3:rust-old/tests/integration.rs:257). svara hands prani an opaque handle
+# with no state accessors, so the port cannot. This group PINS that divergence
+# in both directions so neither half can rot silently.
+test_group("CreatureTract serde -- svara/naad state is rebuilt, not restored (ADR-0005)");
+# t3: a FRESH tract carrying exactly the scalars the roundtrip restored.
+# Capture tser's scalars BEFORE synthesizing from it below (that advances them).
+var s_phase = CreatureTract_phase(tser);
+var s_rstate = PrRng_state(CreatureTract_rng(tser));
+var s_rinc = PrRng_inc(CreatureTract_rng(tser));
+var s_xp = DcBlocker_x_prev(CreatureTract_dc_blocker(tser));
+var s_yp = DcBlocker_y_prev(CreatureTract_dc_blocker(tser));
+var s_r = DcBlocker_r(CreatureTract_dc_blocker(tser));
+var t3 = crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000));
+CreatureTract_set_phase(t3, s_phase);
+PrRng_set_state(CreatureTract_rng(t3), s_rstate);
+PrRng_set_inc(CreatureTract_rng(t3), s_rinc);
+DcBlocker_set_x_prev(CreatureTract_dc_blocker(t3), s_xp);
+DcBlocker_set_y_prev(CreatureTract_dc_blocker(t3), s_yp);
+DcBlocker_set_r(CreatureTract_dc_blocker(t3), s_r);
+var post3 = crtract_synthesize_purr(t3, 16, f64_from(27));
+assert_eq(t_vecs_equal(post, post3), 1, "deserialized tract == fresh tract + restored scalars (svara side rebuilt)");
+# Control: the ORIGINAL, continued from its own live svara filter memory, must
+# DIFFER -- otherwise the assertion above would hold vacuously for a tract whose
+# synthesis never touched svara state at all. crtract_synthesize_purr routes every
+# sample through svara_tract_process_sample (src/tract.cyr:496), so it does.
+var post_orig = crtract_synthesize_purr(tser, 16, f64_from(27));
+assert_eq(t_vecs_equal(post, post_orig), 0, "control: the original's live svara memory does NOT survive the roundtrip");
 
 var rc = assert_summary();
 syscall(60, rc);

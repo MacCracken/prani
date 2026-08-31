@@ -36,6 +36,41 @@ assert_eq(fatigue_alarm_habituation(s), 0, "non-alarm leaves habituation at 0");
 assert_eq(FatigueState_alarm_count(s), 0, "non-alarm leaves alarm count at 0");
 
 # ================================================================
+# Mirrors rust-old/tests/integration.rs:789-804 @ 2.0.3: a fresh state, then
+# 30 x record_call(1.0, false). Guards the read-add-write at src/fatigue.cyr:94
+# against an implementation that ASSIGNED (fatigue = duration * rate) -- every
+# other fatigue-valued assertion in this file is taken after ONE call, so such
+# an implementation would pass the rest of the suite.
+test_group("record_call x30 -- accumulates, not assigns");
+var acc = fatigue_new();
+var ai = 0;
+while (ai < 30) { fatigue_record_call(acc, F64_ONE, 0); ai = ai + 1; }
+# 30 sequential f64 adds of 0.015 round to 0.4500000000000003, which differs
+# from the one-shot 30*0.015 (0.45 = 0x3fdccccccccccccd) -- so this pins the
+# accumulation order as well as the total.
+assert_eq(fatigue_fatigue(acc), 0x3fdcccccccccccd2, "30x1s -> fatigue == 0.4500000000000003");
+assert_eq(f64_gt(fatigue_fatigue(acc), 0x3fd3333333333333), 1, "30x1s -> fatigue > 0.3 (oracle bound)");
+assert_eq(FatigueState_bout_calling_time(acc), 0x403e000000000000, "bout time == 30.0 after 30 calls");
+# Control: a single 1 s call must be strictly smaller on both accumulators.
+# An assigning implementation leaves acc and one identical, failing these two.
+var one = fatigue_new();
+fatigue_record_call(one, F64_ONE, 0);
+assert_eq(fatigue_fatigue(one), 0x3f8eb851eb851eb8, "1x1s -> fatigue == 0.015");
+assert_eq(f64_gt(fatigue_fatigue(acc), fatigue_fatigue(one)), 1, "30 calls > 1 call (fatigue accumulates)");
+assert_eq(f64_gt(FatigueState_bout_calling_time(acc), FatigueState_bout_calling_time(one)), 1, "30 calls > 1 call (bout time accumulates)");
+# Modifiers off the accumulated state. The oracle asserts only the three signs
+# (integration.rs:801-803); the exact values are hand-computed from fatigue
+# 0.4500000000000003 with habituation 0, in src/fatigue.cyr:196-207 order.
+var macc = fatigue_modifiers(acc);
+assert_eq(FatigueModifiers_pitch_offset(macc), 0xc022000000000003, "accumulated pitch == -9.000000000000005");
+assert_eq(f64_lt(FatigueModifiers_pitch_offset(macc), 0), 1, "pitch drifts down (< 0)");
+assert_eq(FatigueModifiers_breathiness_delta(macc), 0x3fb70a3d70a3d70f, "accumulated breathiness == 0.09000000000000007");
+assert_eq(f64_gt(FatigueModifiers_breathiness_delta(macc), 0), 1, "more breathy (> 0)");
+assert_eq(FatigueModifiers_amplitude_scale(macc), 0x3fea3d70a3d70a3c, "accumulated amplitude == 0.8199999999999998");
+assert_eq(f64_lt(FatigueModifiers_amplitude_scale(macc), F64_ONE), 1, "quieter (< 1.0)");
+assert_eq(FatigueModifiers_jitter_scale(macc), 0x3ffacccccccccccf, "accumulated jitter == 1.6750000000000005");
+
+# ================================================================
 test_group("record_call fatigue clamps at 1.0");
 var big = fatigue_new();
 # 100s * 0.015 = 1.5 -> clamp to 1.0
@@ -208,7 +243,11 @@ assert_eq(FatigueState_alarm_reinforced(fs2), FatigueState_alarm_reinforced(fs),
 # re-serialize is idempotent
 var sbf = str_builder_new();
 FatigueState_to_json(fs2, sbf);
-assert_eq(memeq(jstr, str_data(str_builder_build(sbf)), strlen(jstr)), 1, "FatigueState json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var jstr_2 = str_data(str_builder_build(sbf));
+assert_eq(strlen(jstr_2), strlen(jstr), "FatigueState json idempotent -- same length");
+assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "FatigueState json idempotent");
 
 # ================================================================
 test_group("FatigueModifiers serde roundtrip");
@@ -224,7 +263,11 @@ assert_eq(FatigueModifiers_jitter_scale(fm2), FatigueModifiers_jitter_scale(fm),
 # re-serialize is idempotent
 var sbm2 = str_builder_new();
 FatigueModifiers_to_json(fm2, sbm2);
-assert_eq(memeq(mstr, str_data(str_builder_build(sbm2)), strlen(mstr)), 1, "FatigueModifiers json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var mstr_2 = str_data(str_builder_build(sbm2));
+assert_eq(strlen(mstr_2), strlen(mstr), "FatigueModifiers json idempotent -- same length");
+assert_eq(memeq(mstr, mstr_2, strlen(mstr)), 1, "FatigueModifiers json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -1,12 +1,32 @@
 # vocalization.tcyr -- tests for src/vocalization.cyr.
-# rust-old/src/vocalization.rs had no #[test] blocks; parity surface is the
-# enum discriminants + the CallIntent::modifiers() lookup table (values
-# verbatim from the Rust match arms). serde/Display tests dropped.
+# 2.0.3:rust-old/src/vocalization.rs had no #[test] blocks; parity surface is
+# the enum discriminants + the CallIntent::modifiers() lookup table (values
+# verbatim from the Rust match arms), plus the ONE oracle test that exercises
+# this module directly -- test_all_intents_modify_differently
+# (2.0.3:rust-old/tests/integration.rs:297-320). Display tests dropped, serde
+# restored.
 
 include "src/error.cyr"
 include "src/vocalization.cyr"
 
 alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# mods_same(a, b) -- 1 iff two IntentModifiers agree in ALL FOUR fields.
+# The oracle compares each field with `(x - y).abs() < f32::EPSILON`
+# (2.0.3:rust-old/tests/integration.rs:313-317). Every value in the table is a
+# compile-time constant drawn from the same 14-entry PR_F_* set, so exact i64
+# bit-pattern equality is the stronger substitute: it treats two values as
+# "same" strictly less often than an epsilon window does, which makes the
+# distinctness assertion below harder to pass, not easier.
+#must_use
+fn t_mods_same(a, b) {
+    if (IntentModifiers_pitch_scale(a) != IntentModifiers_pitch_scale(b)) { return 0; }
+    if (IntentModifiers_amplitude_scale(a) != IntentModifiers_amplitude_scale(b)) { return 0; }
+    if (IntentModifiers_duration_scale(a) != IntentModifiers_duration_scale(b)) { return 0; }
+    if (IntentModifiers_urgency(a) != IntentModifiers_urgency(b)) { return 0; }
+    return 1;
+}
 
 # ================================================================
 test_group("enum discriminants (declaration order)");
@@ -18,6 +38,11 @@ assert_eq(PRANI_INTENT_SOCIAL, 6, "Social == 6");
 assert_eq(PRANI_INTENT_COUNT, 7, "7 intents");
 
 # ================================================================
+# The full 7 x 4 modifier table, one group per intent, every value verbatim
+# from the Rust match arms (2.0.3:rust-old/src/vocalization.rs:80-121). All 28
+# entries are pinned so the distinctness property below rests on exact values
+# rather than on the lookup merely disagreeing with itself.
+# ================================================================
 test_group("intent modifiers -- Alarm (1.4/1.5/0.7/0.9)");
 var a = prani_intent_modifiers(PRANI_INTENT_ALARM);
 assert_eq(IntentModifiers_pitch_scale(a), PR_F_1_4, "alarm pitch 1.4");
@@ -26,20 +51,128 @@ assert_eq(IntentModifiers_duration_scale(a), PR_F_0_7, "alarm dur 0.7");
 assert_eq(IntentModifiers_urgency(a), PR_F_0_9, "alarm urgency 0.9");
 
 # ================================================================
+test_group("intent modifiers -- Territorial (0.9/1.3/1.5/0.5)");
+var terr = prani_intent_modifiers(PRANI_INTENT_TERRITORIAL);
+assert_eq(IntentModifiers_pitch_scale(terr), PR_F_0_9, "territorial pitch 0.9");
+assert_eq(IntentModifiers_amplitude_scale(terr), PR_F_1_3, "territorial amp 1.3");
+assert_eq(IntentModifiers_duration_scale(terr), PR_F_1_5, "territorial dur 1.5");
+assert_eq(IntentModifiers_urgency(terr), PR_F_0_5, "territorial urgency 0.5");
+
+# ================================================================
+test_group("intent modifiers -- Mating (1.1/1.0/2.0/0.2)");
+var mating = prani_intent_modifiers(PRANI_INTENT_MATING);
+assert_eq(IntentModifiers_pitch_scale(mating), PR_F_1_1, "mating pitch 1.1");
+assert_eq(IntentModifiers_amplitude_scale(mating), PR_F_1_0, "mating amp 1.0");
+assert_eq(IntentModifiers_duration_scale(mating), PR_F_2_0, "mating dur 2.0");
+assert_eq(IntentModifiers_urgency(mating), PR_F_0_2, "mating urgency 0.2");
+
+# ================================================================
+test_group("intent modifiers -- Distress (1.5/1.4/0.8/1.0)");
+var distress = prani_intent_modifiers(PRANI_INTENT_DISTRESS);
+assert_eq(IntentModifiers_pitch_scale(distress), PR_F_1_5, "distress pitch 1.5");
+assert_eq(IntentModifiers_amplitude_scale(distress), PR_F_1_4, "distress amp 1.4");
+assert_eq(IntentModifiers_duration_scale(distress), PR_F_0_8, "distress dur 0.8");
+assert_eq(IntentModifiers_urgency(distress), PR_F_1_0, "distress urgency 1.0");
+
+# ================================================================
 test_group("intent modifiers -- Idle (1.0/0.5/1.0/0.0)");
 var idle = prani_intent_modifiers(PRANI_INTENT_IDLE);
 assert_eq(IntentModifiers_pitch_scale(idle), PR_F_1_0, "idle pitch 1.0");
 assert_eq(IntentModifiers_amplitude_scale(idle), PR_F_0_5, "idle amp 0.5");
+assert_eq(IntentModifiers_duration_scale(idle), PR_F_1_0, "idle dur 1.0");
 assert_eq(IntentModifiers_urgency(idle), PR_F_0_0, "idle urgency 0.0");
 
 # ================================================================
-test_group("intent modifiers -- Mating longest, Distress most urgent");
-var mating = prani_intent_modifiers(PRANI_INTENT_MATING);
-assert_eq(IntentModifiers_duration_scale(mating), PR_F_2_0, "mating dur 2.0 (longest)");
-var distress = prani_intent_modifiers(PRANI_INTENT_DISTRESS);
-assert_eq(IntentModifiers_urgency(distress), PR_F_1_0, "distress urgency 1.0 (max)");
+test_group("intent modifiers -- Threat (0.7/1.4/1.2/0.7)");
 var threat = prani_intent_modifiers(PRANI_INTENT_THREAT);
-assert_eq(IntentModifiers_pitch_scale(threat), PR_F_0_7, "threat pitch 0.7 (lowest)");
+assert_eq(IntentModifiers_pitch_scale(threat), PR_F_0_7, "threat pitch 0.7");
+assert_eq(IntentModifiers_amplitude_scale(threat), PR_F_1_4, "threat amp 1.4");
+assert_eq(IntentModifiers_duration_scale(threat), PR_F_1_2, "threat dur 1.2");
+assert_eq(IntentModifiers_urgency(threat), PR_F_0_7, "threat urgency 0.7");
+
+# ================================================================
+test_group("intent modifiers -- Social (1.0/0.8/1.0/0.3)");
+var social = prani_intent_modifiers(PRANI_INTENT_SOCIAL);
+assert_eq(IntentModifiers_pitch_scale(social), PR_F_1_0, "social pitch 1.0");
+assert_eq(IntentModifiers_amplitude_scale(social), PR_F_0_8, "social amp 0.8");
+assert_eq(IntentModifiers_duration_scale(social), PR_F_1_0, "social dur 1.0");
+assert_eq(IntentModifiers_urgency(social), PR_F_0_3, "social urgency 0.3");
+
+# ================================================================
+# The prose claims the table makes ("alarm calls are louder and higher-pitched,
+# mating calls are longer", 2.0.3:rust-old/src/vocalization.rs:44-46) are
+# superlatives, so assert them as ORDERINGS against the runner-up rather than
+# re-asserting the constants above. Runner-up per column, from the table:
+#   duration  2.0 mating  > 1.5 territorial
+#   urgency   1.0 distress > 0.9 alarm
+#   pitch     0.7 threat   < 0.9 territorial
+#   amplitude 0.5 idle     < 0.8 social
+# ================================================================
+test_group("intent modifiers -- cross-intent superlatives are real orderings");
+assert_eq(f64_gt(IntentModifiers_duration_scale(mating), IntentModifiers_duration_scale(terr)), 1, "mating is longest: 2.0 > territorial 1.5");
+assert_eq(f64_gt(IntentModifiers_urgency(distress), IntentModifiers_urgency(a)), 1, "distress is most urgent: 1.0 > alarm 0.9");
+assert_eq(f64_lt(IntentModifiers_pitch_scale(threat), IntentModifiers_pitch_scale(terr)), 1, "threat is lowest-pitched: 0.7 < territorial 0.9");
+assert_eq(f64_lt(IntentModifiers_amplitude_scale(idle), IntentModifiers_amplitude_scale(social)), 1, "idle is quietest: 0.5 < social 0.8");
+
+# ================================================================
+# Controls for t_mods_same, WITHOUT which the distinctness loop below is
+# vacuous: a helper that always returned 0 would pass all 21 pairs. The first
+# control proves it can report "same" at all; the next four perturb exactly one
+# field of Alarm's tuple, proving each of the four fields is actually read.
+# ================================================================
+test_group("distinctness helper controls");
+assert_eq(t_mods_same(a, prani_intent_modifiers(PRANI_INTENT_ALARM)), 1, "control: two Alarm lookups compare same");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_5, PR_F_1_5, PR_F_0_7, PR_F_0_9)), 0, "control: pitch_scale-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_4, PR_F_0_7, PR_F_0_9)), 0, "control: amplitude_scale-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_8, PR_F_0_9)), 0, "control: duration_scale-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_7, PR_F_0_8)), 0, "control: urgency-only difference detected");
+
+# ================================================================
+# test_all_intents_modify_differently (2.0.3:rust-old/tests/integration.rs:297-320).
+# The oracle's double loop: every intent paired with every LATER intent, so
+# 7*6/2 = 21 unordered pairs, each asserted to differ in at least one of the
+# four fields. t_mods_same is symmetric, so i < j covers the ordered pairs too.
+# The pair counter is a control on the loop bounds themselves -- a nesting
+# mistake that compared nothing would otherwise leave 21 assertions silently
+# missing from the summary.
+# ================================================================
+test_group("all 7 intents produce pairwise-distinct modifier sets (21 pairs)");
+var n_pairs = 0;
+var ii = 0;
+while (ii < PRANI_INTENT_COUNT) {
+    var jj = ii + 1;
+    while (jj < PRANI_INTENT_COUNT) {
+        var msg = str_builder_new();
+        str_builder_add_cstr(msg, "intents ");
+        str_builder_add_int(msg, ii);
+        str_builder_add_cstr(msg, "/");
+        str_builder_add_int(msg, jj);
+        str_builder_add_cstr(msg, " have different modifiers");
+        var mi = prani_intent_modifiers(ii);
+        var mj = prani_intent_modifiers(jj);
+        assert_eq(t_mods_same(mi, mj), 0, str_data(str_builder_build(msg)));
+        n_pairs = n_pairs + 1;
+        jj = jj + 1;
+    }
+    ii = ii + 1;
+}
+assert_eq(n_pairs, 21, "the loop actually compared all 21 pairs");
+
+# ================================================================
+# Port extension, no oracle counterpart: the Rust enum is #[non_exhaustive] and
+# the Cyrius lookup is total, so an intent outside 0..6 falls through to the
+# neutral tuple (src/vocalization.cyr:127) instead of trapping. Pinned here so
+# the distinctness loop's 0..6 bound is not the whole contract -- and note the
+# neutral tuple is itself distinct from all seven (Idle shares its pitch and
+# duration but has amplitude 0.5, not 1.0).
+# ================================================================
+test_group("intent modifiers -- unknown intent falls back to neutral");
+var unk = prani_intent_modifiers(PRANI_INTENT_COUNT);
+assert_eq(IntentModifiers_pitch_scale(unk), PR_F_1_0, "fallback pitch 1.0");
+assert_eq(IntentModifiers_amplitude_scale(unk), PR_F_1_0, "fallback amp 1.0");
+assert_eq(IntentModifiers_duration_scale(unk), PR_F_1_0, "fallback dur 1.0");
+assert_eq(IntentModifiers_urgency(unk), PR_F_0_0, "fallback urgency 0.0");
+assert_eq(t_mods_same(unk, idle), 0, "neutral fallback is not Idle (amp 1.0 vs 0.5)");
 
 # ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
@@ -67,7 +200,11 @@ assert_eq(f64_lt(ddiff, 0x3EB0C6F7A0B5ED8D), 1, "duration_scale roundtrips (0.7 
 assert_eq(IntentModifiers_urgency(m2), IntentModifiers_urgency(mser), "urgency roundtrips (0.9 exact)");
 var sb2 = str_builder_new();
 IntentModifiers_to_json(m2, sb2);
-assert_eq(memeq(jstr, str_data(str_builder_build(sb2)), strlen(jstr)), 1, "json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var jstr_2 = str_data(str_builder_build(sb2));
+assert_eq(strlen(jstr_2), strlen(jstr), "json idempotent -- same length");
+assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
 
 var rc = assert_summary();
 syscall(60, rc);

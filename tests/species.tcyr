@@ -14,7 +14,32 @@ include "src/vocalization.cyr"
 include "src/sequence.cyr"
 include "src/species.cyr"
 
+# ---- test constants (IEEE-754 hex) -----------------------------------------
+# The bout-template table's non-integer seconds, transcribed from the oracle's
+# own match arms (git show 2.0.3:rust-old/src/species.rs, bout_template). Held
+# here rather than reusing src/species.cyr's PR_DUR_*/PR_TS_* so the expected
+# values are independent of the constants the implementation happens to name.
+var T_0_15 = 0x3fc3333333333333;   # 0.15
+var T_0_2  = 0x3fc999999999999a;   # 0.2
+var T_0_25 = 0x3fd0000000000000;   # 0.25
+var T_0_3  = 0x3fd3333333333333;   # 0.3
+var T_0_5  = 0x3fe0000000000000;   # 0.5
+var T_0_6  = 0x3fe3333333333333;   # 0.6
+var T_0_8  = 0x3fe999999999999a;   # 0.8
+var T_1_5  = 0x3ff8000000000000;   # 1.5
+var T_2_5  = 0x4004000000000000;   # 2.5
+
 alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# t_sp_roundtrip(species) -- species_params -> JSON -> SpeciesParams. Returns the
+# DESERIALIZED params so the caller can assert fields against expected values.
+#must_use
+fn t_sp_roundtrip(species) {
+    var b = str_builder_new();
+    SpeciesParams_to_json(species_params(species), b);
+    return SpeciesParams_from_json_str(str_data(str_builder_build(b)));
+}
 
 # ================================================================
 test_group("enum discriminants (declaration order)");
@@ -83,35 +108,148 @@ test_group("supports_vocalization matrix");
 assert_eq(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HISS), 1, "snake hisses");
 assert_eq(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_GROWL), 1, "snake growls");
 assert_eq(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HOWL), 0, "snake cannot howl");
-# Cricket (stridulatory): stridulates, but cannot roar.
+# Cricket (stridulatory): stridulate + buzz + chirp, but cannot roar.
 assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_STRIDULATE), 1, "cricket stridulates");
+assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_CHIRP), 1, "cricket chirps");
+assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_BUZZ), 1, "cricket buzzes");
 assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_ROAR), 0, "cricket cannot roar");
-# Wolf (laryngeal): howls, but cannot buzz/stridulate.
+# Wolf (laryngeal): howls + growls, but cannot buzz/stridulate.
 assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_HOWL), 1, "wolf howls");
+assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_GROWL), 1, "wolf growls");
 assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_BUZZ), 0, "wolf cannot buzz");
 assert_eq(species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_STRIDULATE), 0, "wolf cannot stridulate");
 # Bee (vibratile): buzz + chirp only.
 assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_BUZZ), 1, "bee buzzes");
+assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_CHIRP), 1, "bee chirps");
 assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_HISS), 0, "bee cannot hiss");
 
 # ================================================================
-test_group("bout_template -- count / vocalization / intent");
+# All five fields of all 13 templates, transcribed from the oracle's match arms
+# (git show 2.0.3:rust-old/src/species.rs). `interval` was previously asserted
+# for no species at all, so a template that dropped or transposed it passed.
+test_group("bout_template -- Wolf / Dog / Lion");
 var wolf_bout = species_bout_template(PRANI_SP_WOLF);
 assert_eq(CallBout_vocalization(wolf_bout), PRANI_VOC_HOWL, "wolf bout howls");
 assert_eq(CallBout_count(wolf_bout), 3, "wolf bout count 3");
 assert_eq(CallBout_call_duration(wolf_bout), f64_from(3), "wolf bout call_duration 3.0");
+assert_eq(CallBout_interval(wolf_bout), f64_from(2), "wolf bout interval 2.0");
 assert_eq(CallBout_intent(wolf_bout), PRANI_INTENT_SOCIAL, "wolf bout social");
 
 var dog_bout = species_bout_template(PRANI_SP_DOG);
 assert_eq(CallBout_vocalization(dog_bout), PRANI_VOC_BARK, "dog bout barks");
 assert_eq(CallBout_count(dog_bout), 5, "dog bout count 5");
-assert_eq(CallBout_call_duration(dog_bout), PR_DUR_0_15, "dog bout call_duration 0.15");
+assert_eq(CallBout_call_duration(dog_bout), T_0_15, "dog bout call_duration 0.15");
+assert_eq(CallBout_interval(dog_bout), T_0_25, "dog bout interval 0.25");
 assert_eq(CallBout_intent(dog_bout), PRANI_INTENT_ALARM, "dog bout alarm");
 
 var lion_bout = species_bout_template(PRANI_SP_LION);
 assert_eq(CallBout_vocalization(lion_bout), PRANI_VOC_ROAR, "lion bout roars");
 assert_eq(CallBout_count(lion_bout), 4, "lion bout count 4");
+assert_eq(CallBout_call_duration(lion_bout), f64_from(2), "lion bout call_duration 2.0");
+assert_eq(CallBout_interval(lion_bout), T_1_5, "lion bout interval 1.5");
 assert_eq(CallBout_intent(lion_bout), PRANI_INTENT_TERRITORIAL, "lion bout territorial");
+
+# ================================================================
+test_group("bout_template -- Cat / Songbird / Crow / Raptor / Snake");
+var cat_bout = species_bout_template(PRANI_SP_CAT);
+assert_eq(CallBout_vocalization(cat_bout), PRANI_VOC_HOWL, "cat bout howls (meow)");
+assert_eq(CallBout_count(cat_bout), 2, "cat bout count 2");
+assert_eq(CallBout_call_duration(cat_bout), T_0_6, "cat bout call_duration 0.6");
+assert_eq(CallBout_interval(cat_bout), f64_from(1), "cat bout interval 1.0");
+assert_eq(CallBout_intent(cat_bout), PRANI_INTENT_SOCIAL, "cat bout social");
+
+var bird_bout = species_bout_template(PRANI_SP_SONGBIRD);
+assert_eq(CallBout_vocalization(bird_bout), PRANI_VOC_TRILL, "songbird bout trills");
+assert_eq(CallBout_count(bird_bout), 6, "songbird bout count 6");
+assert_eq(CallBout_call_duration(bird_bout), T_0_3, "songbird bout call_duration 0.3");
+assert_eq(CallBout_interval(bird_bout), T_0_15, "songbird bout interval 0.15");
+assert_eq(CallBout_intent(bird_bout), PRANI_INTENT_MATING, "songbird bout mating");
+
+var crow_bout = species_bout_template(PRANI_SP_CROW);
+assert_eq(CallBout_vocalization(crow_bout), PRANI_VOC_SCREECH, "crow bout screeches (caw)");
+assert_eq(CallBout_count(crow_bout), 4, "crow bout count 4");
+assert_eq(CallBout_call_duration(crow_bout), T_0_2, "crow bout call_duration 0.2");
+assert_eq(CallBout_interval(crow_bout), T_0_3, "crow bout interval 0.3");
+assert_eq(CallBout_intent(crow_bout), PRANI_INTENT_ALARM, "crow bout alarm");
+
+var raptor_bout = species_bout_template(PRANI_SP_RAPTOR);
+assert_eq(CallBout_vocalization(raptor_bout), PRANI_VOC_SCREECH, "raptor bout screeches");
+assert_eq(CallBout_count(raptor_bout), 2, "raptor bout count 2");
+assert_eq(CallBout_call_duration(raptor_bout), T_0_8, "raptor bout call_duration 0.8");
+assert_eq(CallBout_interval(raptor_bout), T_1_5, "raptor bout interval 1.5");
+assert_eq(CallBout_intent(raptor_bout), PRANI_INTENT_TERRITORIAL, "raptor bout territorial");
+
+var snake_bout = species_bout_template(PRANI_SP_SNAKE);
+assert_eq(CallBout_vocalization(snake_bout), PRANI_VOC_HISS, "snake bout hisses");
+assert_eq(CallBout_count(snake_bout), 1, "snake bout count 1 (single call)");
+assert_eq(CallBout_call_duration(snake_bout), T_1_5, "snake bout call_duration 1.5");
+assert_eq(CallBout_interval(snake_bout), f64_from(0), "snake bout interval 0.0 (no gap)");
+assert_eq(CallBout_intent(snake_bout), PRANI_INTENT_THREAT, "snake bout threat");
+
+# ================================================================
+test_group("bout_template -- Crocodilian / Cricket / Bee / Dragon / Fantasy");
+var croc_bout = species_bout_template(PRANI_SP_CROCODILIAN);
+assert_eq(CallBout_vocalization(croc_bout), PRANI_VOC_RUMBLE, "crocodilian bout rumbles");
+assert_eq(CallBout_count(croc_bout), 3, "crocodilian bout count 3");
+assert_eq(CallBout_call_duration(croc_bout), T_2_5, "crocodilian bout call_duration 2.5");
+assert_eq(CallBout_interval(croc_bout), f64_from(2), "crocodilian bout interval 2.0");
+assert_eq(CallBout_intent(croc_bout), PRANI_INTENT_TERRITORIAL, "crocodilian bout territorial");
+
+var cricket_bout = species_bout_template(PRANI_SP_CRICKET);
+assert_eq(CallBout_vocalization(cricket_bout), PRANI_VOC_STRIDULATE, "cricket bout stridulates");
+assert_eq(CallBout_count(cricket_bout), 8, "cricket bout count 8");
+assert_eq(CallBout_call_duration(cricket_bout), T_0_5, "cricket bout call_duration 0.5");
+assert_eq(CallBout_interval(cricket_bout), T_0_3, "cricket bout interval 0.3");
+assert_eq(CallBout_intent(cricket_bout), PRANI_INTENT_MATING, "cricket bout mating");
+
+var bee_bout = species_bout_template(PRANI_SP_BEE);
+assert_eq(CallBout_vocalization(bee_bout), PRANI_VOC_BUZZ, "bee bout buzzes");
+assert_eq(CallBout_count(bee_bout), 1, "bee bout count 1 (continuous)");
+assert_eq(CallBout_call_duration(bee_bout), f64_from(2), "bee bout call_duration 2.0");
+assert_eq(CallBout_interval(bee_bout), f64_from(0), "bee bout interval 0.0 (no gap)");
+assert_eq(CallBout_intent(bee_bout), PRANI_INTENT_IDLE, "bee bout idle");
+
+var dragon_bout = species_bout_template(PRANI_SP_DRAGON);
+assert_eq(CallBout_vocalization(dragon_bout), PRANI_VOC_ROAR, "dragon bout roars");
+assert_eq(CallBout_count(dragon_bout), 2, "dragon bout count 2");
+assert_eq(CallBout_call_duration(dragon_bout), f64_from(3), "dragon bout call_duration 3.0");
+assert_eq(CallBout_interval(dragon_bout), f64_from(2), "dragon bout interval 2.0");
+assert_eq(CallBout_intent(dragon_bout), PRANI_INTENT_THREAT, "dragon bout threat");
+
+# Fantasy is the fallthrough arm of species_bout_template -- assert it explicitly
+# so a species added ahead of it cannot silently inherit these values.
+var fantasy_bout = species_bout_template(PRANI_SP_FANTASY);
+assert_eq(CallBout_vocalization(fantasy_bout), PRANI_VOC_GROWL, "fantasy bout growls");
+assert_eq(CallBout_count(fantasy_bout), 3, "fantasy bout count 3");
+assert_eq(CallBout_call_duration(fantasy_bout), f64_from(1), "fantasy bout call_duration 1.0");
+assert_eq(CallBout_interval(fantasy_bout), f64_from(1), "fantasy bout interval 1.0");
+assert_eq(CallBout_intent(fantasy_bout), PRANI_INTENT_IDLE, "fantasy bout idle");
+
+# ================================================================
+# The oracle's own invariant (2.0.3:rust-old/tests/integration.rs:638-644):
+# every template's vocalization must be one its species can actually produce.
+# Failures accumulate into a bitmask so a failure names the offending species.
+test_group("bout_template -- every template's vocalization is supported");
+var bt_mask = 0;
+var bt_seen = 0;
+var bt_s = 0;
+var bt_b = 0;
+while (bt_s < PRANI_SP_COUNT) {
+    bt_b = species_bout_template(bt_s);
+    if (species_supports_vocalization(bt_s, CallBout_vocalization(bt_b)) == 0) {
+        bt_mask = bt_mask | (1 << bt_s);
+    }
+    bt_seen = bt_seen + 1;
+    bt_s = bt_s + 1;
+}
+assert_eq(bt_seen, 13, "the sweep visited all 13 species");
+assert_eq(bt_mask, 0, "no bout template names a vocalization its species rejects");
+# control: the same predicate, fed a pair the matrix rejects, DOES set its bit.
+var bt_ctrl = 0;
+if (species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_ROAR) == 0) {
+    bt_ctrl = bt_ctrl | (1 << PRANI_SP_CRICKET);
+}
+assert_eq(bt_ctrl, 512, "control: an unsupported pair sets its bit (cricket = 1 << 9)");
 
 # ================================================================
 # serde roundtrip (ports the Rust #[derive(Serialize, Deserialize)] on
@@ -130,7 +268,30 @@ assert_eq(SpeciesParams_spectral_tilt(sp2), SpeciesParams_spectral_tilt(sp), "sp
 assert_eq(SpeciesParams_resonance_seed(sp2), SpeciesParams_resonance_seed(sp), "resonance_seed roundtrips");
 var sb2 = str_builder_new();
 SpeciesParams_to_json(sp2, sb2);
-assert_eq(memeq(jstr, str_data(str_builder_build(sb2)), strlen(jstr)), 1, "json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var jstr_2 = str_data(str_builder_build(sb2));
+assert_eq(strlen(jstr_2), strlen(jstr), "json idempotent -- same length");
+assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
+
+# ================================================================
+# One species per apparatus, asserted against the expected NON-ZERO constant.
+# The Wolf case above cannot detect a dropped `apparatus` key: LARYNGEAL is 0 and
+# bayan's accessors return 0 for a missing key (ADR-0002), so a derive that
+# omitted the field entirely would still pass it. These four are what actually
+# prove the field survives the round trip. Ports the oracle's five-variant sweep
+# (git show 2.0.3:rust-old/tests/integration.rs, test_serde_roundtrip_vocal_apparatus).
+test_group("SpeciesParams serde roundtrip -- one species per apparatus");
+var rt_bird = t_sp_roundtrip(PRANI_SP_SONGBIRD);
+assert_eq(SpeciesParams_apparatus(rt_bird), PRANI_APP_SYRINGEAL, "songbird apparatus roundtrips (1 syringeal)");
+assert_eq(SpeciesParams_f0_default(rt_bird), f64_from(3000), "songbird f0_default roundtrips (3000)");
+assert_eq(SpeciesParams_resonance_seed(rt_bird), PR_SEED_SONGBIRD, "songbird resonance_seed roundtrips");
+assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_CRICKET)), PRANI_APP_STRIDULATORY, "cricket apparatus roundtrips (2 stridulatory)");
+assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_BEE)), PRANI_APP_VIBRATILE, "bee apparatus roundtrips (3 vibratile)");
+assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_SNAKE)), PRANI_APP_NOISE_ONLY, "snake apparatus roundtrips (4 noise-only)");
+# control: an object with no apparatus key reads back 0 -- the exact reason the
+# five assertions above use species whose apparatus discriminant is not 0.
+assert_eq(SpeciesParams_apparatus(SpeciesParams_from_json_str("{}")), 0, "control: absent apparatus key reads 0");
 
 var rc = assert_summary();
 syscall(60, rc);

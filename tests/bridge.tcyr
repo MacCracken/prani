@@ -33,6 +33,24 @@ assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x400e000000000000),
 # mass 1 kg: cbrt(1/30) ~ 0.32183 (positive branch, above 0.1 floor).
 assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x3ff0000000000000), 0x3fd498dbfef5ae9b)), TOL), 1, "mass 1.0 kg -> ~0.32183");
 assert_eq(f64_gt(bridge_size_from_body_mass(0x3ff0000000000000), PR_B_0_1), 1, "mass 1 kg > 0.1 floor");
+# Oracle probe points (rust-old/tests/integration.rs:904-915 @ 2.0.3): a 0.03 kg
+# mouse must land below 0.2, a 5000 kg elephant above 4.0. Both sit OUTSIDE the
+# 1-240 kg band above, so they pin the sub-kg and multi-tonne ends of the pow
+# rather than extrapolating from it. PR_B_0_03 / PR_B_0_2 are src/bridge.cyr
+# constants (0.03, 0.2) reused here as a mass and a bound.
+# mouse 0.03 kg: 0.03/30 = 0.001 = 0.1^3, so the cbrt is 0.1 exactly.
+assert_eq(f64_lt(bridge_size_from_body_mass(PR_B_0_03), PR_B_0_2), 1, "mouse 0.03 kg -> below 0.2");
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(PR_B_0_03), PR_B_0_1)), TOL), 1, "mouse 0.03 kg -> cbrt(0.001) = 0.1");
+# elephant 5000 kg: 5000/30 = 166.666..., cbrt = 5.5032120814910444731 to 40
+# digits (hand-checked, not read back from the port). No upper clamp on this path.
+assert_eq(f64_gt(bridge_size_from_body_mass(f64_from(5000)), f64_from(4)), 1, "elephant 5000 kg -> above 4.0");
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(f64_from(5000)), 0x4016034a0723d311)), TOL), 1, "elephant 5000 kg -> ~5.5032120815");
+# The mouse result COLLIDES numerically with the non-positive floor (both 0.1), so
+# on its own it cannot separate "computed the cbrt" from "fell through to the
+# floor". 0.00003 kg is positive and 0.00003/30 = 1e-6 -> cbrt 0.01, an order of
+# magnitude BELOW the floor: only the allometric branch can produce it.
+assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x3eff75104d551d69), 0x3f847ae147ae147b)), TOL), 1, "mass 0.00003 kg -> cbrt(1e-6) = 0.01");
+assert_eq(f64_lt(bridge_size_from_body_mass(0x3eff75104d551d69), PR_B_0_1), 1, "positive sub-gram mass not clamped to the 0.1 floor");
 
 # ================================================================
 test_group("f0_offset_from_temperature -- (temp-baseline)*0.03*100");

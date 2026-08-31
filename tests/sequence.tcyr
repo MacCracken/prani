@@ -20,7 +20,44 @@ include "src/bridge.cyr"
 include "src/tract.cyr"
 include "src/voice.cyr"
 
+# ---- test constants (IEEE-754 hex) -----------------------------------------
+# The oracle's own fixtures (rust-old/tests/integration.rs, tag 2.0.3) all run
+# at 44100 Hz; the older groups below run at 8000 Hz and keep their own
+# CALL_D (0.05) / GAP_I (0.1), which the new groups reuse BY VALUE, not by role.
+var T_SR_44100 = 0x40e5888000000000;   # 44100.0
+var T_0_2      = 0x3fc999999999999a;   # 0.2
+var T_0_3      = 0x3fd3333333333333;   # 0.3
+var T_0_8      = 0x3fe999999999999a;   # 0.8
+var T_1_2      = 0x3ff3333333333333;   # 1.2
+var T_1_4      = 0x3ff6666666666666;   # 1.4
+var T_500      = 0x407f400000000000;   # 500.0 = wolf f0_default 400 / size 0.8
+
 alloc_init();
+
+# ---- helpers ---------------------------------------------------------------
+# t_all_finite(v) -- 1 iff every element passes prani_is_finite.
+#must_use
+fn t_all_finite(v) {
+    var n = vec_len(v);
+    var k = 0;
+    while (k < n) {
+        if (prani_is_finite(vec_get(v, k)) == 0) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# t_any_nonzero(v, lo, hi) -- 1 iff some sample in [lo, hi) is not +0.0. Used as
+# a silence control: an all-zero buffer passes every length/finiteness assert.
+#must_use
+fn t_any_nonzero(v, lo, hi) {
+    var k = lo;
+    while (k < hi) {
+        if (vec_get(v, k) != 0) { return 1; }
+        k = k + 1;
+    }
+    return 0;
+}
 
 # ================================================================
 test_group("CallElement construction + accessors");
@@ -76,6 +113,28 @@ assert_eq(vec_len(bout_buf2), vec_len(bout_buf), "deterministic length");
 assert_eq(vec_get(bout_buf2, 200), vec_get(bout_buf, 200), "deterministic sample[200]");
 
 # ================================================================
+# The oracle's own bout -- rust-old/tests/integration.rs:495-517 (tag 2.0.3):
+# Dog / BARK / Alarm / count 3 at 44100 Hz. This is the only place Dog is
+# synthesized and the only place BARK is, so it is what covers the BARK pitch
+# contour and the Bark/Yelp/Chirp envelope arm.
+# Alarm's duration_scale is 0.7, and 0.2*0.7 is 0.13999999999999999 in f64, so
+# 0.2*0.7*44100 == 6173.999999999999 and f64_to TRUNCATES it to 6173 (not 6174).
+# Gaps are f64_to(0.3*44100) == 13230 at the two interior boundaries:
+#   total = 3*6173 + 2*13230 = 18519 + 26460 = 44979.
+test_group("CallBout::synthesize -- oracle Dog bark alarm bout @ 44100");
+var dogv = crvoice_new(PRANI_SP_DOG);
+var dbout = sequence_call_bout_new(PRANI_VOC_BARK, 3, T_0_2, T_0_3, PRANI_INTENT_ALARM);
+var dbuf = sequence_call_bout_synthesize(dbout, dogv, T_SR_44100);
+assert_eq(prani_is_err(dbuf), 0, "dog bark alarm bout non-error");
+assert_eq(vec_len(dbuf), 44979, "3 alarm barks (6173) + 2 gaps (13230)");
+assert_eq(t_all_finite(dbuf), 1, "all dog bark bout samples finite");
+# Controls: the first bark must be audible, and the first interval must be true
+# silence at exactly the computed offset -- together these pin the layout, not
+# just the total length (an all-zero buffer of the right size would fail).
+assert_eq(t_any_nonzero(dbuf, 0, 6173), 1, "first bark is not silence");
+assert_eq(t_any_nonzero(dbuf, 6173, 19403), 0, "first interval is silence");
+
+# ================================================================
 test_group("CallBout::synthesize -- error propagates (Snake cannot howl)");
 var snake = crvoice_new(PRANI_SP_SNAKE);
 var sbout = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
@@ -95,6 +154,35 @@ var wolf3 = crvoice_new(PRANI_SP_WOLF);
 var phrase_buf = sequence_call_phrase_synthesize(phrase, wolf3, SR);
 assert_eq(prani_is_err(phrase_buf), 0, "phrase synth not an error");
 assert_eq(vec_len(phrase_buf), 1600, "phrase length = (400+800)+(400+0)");
+assert_eq(t_all_finite(phrase_buf), 1, "all phrase samples finite");
+
+# ================================================================
+# The oracle's own phrase -- rust-old/tests/integration.rs:519-546 (tag 2.0.3):
+# Songbird under Mating intent (duration_scale 2.0) at 44100 Hz, three elements
+#   Chirp 0.1s gap 0.05s | Trill 0.3s gap 0.1s | Chirp 0.1s gap 0.0s
+# so unlike the homogeneous phrase above the vocalization, duration and gap all
+# vary per element. This is the only CHIRP synthesis and the only Mating-intent
+# synthesis on a sequence path.
+#   calls f64_to(dur*2.0*44100): 0.1 -> 8820, 0.3 -> 26460, 0.1 -> 8820
+#   gaps  f64_to(gap*44100)    : 0.05 -> 2205, 0.1 -> 4410, 0.0 -> 0
+#   total = 8820 + 2205 + 26460 + 4410 + 8820 = 50715.
+test_group("CallPhrase::synthesize -- oracle Songbird chirp/trill/chirp @ 44100");
+var bvoice = crvoice_new(PRANI_SP_SONGBIRD);
+var bels = vec_new();
+vec_push(bels, sequence_call_element_new(PRANI_VOC_CHIRP, GAP_I, CALL_D));
+vec_push(bels, sequence_call_element_new(PRANI_VOC_TRILL, T_0_3, GAP_I));
+vec_push(bels, sequence_call_element_new(PRANI_VOC_CHIRP, GAP_I, f64_from(0)));
+var bphrase = sequence_call_phrase_new(bels, PRANI_INTENT_MATING);
+var bbuf = sequence_call_phrase_synthesize(bphrase, bvoice, T_SR_44100);
+assert_eq(prani_is_err(bbuf), 0, "songbird chirp/trill/chirp phrase non-error");
+assert_eq(vec_len(bbuf), 50715, "8820 + 2205 + 26460 + 4410 + 8820 (Mating x2)");
+assert_eq(t_all_finite(bbuf), 1, "all songbird phrase samples finite");
+# Controls: the first chirp is audible, its 2205-sample gap is true silence, and
+# the trill after that gap is audible again -- so the per-element offsets are
+# pinned, not merely the sum.
+assert_eq(t_any_nonzero(bbuf, 0, 8820), 1, "first chirp is not silence");
+assert_eq(t_any_nonzero(bbuf, 8820, 11025), 0, "gap after first chirp is silence");
+assert_eq(t_any_nonzero(bbuf, 11025, 37485), 1, "trill is not silence");
 
 # ================================================================
 # Chorus: 2 wolves, duration 0.05s, timing_spread 0.05s.
@@ -120,6 +208,34 @@ var empty_chorus = sequence_synthesize_chorus(vec_new(), PRANI_VOC_HOWL, PRANI_I
 assert_eq(vec_len(empty_chorus), 0, "empty voices -> empty chorus");
 
 # ================================================================
+# The oracle's own chorus -- rust-old/tests/integration.rs:548-565 (tag 2.0.3):
+# FOUR wolves at sizes 0.8 / 1.0 / 1.2 / 1.4, duration 1.0 s, timing_spread
+# 0.2 s, at 44100 Hz. The 2-voice chorus above mixes two bit-identical default
+# wolves (effectively 2x one signal); this one is the only heterogeneous mix, and
+# the only one to reach the voice_count*7919 = 4*7919 seed and the 1/sqrt(4)
+# normalization (src/sequence.cyr:214,241).
+#   base = f64_to(1.0*44100) = 44100; max_offset = f64_to(0.2*44100) = 8820;
+#   total_len = 44100 + 2*8820 = 61740.
+test_group("synthesize_chorus -- oracle 4 size-varied wolves @ 44100");
+var qvoices = vec_new();
+vec_push(qvoices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_0_8));
+vec_push(qvoices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), F64_ONE));
+vec_push(qvoices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_1_2));
+vec_push(qvoices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_1_4));
+# Control that the four voices really are distinct: effective_f0 is
+# f0_default/size_scale clamped to [150, 1200], so the 0.8 wolf sits at exactly
+# 400/0.8 = 500 Hz and must be pitched above the 1.4 wolf (400/1.4 = 285.7).
+var qf0_small = crvoice_effective_f0(vec_get(qvoices, 0));
+var qf0_large = crvoice_effective_f0(vec_get(qvoices, 3));
+assert_eq(qf0_small, T_500, "size 0.8 wolf effective_f0 == 500");
+assert_eq(f64_gt(qf0_small, qf0_large), 1, "size 0.8 wolf pitched above size 1.4");
+var qchorus = sequence_synthesize_chorus(qvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR_44100, F64_ONE, T_0_2);
+assert_eq(prani_is_err(qchorus), 0, "4-voice chorus not an error");
+assert_eq(vec_len(qchorus), 61740, "4-voice chorus length = 44100 + 2*8820");
+assert_eq(t_all_finite(qchorus), 1, "all 4-voice chorus samples finite");
+assert_eq(t_any_nonzero(qchorus, 0, 61740), 1, "4-voice chorus is not silence");
+
+# ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
 # CallElement / CallBout / CallPhrase). CallPhrase's element vec is hand-rolled.
 test_group("sequence serde roundtrip");
@@ -140,6 +256,28 @@ assert_eq(CallBout_count(bo2), 3, "bout count roundtrips");
 assert_eq(CallBout_call_duration(bo2), 0x4008000000000000, "bout call_duration roundtrips");
 assert_eq(CallBout_intent(bo2), PRANI_INTENT_SOCIAL, "bout intent roundtrips");
 
+# The oracle's own bout -- rust-old/tests/integration.rs:594-608 (tag 2.0.3).
+# PRANI_VOC_HOWL above has discriminant 0, and bayan's int accessor yields 0 for
+# a missing key, so that assertion survives a derive that dropped the
+# "vocalization" key entirely. BARK's discriminant is 1, so this one does not.
+# `interval` is round-tripped here too (asserted nowhere else).
+var about = sequence_call_bout_new(PRANI_VOC_BARK, 3, T_0_2, T_0_3, PRANI_INTENT_ALARM);
+var asb = str_builder_new();
+CallBout_to_json(about, asb);
+var ajson = str_data(str_builder_build(asb));
+var abo2 = CallBout_from_json_str(ajson);
+assert_eq(CallBout_vocalization(abo2), PRANI_VOC_BARK, "alarm bout voc roundtrips (nonzero)");
+assert_eq(CallBout_count(abo2), 3, "alarm bout count roundtrips");
+assert_eq(CallBout_call_duration(abo2), T_0_2, "alarm bout call_duration roundtrips");
+assert_eq(CallBout_interval(abo2), T_0_3, "alarm bout interval roundtrips");
+var asb2 = str_builder_new();
+CallBout_to_json(abo2, asb2);
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var ajson_2 = str_data(str_builder_build(asb2));
+assert_eq(strlen(ajson_2), strlen(ajson), "bout json idempotent -- same length");
+assert_eq(memeq(ajson, ajson_2, strlen(ajson)), 1, "bout json idempotent");
+
 var pelems2 = vec_new();
 vec_push(pelems2, sequence_call_element_new(PRANI_VOC_CHIRP, F64_HALF, f64_from(0)));
 vec_push(pelems2, sequence_call_element_new(PRANI_VOC_TRILL, F64_ONE, F64_HALF));
@@ -154,7 +292,41 @@ assert_eq(CallElement_vocalization(vec_get(CallPhrase_elements(ph2), 1)), PRANI_
 assert_eq(CallElement_gap(vec_get(CallPhrase_elements(ph2), 1)), F64_HALF, "phrase elem[1] gap roundtrips");
 var psb2 = str_builder_new();
 sequence_call_phrase_to_json(ph2, psb2);
-assert_eq(memeq(pjson, str_data(str_builder_build(psb2)), strlen(pjson)), 1, "phrase json idempotent");
+# length first: memeq over strlen() is a PREFIX compare, so a re-serialization
+# that APPENDED a field would pass it. The oracle compared whole strings.
+var pjson_2 = str_data(str_builder_build(psb2));
+assert_eq(strlen(pjson_2), strlen(pjson), "phrase json idempotent -- same length");
+assert_eq(memeq(pjson, pjson_2, strlen(pjson)), 1, "phrase json idempotent");
+
+# ================================================================
+# rust-old/tests/integration.rs:619-651 (tag 2.0.3) -- SYNTHESIS half. Every
+# species' own bout_template must render at 44100 Hz, non-empty and all finite.
+# Non-error also carries the oracle's supports_vocalization invariant for free:
+# crvoice_vocalize_with_intent returns PRANI_ERR_INVALID_VOCALIZATION for a pair
+# the species cannot produce (src/voice.cyr:780-782), so a template naming a
+# vocalization its own species does not support fails the first assert below.
+# The template FIELD VALUES are asserted in tests/species.tcyr, not here.
+# Failures accumulate into a bitmask of species indices, so a failure names the
+# species instead of just the first one hit.
+test_group("bout_template -- all 13 species synthesize finite @ 44100");
+var bt_err_mask = 0;
+var bt_empty_mask = 0;
+var bt_inf_mask = 0;
+var sp = 0;
+while (sp < PRANI_SP_COUNT) {
+    var tmpl = species_bout_template(sp);
+    var tbuf = sequence_call_bout_synthesize(tmpl, crvoice_new(sp), T_SR_44100);
+    if (prani_is_err(tbuf) == 1) {
+        bt_err_mask = bt_err_mask | (1 << sp);
+    } else {
+        if (vec_len(tbuf) == 0) { bt_empty_mask = bt_empty_mask | (1 << sp); }
+        if (t_all_finite(tbuf) == 0) { bt_inf_mask = bt_inf_mask | (1 << sp); }
+    }
+    sp = sp + 1;
+}
+assert_eq(bt_err_mask, 0, "every bout_template synthesizes (bitmask of failed species)");
+assert_eq(bt_empty_mask, 0, "every bout_template is non-empty (bitmask)");
+assert_eq(bt_inf_mask, 0, "every bout_template is all-finite (bitmask)");
 
 var rc = assert_summary();
 syscall(60, rc);
