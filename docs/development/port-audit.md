@@ -95,7 +95,7 @@ tolerance. stdlib (assert/vec/math/alloc) auto-resolves — do not include it.
 
 ## Toolchain & commands
 
-- cycc pin: **6.3.45** (`cyrius.cyml [package].cyrius`).
+- cycc pin: **6.5.36** (`cyrius.cyml [package].cyrius`).
 - Deps: svara/naad/hisab/goonj/sakshi as `dist/*.cyr` git+tag bundles, vendored in
   `lib/`. Do not modify `lib/`.
 - **Concurrency**: `cyrius test`/`build`/`deps` re-resolve deps and race on
@@ -157,9 +157,10 @@ COMPLETE — 16/16 modules, zero deferrals. 717 parity assertions green across 1
 suites** (all oracle behaviour ported — including serde roundtrips + logging;
 only Display-string tests dropped). `dist/prani.cyr` assembled (collision-audited
 to zero across all fns/structs/consts), `src/main.cyr` smoke links + runs the
-bundle, hot-path benchmarks captured. VERSION 1.1.0 → 2.0.0 (port) → **2.0.1**
+bundle, hot-path benchmarks captured. VERSION 1.1.0 → 2.0.0 (port) → 2.0.1
 (logging via sakshi + serde via `#derive(Serialize)`+bayan, lossless i64 bit
-patterns).
+patterns) → **2.0.2** (cyrius 6.5.36 + current dependency tags; two breaking
+upstream renames absorbed, all 717 assertions unchanged).
 
 ### Parity method
 

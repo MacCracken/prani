@@ -86,7 +86,7 @@ fn sequence_call_bout_synthesize(self, voice, sample_rate) {
     var i = 0;
     while (i < count) {
         var call = crvoice_vocalize_with_intent(voice, CallBout_vocalization(self),
-            CallBout_intent(self), sample_rate, CallBout_call_duration(self));
+          CallBout_intent(self), sample_rate, CallBout_call_duration(self));
         if (prani_is_err(call) == 1) { return call; }
         var m = vec_len(call);
         var k = 0;
@@ -139,7 +139,7 @@ fn sequence_call_phrase_to_json(self, sb) {
 }
 
 fn sequence_call_phrase_from_json_str(json) {
-    var root = bayan_json_v_parse_str(json, strlen(json));
+    var root = bayan_json_v_parse_buf(json, strlen(json));
     var intent = bayan_json_v_int(bayan_json_v_obj_get(root, "intent"));
     var elems_val = bayan_json_v_obj_get(root, "elements");
     var n = bayan_json_v_arr_len(elems_val);
@@ -169,7 +169,7 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
     while (i < n) {
         var element = vec_get(elements, i);
         var call = crvoice_vocalize_with_intent(voice, CallElement_vocalization(element),
-            CallPhrase_intent(self), sample_rate, CallElement_duration(element));
+          CallPhrase_intent(self), sample_rate, CallElement_duration(element));
         if (prani_is_err(call) == 1) { return call; }
         var m = vec_len(call);
         var k = 0;

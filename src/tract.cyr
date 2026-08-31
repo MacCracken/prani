@@ -10,7 +10,7 @@
 #   Vibratile             : continuous wing-beat modulation -- bees/flies
 #
 # Requires (from the build/test unit, in dependency order): stdlib alloc/vec/
-# math, hisab, goonj, naad (filter_biquad_new/process_sample, FILTER_BANDPASS),
+# math, hisab, goonj, naad (filter_biquad_new/process_sample, NAAD_FILTER_BANDPASS),
 # svara (svara_tract_*/svara_glottal_*/svara_vowel_target_with_bandwidths,
 # svara_is_err), error.cyr, rng.cyr, dsp.cyr, species.cyr. Module files carry
 # no `include` lines -- the entry orders them.
@@ -110,8 +110,8 @@ fn crtract_new(params, sample_rate) {
 
     # F4/F5 estimated at 1.3x/1.5x F3; B4/B5 at 1.2x/1.4x B3.
     var target = svara_vowel_target_with_bandwidths(
-        f0, f1, f2, f64_mul(f2, PR_TR_1_3), f64_mul(f2, PR_TR_1_5),
-        b0, b1, b2, f64_mul(b2, PR_TR_1_2), f64_mul(b2, PR_TR_1_4));
+      f0, f1, f2, f64_mul(f2, PR_TR_1_3), f64_mul(f2, PR_TR_1_5),
+      b0, b1, b2, f64_mul(b2, PR_TR_1_2), f64_mul(b2, PR_TR_1_4));
     # Rust: `if let Err(e) = ... { warn!(...) }` then continue. Ports the
     # tracing::warn! to sakshi (prani_log_warn), preserving warn-then-continue.
     var _fmt_rc = svara_tract_set_formants_from_target(tract, target);
@@ -122,7 +122,7 @@ fn crtract_new(params, sample_rate) {
     # naad-backend: pre-build a bandpass for NoiseOnly (snakes). Error -> None(0).
     var noise_filter = 0;
     if (SpeciesParams_apparatus(params) == PRANI_APP_NOISE_ONLY) {
-        var nf = filter_biquad_new(FILTER_BANDPASS, sample_rate, f0, f64_from(2));
+        var nf = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, f0, f64_from(2));
         if (prani_is_err(nf) == 0) { noise_filter = nf; }
     }
 
@@ -175,7 +175,7 @@ fn crtract_to_json(self, sb) {
 }
 
 fn crtract_from_json_str(json) {
-    var root = bayan_json_v_parse_str(json, strlen(json));
+    var root = bayan_json_v_parse_buf(json, strlen(json));
     var params = species_params_from_node(bayan_json_v_obj_get(root, "params"));
     var sample_rate = bayan_json_v_int(bayan_json_v_obj_get(root, "sample_rate"));
     # rebuild the svara tract + naad filter + fresh rng/dc_blocker from params
@@ -224,7 +224,7 @@ fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
         while (i < num_samples) {
             var glottal_sample = svara_glottal_next_sample(glottal);
             var sub = f64_mul(f64_sin(f64_mul(F64_TAU, CreatureTract_phase(self))),
-                SynthesisOptions_subharmonic_amp(options));
+              SynthesisOptions_subharmonic_amp(options));
             var ph = f64_add(CreatureTract_phase(self), phase_inc);
             if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
             CreatureTract_set_phase(self, ph);
@@ -281,8 +281,8 @@ fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
             var noise = f64_mul(prani_rng_next_f32(rng), breathiness);
             # excitation = (tone1+tone2)*0.5*(1-breathiness) + noise
             var excitation = f64_add(
-                f64_mul(f64_mul(f64_add(tone1, tone2), PR_TR_0_5), f64_sub(F64_ONE, breathiness)),
-                noise);
+              f64_mul(f64_mul(f64_add(tone1, tone2), PR_TR_0_5), f64_sub(F64_ONE, breathiness)),
+              noise);
             vec_push(output, svara_tract_process_sample(tract, excitation));
             i = i + 1;
         }
@@ -365,7 +365,7 @@ fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
             var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
             # modulator = 0.5 + 0.5*sin(TAU*mod_rate*t)
             var modulator = f64_add(PR_TR_0_5,
-                f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
+              f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
             vec_push(output, f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25));
             i = i + 1;
         }
@@ -387,7 +387,7 @@ fn crtract_synthesize_vibratile(self, f0, num_samples) {
         var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
         var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
         var modulator = f64_add(PR_TR_0_5,
-            f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
+          f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
         vec_push(output, f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25));
         i = i + 1;
     }
@@ -488,8 +488,8 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
     var bb2 = f64_add(b2, f64_mul(f64_sub(vec_get(target_bw, 2), b2), bl));
 
     var vowel = svara_vowel_target_with_bandwidths(
-        bf0, bf1, bf2, f64_mul(bf2, PR_TR_1_3), f64_mul(bf2, PR_TR_1_5),
-        bb0, bb1, bb2, f64_mul(bb2, PR_TR_1_2), f64_mul(bb2, PR_TR_1_4));
+      bf0, bf1, bf2, f64_mul(bf2, PR_TR_1_3), f64_mul(bf2, PR_TR_1_5),
+      bb0, bb1, bb2, f64_mul(bb2, PR_TR_1_2), f64_mul(bb2, PR_TR_1_4));
     # Rust used `.map_err(Into::into)` -- propagate svara error through prani.
     return prani_from_svara(svara_tract_set_formants_from_target(CreatureTract_tract(self), vowel));
 }

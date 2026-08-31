@@ -76,3 +76,107 @@ include "lib/syscalls_aarch64_linux.cyr"
 #ifdef CYRIUS_TARGET_AGNOS
 include "lib/syscalls_x86_64_agnos.cyr"
 #endif
+
+# ── signal_ignore (v6.4.51) ──
+# Set a signal's disposition to SIG_IGN (ignore). Primary use: SIGPIPE — so a
+# write to a peer that closed mid-response returns EPIPE instead of TERMINATING
+# the process. Without it, any server built on `sock_send` (a flagsless
+# `sys_write`) is one disconnected client away from an unauthenticated SIGPIPE
+# DoS. See issue 2026-07-11-sandhi-signal-ignore-stdlib-gap.md.
+# Portable: Linux rt_sigaction (x86 #13 / aarch64 #134), macOS BSD sigaction
+# (the Mach-O ESYSXLAT renumbers 13/134 → BSD 46), Windows/agnos no-op (no
+# SIGPIPE there). The 32-byte {sa_handler=SIG_IGN, 0,0,0} struct is valid for
+# BOTH the Linux rt_sigaction and BSD sigaction ABIs (macOS reads sa_handler
+# from the first 8 bytes; Linux's trailing sigsetsize arg is ignored on BSD).
+# Returns the syscall result (0 on success).
+enum Signal { SIGINT = 2; SIGQUIT = 3; SIGKILL = 9; SIGPIPE = 13; SIGTERM = 15; }
+# ONE definition; exactly one target branch survives the preprocessor per compile
+# (Win/agnos have no SIGPIPE → no-op; Linux uses the 4-arg rt_sigaction incl.
+# sigsetsize=8; macOS uses the 3-arg BSD sigaction, the Mach-O ESYSXLAT renumbering
+# 13/134 → 46). Kept as a single fn so the #ifdef-blind static checker doesn't read
+# it as a duplicate definition.
+fn signal_ignore(signum): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    var act[32];
+    var ap = &act;
+    var i = 0;
+    while (i < 32) { store8(ap + i, 0); i += 1; }
+    store64(ap, 1);   # sa_handler = SIG_IGN (1)
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(13, signum, ap, 0, 8);    # rt_sigaction(sig, act, oldact=0, sigsetsize=8)
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(134, signum, ap, 0, 8);   # rt_sigaction (aarch64 #134)
+    #endif
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    var mact[32];
+    var mp = &mact;
+    var mi = 0;
+    while (mi < 32) { store8(mp + mi, 0); mi += 1; }
+    store64(mp, 1);   # sa_handler = SIG_IGN (1)
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(13, signum, mp, 0);       # ESYSXLAT 13  → BSD sigaction 46 (3-arg)
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(134, signum, mp, 0);      # ESYSXLAT 134 → BSD sigaction 46 (3-arg)
+    #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 0;   # Windows has no SIGPIPE
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;   # agnos ring-3: no signal delivery yet
+    #endif
+}
+
+# Set a signal's disposition back to SIG_DFL — the counterpart to signal_ignore.
+#
+# WHY THIS IS NOT OPTIONAL ALONGSIDE signal_ignore: SIG_IGN is INHERITED across
+# execve (a handler is reset, an ignore is not). So a process that ignores a
+# signal and then fork+execve's a child gives that child a disposition its own
+# code never chose, permanently, with no way to undo it. Call this in the child
+# between fork and execve — which is exactly what std::process::Command does for
+# SIGPIPE.
+#
+# The shape is signal_ignore's, one word different: sa_handler = 0 (SIG_DFL)
+# rather than 1 (SIG_IGN). Everything argued in that comment about the 32-byte
+# struct and the per-target routing applies unchanged.
+# Filed by agnosai (sandbox tools inherited an unwanted SIGPIPE ignore, so a
+# tool running `cmd | head` saw EPIPE where it would otherwise die on the
+# signal — silent divergence between inside and outside the sandbox).
+# CHANGELOG [6.5.7]
+fn signal_default(signum): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    var act[32];
+    var ap = &act;
+    var i = 0;
+    while (i < 32) { store8(ap + i, 0); i += 1; }
+    store64(ap, 0);   # sa_handler = SIG_DFL (0)
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(13, signum, ap, 0, 8);    # rt_sigaction(sig, act, oldact=0, sigsetsize=8)
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(134, signum, ap, 0, 8);   # rt_sigaction (aarch64 #134)
+    #endif
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    var mact[32];
+    var mp = &mact;
+    var mi = 0;
+    while (mi < 32) { store8(mp + mi, 0); mi += 1; }
+    store64(mp, 0);   # sa_handler = SIG_DFL (0)
+    #ifdef CYRIUS_ARCH_X86
+    return syscall(13, signum, mp, 0);       # ESYSXLAT 13  → BSD sigaction 46 (3-arg)
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    return syscall(134, signum, mp, 0);      # ESYSXLAT 134 → BSD sigaction 46 (3-arg)
+    #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 0;   # Windows has no SIGPIPE
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;   # agnos ring-3: no signal delivery yet
+    #endif
+}

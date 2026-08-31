@@ -59,7 +59,7 @@
 #   crypto banking, patra), call `thread_local_use_foreign_tls()` once at
 #   startup so cyrius does NOT arch_prctl-clobber the host's %fs (which would
 #   wipe the C stack canary). See lib/thread_local.cyr + the v6.3.26 gate
-#   `tests/ffi_stack_protected_extern_c.sh`.
+#   `tests/gates/platform/ffi_stack_protected_extern_c.sh`.
 #
 # Limitations — when NOT to use fncallN directly (use a C shim instead):
 #   * struct-by-value args — SysV/AAPCS64 aggregate classification

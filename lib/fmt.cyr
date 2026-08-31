@@ -7,9 +7,20 @@ fn fmt_int(n: i64): i64 {
     var buf[24];
     var bi = 23;
     var neg: i64 = 0;
-    if (n < 0) { neg = 1; n = 0 - n; }
+    # `n = 0 - n` is a NO-OP at i64::MIN (two's-complement abs overflows back to
+    # itself), so the old code left n negative, skipped both the `n == 0` guard and a
+    # `n > 0` loop, and emitted the sign byte and NOTHING ELSE. Keep the sign FLAG but
+    # never negate n; extract digits from the negative value and negate each digit.
+    # `!= 0` is the load-bearing half — exactly the fix fmt_hex below already carries
+    # for the same reason (CHANGELOG [6.4.69]); the decimal siblings were never brought
+    # along. `/` and `%` truncate toward zero on x86, aarch64 AND cx (verified).
+    if (n < 0) { neg = 1; }
     if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
-    while (n > 0) { store8(&buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    while (n != 0) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+    }
     if (neg == 1) { store8(&buf + bi, 45); bi = bi - 1; }
     syscall(1, 1, &buf + bi + 1, 23 - bi);
     return 0;
@@ -22,9 +33,20 @@ fn fmt_int_fd(fd, n: i64): i64 {
     var buf[24];
     var bi = 23;
     var neg: i64 = 0;
-    if (n < 0) { neg = 1; n = 0 - n; }
+    # `n = 0 - n` is a NO-OP at i64::MIN (two's-complement abs overflows back to
+    # itself), so the old code left n negative, skipped both the `n == 0` guard and a
+    # `n > 0` loop, and emitted the sign byte and NOTHING ELSE. Keep the sign FLAG but
+    # never negate n; extract digits from the negative value and negate each digit.
+    # `!= 0` is the load-bearing half — exactly the fix fmt_hex below already carries
+    # for the same reason (CHANGELOG [6.4.69]); the decimal siblings were never brought
+    # along. `/` and `%` truncate toward zero on x86, aarch64 AND cx (verified).
+    if (n < 0) { neg = 1; }
     if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
-    while (n > 0) { store8(&buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    while (n != 0) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+    }
     if (neg == 1) { store8(&buf + bi, 45); bi = bi - 1; }
     syscall(1, fd, &buf + bi + 1, 23 - bi);
     return 0;
@@ -38,9 +60,20 @@ fn efmt_int(n: i64): i64 {
     var buf[24];
     var bi = 23;
     var neg: i64 = 0;
-    if (n < 0) { neg = 1; n = 0 - n; }
+    # `n = 0 - n` is a NO-OP at i64::MIN (two's-complement abs overflows back to
+    # itself), so the old code left n negative, skipped both the `n == 0` guard and a
+    # `n > 0` loop, and emitted the sign byte and NOTHING ELSE. Keep the sign FLAG but
+    # never negate n; extract digits from the negative value and negate each digit.
+    # `!= 0` is the load-bearing half — exactly the fix fmt_hex below already carries
+    # for the same reason (CHANGELOG [6.4.69]); the decimal siblings were never brought
+    # along. `/` and `%` truncate toward zero on x86, aarch64 AND cx (verified).
+    if (n < 0) { neg = 1; }
     if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
-    while (n > 0) { store8(&buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    while (n != 0) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+    }
     if (neg == 1) { store8(&buf + bi, 45); bi = bi - 1; }
     syscall(1, 2, &buf + bi + 1, 23 - bi);
     return 0;
@@ -51,7 +84,10 @@ fn fmt_hex(n: i64): i64 {
     var buf[16];
     var bi = 15;
     if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
-    while (n > 0) {
+    # `!= 0` not `> 0`: n is signed, so `> 0` is false for every bit-63-set value
+    # (negatives / u64 >= 2^63) → zero digits emitted. `>>` is logical (zero-fill),
+    # so the body already walks all 16 nibbles of a high-bit value. CHANGELOG [6.4.69].
+    while (n != 0) {
         var nib = n & 0xF;
         if (nib < 10) { store8(&buf + bi, 48 + nib); }
         else { store8(&buf + bi, 87 + nib); }
@@ -97,9 +133,17 @@ fn fmt_byte(b): i64 {
 fn fmt_int_buf(n, buf): i64 {
     var bi = 23;
     var neg: i64 = 0;
-    if (n < 0) { neg = 1; n = 0 - n; }
+    # i64::MIN: see fmt_int above. This is the site the filing was written against —
+    # `str_from_int(i64::MIN)` was the one-character string "-", and bayan then
+    # serialised `{"n":-}`, which is not JSON, with no error raised at any layer.
+    # 24-byte scratch still suffices: 19 digits + sign + NUL.
+    if (n < 0) { neg = 1; }
     if (n == 0) { store8(buf + bi, 48); bi = bi - 1; }
-    while (n > 0) { store8(buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    while (n != 0) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+    }
     if (neg == 1) { store8(buf + bi, 45); bi = bi - 1; }
     # Shift to start of buffer
     var len = 23 - bi;
@@ -116,7 +160,8 @@ fn fmt_hex_buf(n, buf): i64 {
     var bi = 15;
     if (n == 0) { store8(buf, 48); store8(buf + 1, 0); return 1; }
     var tmp[16];
-    while (n > 0) {
+    # `!= 0` not `> 0` — see fmt_hex. Also fixes fmt_sprintf's %x (routes here). CHANGELOG [6.4.69].
+    while (n != 0) {
         var nib = n & 0xF;
         if (nib < 10) { store8(&tmp + bi, 48 + nib); }
         else { store8(&tmp + bi, 87 + nib); }
@@ -214,17 +259,57 @@ fn fmt_float_buf(val, buf, decimals): i64 {
         neg = 1;
         val = f64_abs(val);
     }
+    # Non-finite guard (CHANGELOG [6.4.69]). Inf/NaN have exp bits all-1; the
+    # f64_to(f64_floor(val)) below overflows i64 into garbage that fmt_int_buf
+    # renders as the non-number token "-.00000-". Emit "inf"/"-inf"/"nan"
+    # instead. (JSON f64 now routes through bayan_f64_to_json, which is
+    # round-trip-correct; this keeps the fixed-decimal fmt_float debug path
+    # from emitting garbage for non-finite / out-of-i64-range inputs.)
+    if (((val >> 52) & 0x7FF) == 0x7FF) {
+        var np = 0;
+        if (neg == 1) { store8(buf, 45); np = 1; }
+        if ((val & 0x000FFFFFFFFFFFFF) != 0) {
+            store8(buf + np, 110); store8(buf + np + 1, 97); store8(buf + np + 2, 110);   # "nan"
+            return np + 3;
+        }
+        store8(buf + np, 105); store8(buf + np + 1, 110); store8(buf + np + 2, 102);       # "inf"
+        return np + 3;
+    }
     var whole = f64_to(f64_floor(val));
+    # Fractional part: multiply by 10^decimals, round, format as int.
+    #
+    # ⛔ v6.5.30 — THE CARRY. This is computed BEFORE the integer part is emitted, and that
+    # ordering is the fix, not a tidy-up. When the rounded fraction reaches a full unit
+    # (`frac == 10^decimals`) the carry belongs in the INTEGER part — but `whole` had already
+    # been written to the buffer by this point, so there was nothing left to carry into and
+    # the raw `10^decimals` was emitted verbatim as the fraction field. `3 - 1e-7` printed
+    # `2.1000000`: one digit too many, and a different number entirely. Every near-integer
+    # value was affected, in either sign, at any `decimals` — `10 - 1e-7` printed `9.1000000`.
+    #
+    # Long-standing: `de22b4af` added the zero-padding and nothing since touched the carry
+    # case, so this is almost certainly every version that has had `fmt_float_buf`. Found by
+    # ganita 1.1.3's linalg pass, where every near-integer solver result printed wrong — which
+    # is exactly where near-integers cluster (an identity matrix, a residual, a unit vector).
+    var scale = f64_from(1);
+    var scale_i = 1;
+    var di = 0;
+    while (di < decimals) {
+        scale = f64_mul(scale, f64_from(10));
+        scale_i = scale_i * 10;
+        di = di + 1;
+    }
+    var frac = f64_to(f64_round(f64_mul(f64_sub(val, f64_from(whole)), scale)));
+    if (frac < 0) { frac = 0 - frac; }
+    # Apply the carry. `>=` rather than `==`: f64_round on a value a hair above the unit can
+    # land beyond it, and a fraction field can never legitimately reach 10^decimals.
+    if (frac >= scale_i) {
+        whole = whole + (frac / scale_i);
+        frac = frac - ((frac / scale_i) * scale_i);
+    }
     var pos = 0;
     if (neg == 1) { store8(buf, 45); pos = 1; }
     pos = pos + fmt_int_buf(whole, buf + pos);
     store8(buf + pos, 46); pos = pos + 1;
-    # Fractional part: multiply by 10^decimals, round, format as int
-    var scale = f64_from(1);
-    var di = 0;
-    while (di < decimals) { scale = f64_mul(scale, f64_from(10)); di = di + 1; }
-    var frac = f64_to(f64_round(f64_mul(f64_sub(val, f64_from(whole)), scale)));
-    if (frac < 0) { frac = 0 - frac; }
     # Zero-pad fractional part
     var flen = fmt_int_buf(frac, buf + pos);
     var pad = decimals - flen;

@@ -96,7 +96,7 @@ fn preset_to_json(self, sb) {
 }
 
 fn preset_from_json_str(json) {
-    var root = bayan_json_v_parse_str(json, strlen(json));
+    var root = bayan_json_v_parse_buf(json, strlen(json));
     var self = alloc(sizeof(VoicePreset));
     VoicePreset_set_name(self, str_data(bayan_json_v_str(bayan_json_v_obj_get(root, "name"))));
     VoicePreset_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));
@@ -112,12 +112,12 @@ fn preset_from_json_str(json) {
 #must_use
 fn preset_build(self) {
     return crvoice_with_breathiness(
-        crvoice_with_f0_offset(
-            crvoice_with_size(
-                crvoice_new(VoicePreset_species(self)),
-                VoicePreset_size(self)),
-            VoicePreset_f0_offset(self)),
-        VoicePreset_breathiness(self));
+      crvoice_with_f0_offset(
+        crvoice_with_size(
+          crvoice_new(VoicePreset_species(self)),
+          VoicePreset_size(self)),
+        VoicePreset_f0_offset(self)),
+      VoicePreset_breathiness(self));
 }
 
 # ================================================================

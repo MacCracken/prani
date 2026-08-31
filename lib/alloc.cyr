@@ -53,7 +53,12 @@ var _alloc_lock = 0;
 # any concurrency (clone/CreateThread is a full barrier), so both parent and child then
 # take the locked path. While it is 0, acquire/release are no-ops → the ~10 ns bump path
 # is restored. See issues/2026-06-10-runtime-bench-suite-blind.md (PF-02).
-var _threads_active = 0;
+#
+# v6.5.19: the DECLARATION moved to lib/atomic.cyr (included just above). It is now
+# read by two independent allocator locks — this one and lib/freelist.cyr's — and
+# freelist.cyr does not include alloc.cyr, so the flag has to sit in the module all of
+# alloc.cyr / freelist.cyr / thread.cyr already share. Nothing about its semantics
+# changed. See CHANGELOG [6.5.19].
 
 # Acquire the global alloc spinlock (busy-wait until the 0→1 CAS wins), then an
 # ACQUIRE barrier. Mirrors lib/thread.cyr mutex_lock: on x86 the CAS (lock
@@ -91,6 +96,21 @@ fn _alloc_lock_release(): i64 {
     atomic_fence();
     atomic_store(&_alloc_lock, 0);
     #endif
+    return 0;
+}
+
+# Zero `n` bytes at `base`. Used only by alloc_reset() to scrub the reclaimed
+# span before the allocator hands those addresses to a new owner — closing the
+# memory-reuse information-leak (CVE-2026-34988 / CVE-2022-39393 class; filed
+# 2026-07-03 by daimon, VULN-007). A local store64/store8 loop so the
+# foundational allocator carries NO lib/string.cyr (memset) dependency; un-gated
+# so every platform backend (win/macos/agnos + the Linux block below) can call
+# it. Allocation sizes round up to 8, so spans are 8-byte-aligned and the byte
+# tail is a safety net that normally never runs. (v6.4.1)
+fn _alloc_zero(base, n): i64 {
+    var i = 0;
+    while (i + 8 <= n) { store64(base + i, 0); i = i + 8; }
+    while (i < n) { store8(base + i, 0); i = i + 1; }
     return 0;
 }
 
@@ -151,7 +171,7 @@ var _LINUX_CHUNK = 0x10000000;
 var _LINUX_MAP_ANON_PRIVATE = 0x22;
 
 # Maximum single allocation size (256MB)
-var ALLOC_MAX = 0x10000000;
+var ALLOC_MAX = 0x80000000;   # 2 GiB (v6.4.51: was 256 MiB; output_buf now allocs 1 GiB off-heap)
 
 # Round `n` up to the next _LINUX_CHUNK multiple.
 fn _linux_round_chunk(n): i64 {
@@ -225,8 +245,31 @@ fn alloc(size): i64 {
 # fresh mmaps if growth is needed again — reclaimed at process exit), so this is
 # a cheap reuse of the first chunk, not a munmap sweep. Locked so a concurrent
 # alloc() can't observe a half-updated bump pointer.
+#
+# ⚠ THIS INVALIDATES EVERY POINTER THE ALLOCATOR HAS EVER HANDED OUT, including
+# ones the STDLIB itself is holding. Any Str, Vec, HashMap, arena or struct built
+# before the reset is dangling afterwards; the span is zeroed AND re-issuable, so
+# a stale pointer reads zeros until something else is allocated over it and then
+# reads that. The comment below reasons carefully about the info-leak channel and
+# used to say nothing about live references, which is how the default-Allocator
+# memo went unnoticed (v6.5.7 — that one is fixed by moving the vtable to static
+# storage, but consumer-held pointers are still the caller's problem).
+#
+# Reset only when nothing from the previous epoch will be read again.
 fn alloc_reset(): i64 {
     _alloc_lock_acquire();
+    # Scrub the reused span of the FIRST chunk before rewinding, so a later
+    # alloc() can't read the prior occupant's bytes (memory-reuse info-leak,
+    # CVE-2026-34988 class). alloc_reset is the ONLY point the allocator hands
+    # the same address to a new owner — spills past the first chunk re-mmap
+    # FRESH kernel-zeroed chunks, so only the first chunk is a reuse channel.
+    # Still in the first chunk (the common case): the written extent is exactly
+    # _heap_ptr. Spilled to a later chunk: zero the whole first chunk — its exact
+    # fill point isn't tracked, so the untouched tail costs only a one-time page
+    # commit in the rare >256 MB-then-reset case.
+    var span = _heap_ptr - _heap_first_base;
+    if (_heap_base != _heap_first_base) { span = _heap_first_end - _heap_first_base; }
+    if (span > 0) { _alloc_zero(_heap_first_base, span); }
     _heap_base = _heap_first_base;
     _heap_ptr = _heap_first_base;
     _heap_end = _heap_first_end;
@@ -272,34 +315,207 @@ fn alloc_used(): i64 {
 # or global alloc_reset). A future variant could be mmap-backed for true
 # OS-level reclamation; see CHANGELOG [5.11.14] for the scope discussion.
 #
-# Layout: { base: i64, ptr: i64, end: i64 } = 24 bytes
+# Layout (v6.5.9): { base, ptr, end, policy, first_chunk, cur_chunk, chunk_size }
+# = 56 bytes. It was { base, ptr, end } = 24 until the growable arena below.
 
-# Create a new arena with the given capacity (bytes)
+# ── v6.5.9: EXHAUSTION POLICY + GROWABLE CHUNKS ──────────────
+#
+# THE FILED PROBLEM (agnosai, 2026-08-06). The primitives handled exhaustion
+# correctly — `arena_alloc` returns 0, `str_from_a` returns 0, `vec_push_a` returns
+# -1 — and that was never the bug. The bug is what the 0 does next: a `Str` of 0 is
+# INDISTINGUISHABLE from a valid `Str`, there is no option type and no error channel
+# through the `_a` families, so the 0 flows on and the first thing that touches it
+# dereferences it. The observable behaviour of "arena too small" was a SIGSEGV
+# several layers from the allocation.
+#
+# ⭐ AND THE REGRESSION DIRECTION IS WHAT MAKES IT SERIOUS. Before threading a route
+# onto an arena, an oversized response was a LEAK on the no-free global bump. After
+# threading — a change whose entire purpose is to stop leaking — the same response is
+# a CRASH. Adopting the feature correctly made the failure worse and quieter, and a
+# 5,500-assertion suite missed it because allocation tests are small-fixture by
+# nature: they assert `bytes == 0` over a handful of items and nothing about that
+# shape probes the ceiling.
+#
+# THE FIX IS ONE FIELD, NOT THREE FEATURES. The filing asked for a growable arena, a
+# spilling arena, and an exhaustion policy. They collapse into a single policy on the
+# header, which is why all three ship together rather than one being "the fix":
+#   ARENA_FULL_NULL  (0) — return 0. TODAY'S BEHAVIOUR, still the default, so every
+#                          existing arena behaves exactly as it did.
+#   ARENA_FULL_GROW  (1) — chain another chunk. Makes arenas usable for work of
+#                          unbounded size, which is most of what a server does
+#                          between requests, and removes the need to guess a capacity.
+#   ARENA_FULL_SPILL (2) — serve the overflow from the global allocator. Weaker than
+#                          GROW (spilled bytes are never reclaimed by reset) but it
+#                          turns the crash back into the pre-arena cost.
+#   ARENA_FULL_ABORT (3) — die loudly at the allocation instead of segfaulting three
+#                          layers away. A wrong capacity guess becomes survivable to
+#                          diagnose rather than a mystery crash in a JSON walker.
+#
+# ⚠ GROW RETAINS ITS CHUNKS ACROSS `arena_reset`. The bump allocator underneath has
+# no free(), so "release the chunks" is not expressible — but it is also not what an
+# arena wants. Reset rewinds to the FIRST chunk and re-uses the existing chain, so a
+# request loop settles at its true high-water mark and stops allocating entirely.
+# Freeing them would mean re-allocating them every cycle.
+#
+# Layout: { base, ptr, end, policy, first_chunk, cur_chunk, chunk_size } = 56 bytes.
+# base/end mirror the CURRENT chunk so the hot path stays two loads. Chunk header is
+# { next, cap } followed by its data.
+var ARENA_FULL_NULL = 0;
+var ARENA_FULL_GROW = 1;
+var ARENA_FULL_SPILL = 2;
+var ARENA_FULL_ABORT = 3;
+
+# Create a new arena with the given capacity (bytes). Fixed-size, returns 0 when
+# exhausted — unchanged from every prior release.
 fn arena_new(capacity): i64 {
-    var a = alloc(24);
-    var base = alloc(capacity);
+    var a = alloc(56);
+    if (a == 0) { return 0; }
+    var ch = alloc(capacity + 16);
+    if (ch == 0) { return 0; }
+    store64(ch, 0);                    # next
+    store64(ch + 8, capacity);         # cap
+    var base = ch + 16;
     store64(a, base);
     store64(a + 8, base);
     store64(a + 16, base + capacity);
+    store64(a + 24, ARENA_FULL_NULL);
+    store64(a + 32, ch);               # first_chunk
+    store64(a + 40, ch);               # cur_chunk
+    store64(a + 48, capacity);         # chunk_size for any future chunk
     return a;
 }
 
-# Allocate size bytes from the arena, 8-byte aligned. Returns 0 on overflow.
+# v6.5.9: an arena that chains a new chunk instead of failing. `initial` sizes the
+# first chunk and every subsequent one, so pick the common case rather than the worst
+# — overshooting the high-water mark is exactly the guess this removes the need for.
+fn arena_new_growable(initial): i64 {
+    var a = arena_new(initial);
+    if (a == 0) { return 0; }
+    store64(a + 24, ARENA_FULL_GROW);
+    return a;
+}
+
+# v6.5.9: choose what happens when the current chunk cannot serve a request. See the
+# ARENA_FULL_* constants above.
+fn arena_set_on_full(a, policy): i64 {
+    if (a == 0) { return 0 - 1; }
+    if (policy < 0) { return 0 - 1; }
+    if (policy > 3) { return 0 - 1; }
+    store64(a + 24, policy);
+    return 0;
+}
+
+# Read back the arena's exhaustion policy (one of the ARENA_FULL_* constants), or -1
+# if the handle is null.
+fn arena_on_full(a): i64 {
+    if (a == 0) { return 0 - 1; }
+    return load64(a + 24);
+}
+
+# Move to the next chunk, re-using one the chain already holds if it is big enough,
+# otherwise linking a fresh one. Returns 1 on success, 0 if the backing alloc failed.
+fn _arena_grow(a, need): i64 {
+    var cur = load64(a + 40);
+    var nxt = load64(cur);
+    if (nxt != 0) {
+        if (load64(nxt + 8) >= need) {
+            store64(a + 40, nxt);
+            store64(a, nxt + 16);
+            store64(a + 8, nxt + 16);
+            store64(a + 16, nxt + 16 + load64(nxt + 8));
+            return 1;
+        }
+    }
+    # A single allocation larger than the chunk size gets its own right-sized chunk;
+    # otherwise every oversize request would fail against a too-small fresh chunk.
+    var want = load64(a + 48);
+    if (need > want) { want = need; }
+    var ch = alloc(want + 16);
+    if (ch == 0) { return 0; }
+    store64(ch, nxt);
+    store64(ch + 8, want);
+    store64(cur, ch);
+    store64(a + 40, ch);
+    store64(a, ch + 16);
+    store64(a + 8, ch + 16);
+    store64(a + 16, ch + 16 + want);
+    return 1;
+}
+
+# Allocate size bytes from the arena, 8-byte aligned. Behaviour when the current
+# chunk cannot serve it is the arena's policy (default: return 0, as always).
 fn arena_alloc(a, size): i64 {
     if (size <= 0) { return 0; }
+    if (a == 0) { return 0; }
     size = (size + 7) & (0 - 8);
     var ptr = load64(a + 8);
     var new_ptr = ptr + size;
     if (new_ptr < ptr) { return 0; }
-    if (new_ptr > load64(a + 16)) { return 0; }
-    store64(a + 8, new_ptr);
-    return ptr;
+    if (new_ptr <= load64(a + 16)) {
+        store64(a + 8, new_ptr);
+        return ptr;
+    }
+    var pol = load64(a + 24);
+    if (pol == ARENA_FULL_GROW) {
+        if (_arena_grow(a, size) == 0) { return 0; }
+        var p2 = load64(a + 8);
+        var np2 = p2 + size;
+        # ⛔ RE-CHECK THE BOUND. `_arena_grow` is supposed to size the new chunk to at
+        # least `size`, but trusting that here means a grow that ever returns a
+        # too-small chunk hands back a pointer with less memory behind it than was
+        # asked for — a silent heap overflow, not a failed allocation. Found by
+        # mutation testing: deleting the `want = need` line inside _arena_grow left
+        # this path returning a 256-byte chunk for a 200 KB request and the test still
+        # passed, because it only checked the pointer was non-zero.
+        if (np2 > load64(a + 16)) { return 0; }
+        store64(a + 8, np2);
+        return p2;
+    }
+    if (pol == ARENA_FULL_SPILL) {
+        # Served from the global bump: never reclaimed by arena_reset, which is the
+        # documented cost of this policy. It restores the pre-arena behaviour rather
+        # than the crash, and is strictly weaker than GROW.
+        return alloc(size);
+    }
+    if (pol == ARENA_FULL_ABORT) {
+        # ⛔ Die HERE, where the size is known, rather than letting a 0 propagate into
+        # a Str and fault three layers away with no indication which allocator ran out.
+        syscall(1, 2, "arena exhausted: allocation refused (ARENA_FULL_ABORT)\n", 55);
+        syscall(60, 70);
+    }
+    return 0;
 }
 
-# Reset the arena — all allocations from this arena are freed
+# Reset the arena — all allocations from this arena are freed.
+# ⚠ For a GROW arena this rewinds to the FIRST chunk and KEEPS the chain, so the next
+# cycle re-uses the memory instead of re-allocating it. That retention is the point:
+# a request loop converges on its high-water mark and then allocates nothing at all.
 fn arena_reset(a): i64 {
+    if (a == 0) { return 0; }
+    var first = load64(a + 32);
+    if (first != 0) {
+        store64(a + 40, first);
+        store64(a, first + 16);
+        store64(a + 8, first + 16);
+        store64(a + 16, first + 16 + load64(first + 8));
+        return 0;
+    }
     store64(a + 8, load64(a));
     return 0;
+}
+
+# v6.5.9: total bytes across every chunk this arena holds — the number a consumer
+# needs to see its true high-water mark, which `arena_used` (current chunk only)
+# cannot show once the chain has grown.
+fn arena_capacity_total(a): i64 {
+    if (a == 0) { return 0; }
+    var total = 0;
+    var ch = load64(a + 32);
+    while (ch != 0) {
+        total = total + load64(ch + 8);
+        ch = load64(ch);
+    }
+    return total;
 }
 
 # Return bytes used in the arena
@@ -326,6 +542,15 @@ fn arena_free(a): i64 {
     store64(a,      0);   # base = 0
     store64(a + 8,  0);   # ptr  = 0  (matches base; arena_used == 0)
     store64(a + 16, 0);   # end  = 0  (so arena_alloc's bounds check fails)
+    # ⚠ v6.5.9: the policy and chunk chain MUST be cleared too, or "freed" stops
+    # meaning freed. A GROW arena left with its policy intact would see the zeroed
+    # bounds, take the grow path, allocate a fresh chunk and SUCCEED — and a stale
+    # first_chunk would let arena_reset resurrect the whole arena. Reverting to
+    # ARENA_FULL_NULL is what preserves the documented "further allocs fail".
+    store64(a + 24, ARENA_FULL_NULL);
+    store64(a + 32, 0);   # first_chunk
+    store64(a + 40, 0);   # cur_chunk
+    store64(a + 48, 0);   # chunk_size
     return 0;
 }
 
@@ -368,23 +593,37 @@ fn allocator_state(a): i64      { return load64(a + 32); }
 # ---- dispatch helpers ----
 
 # alloc(size) via vtable
+# ⚡ v6.5.10: the two accessor loads are INLINED. `allocator_alloc_fn(a)` and
+# `allocator_state(a)` are each a real CALL — cyrius does not inline — to perform one
+# `load64`, and they sit on the hottest path the `_a` convention has. Measured on 6.5.9:
+# `alloc_via` cost 15.1 ns of which **5.1 ns was those two calls**, against ~6.0 ns for
+# the arena bump itself. `allocator_new` fixes this layout, so reading it directly here
+# is exactly as safe as calling the accessors — which remain, as public API.
+# The tax compounds: agnosai measured 112 allocations on one route (32 % of the request),
+# and the more faithfully a consumer threads its allocator the more it pays. Filed
+# 2026-08-07. The accessors are NOT removed — only this hot path stops calling them.
 fn alloc_via(a, size): i64 {
-    return fncall2(allocator_alloc_fn(a), allocator_state(a), size);
+    return fncall2(load64(a), load64(a + 32), size);
 }
 
 # realloc(old_ptr, old_size, new_size) via vtable
+# Same inlining as alloc_via — identical shape, same two calls removed. v6.5.10.
 fn realloc_via(a, old_ptr, old_size, new_size): i64 {
-    return fncall4(allocator_realloc_fn(a), allocator_state(a), old_ptr, old_size, new_size);
+    return fncall4(load64(a + 8), load64(a + 32), old_ptr, old_size, new_size);
 }
 
 # free(ptr) via vtable. Bump + arena impls treat as a no-op.
+# Same inlining as alloc_via. v6.5.10.
 fn free_via(a, ptr): i64 {
-    return fncall2(allocator_free_fn(a), allocator_state(a), ptr);
+    return fncall2(load64(a + 16), load64(a + 32), ptr);
 }
 
 # reset() via vtable
+# Same inlining as alloc_via. ⚠ Hotter than it looks: a request loop calls this once per
+# request, but every `_a` benchmark's INNER loop calls it too, so a measurement of `_a`
+# allocation is partly a measurement of this. v6.5.10.
 fn reset_via(a): i64 {
-    return fncall1(allocator_reset_fn(a), allocator_state(a));
+    return fncall1(load64(a + 24), load64(a + 32));
 }
 
 # ---- shared helpers ----
@@ -483,10 +722,6 @@ fn bump_allocator(): i64 {
 # the global bump; freeing the Allocator's `state` pointer is not
 # meaningful (no individual free on the global bump either).
 
-fn _arena_alloc(state, size): i64 {
-    return arena_alloc(state, size);
-}
-
 fn _arena_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = arena_alloc(state, new_size);
     if (new_ptr == 0) { return 0; }
@@ -502,10 +737,6 @@ fn _arena_realloc(state, old_ptr, old_size, new_size): i64 {
     return new_ptr;
 }
 
-fn _arena_reset(state): i64 {
-    return arena_reset(state);
-}
-
 # Construct an Allocator that wraps a fresh arena of the given
 # capacity (bytes). The arena is itself allocated from the global
 # bump. reset_via on the result clears only THIS allocator's
@@ -514,7 +745,24 @@ fn _arena_reset(state): i64 {
 fn arena_allocator(capacity): i64 {
     var arena = arena_new(capacity);
     if (arena == 0) { return 0; }
-    return allocator_new(&_arena_alloc, &_arena_realloc, &_alloc_free_noop, &_arena_reset, arena);
+    return allocator_new(&arena_alloc, &_arena_realloc, &_alloc_free_noop, &arena_reset, arena);
+}
+
+# v6.5.9: the allocator-interface form of arena_new_growable. This is the one a route
+# handler or a task runner wants — allocation scales with request size, task count and
+# response size, none of which are bounded at the type level, so any FIXED capacity is
+# either wasteful or a crash. Same vtable, same `_a` families, only construction differs.
+fn arena_allocator_growable(initial): i64 {
+    var arena = arena_new_growable(initial);
+    if (arena == 0) { return 0; }
+    return allocator_new(&arena_alloc, &_arena_realloc, &_alloc_free_noop, &arena_reset, arena);
+}
+
+# v6.5.9: set the exhaustion policy on an allocator built by arena_allocator*.
+# `allocator_new`'s state pointer is the arena handle, so this reaches through to it.
+fn arena_allocator_set_on_full(al, policy): i64 {
+    if (al == 0) { return 0 - 1; }
+    return arena_set_on_full(load64(al + 32), policy);
 }
 
 # ================================================================
@@ -619,6 +867,22 @@ fn test_allocator_bytes_total(a): i64 {
 
 var _default_allocator = 0;
 
+# The default Allocator's 40-byte vtable lives HERE, in static storage — never in
+# the bump arena. `alloc_reset()` zeroes and rewinds the arena, so an Allocator
+# built by `allocator_new` (which calls `alloc(40)`) sat inside the scrubbed span:
+# the memo survived as a pointer into wiped, re-issuable memory and the next
+# `vec_new()` loaded a null fn pointer out of the dead vtable and jumped to 0.
+# Filed by hisab 2026-08-05 (SIGSEGV from `alloc_init; vec_new; alloc_reset; vec_new`,
+# both calls used exactly as documented). CHANGELOG [6.5.7]
+#
+# TYPED `: i64[5]`, not a bare `[5]` or `[40]`. A bare top-level `var x[N]` is
+# N*8 bytes under cycc but N bytes under **cybs** — so `[5]` reserves 40 B in the
+# compiler and 8 B in the bootstrap compiler, and gen1 then writes the vtable over
+# whatever follows. That variant still passes `gen2 == gen3`, because the corruption
+# is confined to gen1, i.e. it is a GREEN seed-derive over a silently broken
+# intermediate. The typed form is 40 B on both by construction.
+var _default_allocator_storage: i64[5];
+
 # Return (lazy-init) the process-wide default Allocator. Wraps
 # the global bump (`bump_allocator()`); identical to calling
 # bump_allocator() each time except memoized — every call returns
@@ -632,23 +896,27 @@ fn default_alloc(): i64 {
     # theirs. atomic_cas is gated to the real-thread arches; on cx the bare
     # store path is correct (single-threaded VM).
     if (_default_allocator == 0) {
-        var a = bump_allocator();
+        # Build the vtable IN PLACE in static storage — same four slots
+        # `bump_allocator()` passes to `allocator_new`, with state = 0 (the bump
+        # allocator is stateless; nothing here points into the arena).
+        var s = &_default_allocator_storage;
+        store64(s,      &_bump_alloc);
+        store64(s + 8,  &_bump_realloc);
+        store64(s + 16, &_alloc_free_noop);
+        store64(s + 24, &_bump_reset);
+        store64(s + 32, 0);
         # CVE-28 (v6.1.38): fence so the 40-byte vtable's writes are committed
-        # before the pointer is CAS-published — a peer thread observing the
-        # published pointer must see the fully-built vtable, not stale slots.
-        # (atomic_cas now also uses stlxr release on aarch64, but the explicit
-        # fence makes the publish-after-init ordering unambiguous on every arch;
-        # no-op on cx. This is the once-per-process lazy-init path.)
+        # before the pointer is published — a peer thread observing the published
+        # pointer must see the fully-built vtable, not stale slots.
         atomic_fence();
-        #ifdef CYRIUS_ARCH_X86
-        atomic_cas(&_default_allocator, 0, a);
-        return _default_allocator;
-        #endif
-        #ifdef CYRIUS_ARCH_AARCH64
-        atomic_cas(&_default_allocator, 0, a);
-        return _default_allocator;
-        #endif
-        _default_allocator = a;
+        # v6.5.7: the CAS is GONE, and its absence is the point. It existed to
+        # arbitrate between two threads each publishing their OWN freshly-alloc'd
+        # Allocator. The address is now a compile-time constant, so racing threads
+        # store the identical value and write identical bytes into the identical
+        # buffer — the publish is idempotent and a plain store is race-safe. That
+        # also retires the self-deadlock hazard the old comment documented (the
+        # build path could not take _alloc_lock because alloc(40) already holds it).
+        _default_allocator = s;
     }
     return _default_allocator;
 }

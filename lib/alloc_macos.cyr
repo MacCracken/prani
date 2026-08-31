@@ -12,8 +12,8 @@ var _heap_base = 0;
 var _heap_ptr = 0;
 var _heap_end = 0;
 
-# Maximum single allocation size (256MB) — matches alloc.cyr
-var ALLOC_MAX = 0x10000000;
+# Maximum single allocation size (2 GiB) — matches alloc.cyr
+var ALLOC_MAX = 0x80000000;   # 2 GiB (v6.4.51: was 256 MiB; output_buf allocs 1 GiB off-heap)
 
 # Initial heap reservation. v6.0.34: was 1MB, grown by 1MB chunks via a
 # HINTED mmap at _heap_end. macOS does NOT honor mmap address hints (no
@@ -50,35 +50,33 @@ fn alloc(size) {
     if (size > ALLOC_MAX) { return 0; }
     # Align to 8 bytes (local).
     size = (size + 7) & (0 - 8);
-    # --- critical section (shared bump pointer + grow) ---
+    # --- critical section (shared bump pointer) ---
     _alloc_lock_acquire();
     # v5.8.37 — lazy-init the heap if alloc_init() was never called
     # (now race-safe). Mirrors lib/alloc.cyr; see its header.
     if (_heap_base == 0) { alloc_init(); }
+    # v6.4.52 — large-object path. macOS does NOT honor mmap address hints
+    # (no MAP_FIXED), so the single reserve can't grow contiguously; a request
+    # that won't fit the remaining reserve gets its OWN unhinted mmap(0, size),
+    # returned directly — the bump pointer is untouched and no contiguity is
+    # required. macOS overcommits anonymous mmap, so a 1 GiB mapping costs only
+    # its touched pages (exactly like the 256 MiB reserve at alloc_init). The
+    # mapping is fresh + kernel-zeroed and never recycled, so it is not an
+    # alloc_reset memory-reuse channel. Mirrors lib/alloc.cyr's fresh-chunk-
+    # per-large-request; this REPLACES the old hinted 1 MiB grow loop, which
+    # could never succeed on macOS (the hint contract broke contiguity).
+    # See issue 2026-07-11-macos-windows-large-single-allocation-path.md.
+    if (_heap_ptr + size > _heap_end) {
+        var big = syscall(9, 0, size, 3, 0x1002, 0 - 1, 0);
+        if (big < 0) { _alloc_lock_release(); return 0; }
+        _alloc_lock_release();
+        return big;
+    }
     var ptr = _heap_ptr;
     var new_ptr = ptr + size;
     # Overflow check
     if (new_ptr < ptr) { _alloc_lock_release(); return 0; }
     _heap_ptr = new_ptr;
-    # Loop per-1MB mmaps; mmap hint contract is stricter than brk
-    # (big single mmap may return a different base, breaking the
-    # contiguity guard). See CHANGELOG [5.6.34].
-    while (_heap_end < _heap_ptr) {
-        var result = syscall(9, _heap_end, 0x100000, 3, 0x1002, 0 - 1, 0);
-        if (result < 0) {
-            _heap_ptr = ptr;
-            _alloc_lock_release();
-            return 0;
-        }
-        # If kernel gave us a different address, the heap is non-contiguous — fail
-        if (result != _heap_end) {
-            syscall(11, result, 0x100000);
-            _heap_ptr = ptr;
-            _alloc_lock_release();
-            return 0;
-        }
-        _heap_end = _heap_end + 0x100000;
-    }
     _alloc_lock_release();
     return ptr;
 }
@@ -87,6 +85,13 @@ fn alloc(size) {
 # alloc() can't observe a half-updated bump pointer.
 fn alloc_reset() {
     _alloc_lock_acquire();
+    # Scrub the reclaimed span before rewinding so a later alloc() can't read
+    # the prior occupant's bytes (memory-reuse info-leak, CVE-2026-34988 class;
+    # v6.4.1). One contiguous reserved region here, so [_heap_base, _heap_ptr)
+    # is the exact written extent (always within the committed [_heap_base,
+    # _heap_end)). _alloc_zero is the un-gated helper in lib/alloc.cyr.
+    var span = _heap_ptr - _heap_base;
+    if (span > 0) { _alloc_zero(_heap_base, span); }
     _heap_ptr = _heap_base;
     _alloc_lock_release();
     return 0;

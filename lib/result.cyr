@@ -7,7 +7,7 @@
 # `Result<T, E>` shape using v5.8.21 generic-parameter syntax.
 # Tagged.cyr transitively `include`s this file so existing
 # consumers (lib/net.cyr, lib/ws_server.cyr, lib/sandhi.cyr,
-# tests/tcyr/tagged.tcyr) stay working unchanged.
+# tests/tcyr/stdlib/tagged.tcyr) stay working unchanged.
 #
 # Layout — same as the v5.8.23 compiler-generated form:
 #   tag at +0  (0 = Ok, 1 = Err — matches prior OK/ERR convention)
@@ -15,7 +15,7 @@
 #
 # Type parameters T/E are syntactically accepted but not yet
 # bound semantically (mono-only, erasure semantics — same status
-# as `enum TwoParams<T, E>` in tests/tcyr/enum_generics.tcyr).
+# as `enum TwoParams<T, E>` in tests/tcyr/lang/enum_generics.tcyr).
 # Subsequent slots in the v5.8.28–v5.8.32 sub-suite layer the
 # `?` propagation operator (v5.8.29) and stdlib migrations
 # (v5.8.30/.31) on top.

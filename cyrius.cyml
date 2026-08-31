@@ -5,7 +5,7 @@ description = "prani — creature & animal vocal synthesis (species vocal tracts
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/prani"
 language = "cyrius"
-cyrius = "6.3.45"
+cyrius = "6.5.36"
 
 [build]
 entry = "src/main.cyr"
@@ -83,34 +83,41 @@ stdlib = [
 # goonj + sakshi symbols, resolved from THIS manifest below.
 [deps.svara]
 git = "https://github.com/MacCracken/svara.git"
-tag = "3.0.0"
+tag = "3.5.3"
 modules = ["dist/svara.cyr"]
 
 # naad — audio synthesis primitives (noise / biquad / LFO). Referenced by
-# svara's bundle and available to prani's tract/voice DSP. Pinned to the tag
-# svara consumes, for a coherent bundle.
+# svara's bundle and called directly by tract.cyr (filter_biquad_new /
+# _process_sample + NAAD_FILTER_BANDPASS, the NoiseOnly path). ONE step past
+# the 2.2.1 svara 3.5.3 consumes: 2.2.2 is a pure bugfix (overlap-save
+# streaming in naad_convolution_process_block — a path prani never touches)
+# with identical hisab/goonj pins, so the bundle stays coherent.
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.1.0"
+tag = "2.2.2"
 modules = ["dist/naad.cyr"]
 
 # hisab — math/geometry (HVec3/HComplex/FFT/ganita least-squares). Referenced
 # by svara + naad bundles. Pinned to the tag they consume.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "2.6.7"
+tag = "2.11.2"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Referenced by naad's acoustics/* modules (present
 # in the monolithic bundle). Pulls sakshi + hisab transitively.
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.0.0"
+tag = "2.0.4"
 modules = ["dist/goonj.cyr"]
 
-# sakshi — structured logging. Arrives transitively via hisab/goonj/naad;
-# declared explicitly so the bundle's sakshi_* references resolve.
+# sakshi — structured logging. Arrives transitively via hisab/goonj/naad AND is
+# called directly by src/logging.cyr (prani_log_* -> sakshi_debug/info/warn/
+# error/fatal); declared explicitly so both resolve. ONE step past the 2.4.11
+# hisab 2.11.2 consumes, for the sakshi_span_enter lower-bound guard. This is
+# also why every build prints `./lib/ shadows version-pinned …` — the toolchain
+# snapshot bundles 2.4.11. Expected, not a fault.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.4.3"
+tag = "2.4.12"
 modules = ["dist/sakshi.cyr"]

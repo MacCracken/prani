@@ -239,7 +239,7 @@ assert_eq(t_all_finite(d_out), 1, "dragon roar all finite");
 test_group("vocalize_with_intent -- intent scales duration (Mating x2)");
 # Mating duration_scale = 2.0 -> num_samples doubles: 0.05 * 2 * 44100 = 4410.
 var m_out = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_SONGBIRD),
-    PRANI_VOC_TRILL, PRANI_INTENT_MATING, T_SR, T_DUR_005);
+  PRANI_VOC_TRILL, PRANI_INTENT_MATING, T_SR, T_DUR_005);
 assert_eq(prani_is_err(m_out), 0, "songbird mating trill non-error");
 assert_eq(vec_len(m_out), 4410, "mating (x2 duration) length == 4410");
 assert_eq(t_all_finite(m_out), 1, "mating trill all finite");

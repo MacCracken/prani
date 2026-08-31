@@ -62,7 +62,7 @@ fn alloc_init() {
 # Maximum single allocation (256 MB — same as Linux peer, will
 # fail at runtime if >16 MB is requested from a single allocation
 # since the reservation is 16 MB).
-var ALLOC_MAX = 0x10000000;
+var ALLOC_MAX = 0x80000000;   # 2 GiB (v6.4.51: was 256 MiB; output_buf now allocs 1 GiB off-heap)
 
 # Allocate size bytes, 8-byte aligned. Returns 0 on overflow /
 # out-of-region.
@@ -80,8 +80,26 @@ fn alloc(size) {
     var new_ptr = ptr + size;
     # Overflow check: wrapped pointer = arithmetic overflow.
     if (new_ptr < ptr) { _alloc_lock_release(); return 0; }
-    # Out-of-region: no grow on Windows.
-    if (new_ptr > _heap_end) { _alloc_lock_release(); return 0; }
+    # v6.4.52 — large-object path. A request that won't fit the fixed
+    # _WIN_HEAP_SIZE bump reservation gets its OWN dedicated VirtualAlloc,
+    # returned directly (bump pointer untouched). Same reroute the reservation
+    # uses: syscall(9, 0, size, RW=3, PRIV|ANON=0x22, -1, 0) -> EMMAP_PE ->
+    # VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE). NOTE:
+    # EMMAP_PE always eager-commits (no MEM_RESERVE-only variant in the backend),
+    # so a 1 GiB request charges 1 GiB against the commit limit up front (RAM
+    # still lazy/demand-zero); this succeeds on a normal dev box (cass's own
+    # ~116 MiB heap commits up front every release) — a MEM_RESERVE-only path
+    # would need a codegen change (future). VirtualAlloc returns 0 on failure,
+    # which is exactly alloc()'s overflow contract. No individual free (same as
+    # the bump region; reclaimed at process exit). Mirrors lib/alloc.cyr's
+    # fresh-chunk-per-large-request. See issue
+    # 2026-07-11-macos-windows-large-single-allocation-path.md.
+    if (new_ptr > _heap_end) {
+        var big = syscall(9, 0, size, 3, 0x22, 0 - 1, 0);
+        _alloc_lock_release();
+        if (big <= 0) { return 0; }
+        return big;
+    }
     _heap_ptr = new_ptr;
     _alloc_lock_release();
     return ptr;
@@ -92,6 +110,13 @@ fn alloc(size) {
 # concurrent alloc() can't observe a half-updated bump pointer.
 fn alloc_reset() {
     _alloc_lock_acquire();
+    # Scrub the reclaimed span before rewinding so a later alloc() can't read
+    # the prior occupant's bytes (memory-reuse info-leak, CVE-2026-34988 class;
+    # v6.4.1). One fixed VirtualAlloc reservation here, so [_heap_base,
+    # _heap_ptr) is the exact written extent. _alloc_zero is the un-gated helper
+    # in lib/alloc.cyr.
+    var span = _heap_ptr - _heap_base;
+    if (span > 0) { _alloc_zero(_heap_base, span); }
     _heap_ptr = _heap_base;
     _alloc_lock_release();
     return 0;

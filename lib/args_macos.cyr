@@ -9,15 +9,14 @@
 #     callee-saved x28, and argc()/argv()/_read_env read through it.
 #   - x86_64: the kernel passes args on the stack the SysV way — [rsp]=argc,
 #     [rsp+8+i*8]=argv[i] (inline char* array), then NULL, then envp — EXACTLY
-#     like agnos/Linux ELF. The GPRs (rdi/rsi/rdx) are ZERO at entry, so there
-#     is nothing to park in a register; instead cycc emits `call
-#     _macho_capture_args` as the FIRST runtime instruction (the EJMP0 landing
-#     site, while rsp still = the init rsp) and that fn records the init rsp.
-# See CHANGELOG [6.0.58], issue 2026-06-02-macos-x86-release-no-compiler.md.
-
-# x86-macОS init-stack pointer ([rsp] at entry: argc, then inline argv). 0 on
-# arm64 (unread there — arm64 uses the x28 base below).
-var _macho_init_rsp = 0;
+#     like agnos/Linux ELF. The GPRs (rdi/rsi/rdx) are ZERO at entry, so cycc
+#     parks the init rsp in r15 (reserved from regalloc) as the FIRST landing
+#     instruction (`mov r15, rsp`, main_x86_macho.cyr / main.cyr), BEFORE the
+#     gvar-inits; _macho_argv_base()/argc()/argv()/_read_env read r15. (v6.4.59:
+#     the old `call _macho_capture_args` → _macho_init_rsp global path was retired
+#     — the capture ran AFTER the gvar-inits, so a `var r = main()` gvar-init read
+#     it as 0; the r15 landing park is immune. Same shape as lib/args_agnos.cyr.)
+# See CHANGELOG [6.0.58]/[6.4.59], issue 2026-06-02-macos-x86-release-no-compiler.md.
 
 # Return the argv base pointer that the arm64 entry prologue parked in x28.
 # Inline asm — mirrors lib/fnptr.cyr's pattern for stashing a register into a
@@ -46,32 +45,8 @@ fn _macho_argv_base() {
     #endif
 }
 
-# x86-macОS: record the init-stack pointer. cycc emits `call
-# _macho_capture_args` from the entry epilogue (the EJMP0 landing site) while
-# rsp still = the init rsp — before any other call. (v6.1.32: agnos moved to an
-# r15 landing park, lib/args_agnos.cyr; this _macho_capture_args path is itself
-# vestigial — _macho_argv_base reads r15 since v6.1.30.) The `call`
-# pushed the return address (8 bytes) and EFNPRO pushed rbp (8 bytes), so the
-# init rsp is rbp + 16. `var ir = 0` only touches rax, so the stack pointer is
-# undisturbed up to the asm. Identical shape to args_agnos.cyr — macOS x86_64
-# and agnos both deliver a SysV init stack ([rsp]=argc, inline argv).
-fn _macho_capture_args() {
-    #ifdef CYRIUS_ARCH_AARCH64
-    # arm64 uses the x28 entry prologue, not this fn.
-    return 0;
-    #else
-    var ir = 0;
-    asm {
-        0x48; 0x8D; 0x45; 0x10;   # lea rax, [rbp+16]   (init rsp)
-        0x48; 0x89; 0x45; 0xF8;   # mov [rbp-8], rax    (-> ir, the first local)
-    }
-    _macho_init_rsp = ir;
-    return 0;
-    #endif
-}
-
 # On Linux the equivalent fn reads /proc/self/cmdline; on macOS the entry
-# prologue (arm64) / _macho_capture_args (x86) has already done the work, so
+# landing park (arm64 x28 / x86 r15) has already captured the init stack, so
 # args_init is a no-op. Kept in the public API so caller code stays portable.
 fn args_init() {
     return 0;

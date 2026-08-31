@@ -95,10 +95,14 @@ fn print_num(n: i64): i64 {
     var pbuf[24];
     var pi: i64 = 23;
     var neg: i64 = 0;
-    if (n < 0) { neg = 1; n = 0 - n; }
+    # i64::MIN — see lib/fmt.cyr:fmt_int. `0 - n` is a no-op there, so the old
+    # `n > 0` loop emitted zero digits and this printed a bare "-". CHANGELOG [6.5.8]
+    if (n < 0) { neg = 1; }
     if (n == 0) { store8(&pbuf + pi, 48); pi = pi - 1; }
-    while (n > 0) {
-        store8(&pbuf + pi, 48 + n % 10);
+    while (n != 0) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&pbuf + pi, 48 + d);
         pi = pi - 1;
         n = n / 10;
     }

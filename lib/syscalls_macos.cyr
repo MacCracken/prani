@@ -35,7 +35,11 @@ enum SysNr {
     SYS_MMAP = 9;
     SYS_BRK = 12;
     SYS_RT_SIGPROCMASK = 14;
-    SYS_IOCTL = 16;
+    # v6.5.36 — 29, NOT the x86 16. ESYSXLAT's Mach-O arm carries a `29 → 54` row
+    # (Darwin's ioctl) and NO row for 16, so the old value emitted an unrouted 16 and
+    # issued whatever Darwin syscall 16 is. Latent because nothing in the macOS stdlib
+    # called it until sys_ioctl was wrapped; found while wrapping it.
+    SYS_IOCTL = 29;
     SYS_ACCESS = 21;
     SYS_PIPE = 22;
     SYS_DUP = 32;
@@ -74,6 +78,13 @@ enum SysNr {
     SYS_MOUNT = 165;
     SYS_UMOUNT2 = 166;
     SYS_REBOOT = 169;
+    # ⛔ v6.5.27 — THE EPOLL CONSTANTS BELOW WERE DEAD-BUT-ARMED and are now correct-by-
+    # removal in spirit: Darwin has NO epoll. They are LINUX numbers, and the macho
+    # translators do not route them, so any code reaching them issued RAW Darwin syscalls
+    # 232/233/291 (whatever those are on XNU) instead of failing. Same class as the Linux
+    # SIGCHLD=17 that is Darwin's SIGSTOP (v6.5.15). They are kept ONLY because removing a
+    # public enum member is a consumer-visible break; they must never be issued on Darwin.
+    # Use SYS_KQUEUE / SYS_KEVENT below — that is Darwin's actual readiness API.
     SYS_EPOLL_WAIT = 232;
     SYS_EPOLL_CTL = 233;
     SYS_WAITID = 247;
@@ -81,6 +92,11 @@ enum SysNr {
     SYS_TIMERFD_SETTIME = 286;
     SYS_SIGNALFD4 = 289;
     SYS_EPOLL_CREATE1 = 291;
+    # v6.5.27 — Darwin's readiness API. Private-alias band (1000 + native BSD number), the
+    # convention CLAUDE.md prescribes when no Linux source number has matching semantics:
+    # the alias documents itself, and ESYSXLAT/_msx32 renumber 1362→362 / 1363→363.
+    SYS_KQUEUE = 1362;
+    SYS_KEVENT = 1363;
     SYS_CLONE = 56;
     SYS_MUNMAP = 11;
     SYS_FUTEX = 202;
@@ -91,6 +107,7 @@ enum SysNr {
     SYS_SECCOMP = 317;
     SYS_GETRANDOM = 318;
     SYS_EXECVEAT = 322;
+    SYS_PIDFD_OPEN = 434;         # Linux number stubbed; macOS has no pidfd (async subprocess is Linux-only)
     SYS_LANDLOCK_CREATE_RULESET = 444;
     SYS_LANDLOCK_ADD_RULE = 445;
     SYS_LANDLOCK_RESTRICT_SELF = 446;
@@ -102,20 +119,41 @@ enum SysNr {
     SYS_RECVMSG = 47;
     SYS_BIND = 49;
     SYS_LISTEN = 50;
+    # v6.4.64: x86 numbers like the rest of this peer — EMACHO_SYSXLAT maps them to
+    # BSD (52→31 getpeername, 51→32 getsockname; cf. accept 43→30).
+    SYS_GETSOCKNAME = 51;
+    SYS_GETPEERNAME = 52;
     SYS_ACCEPT4 = 288;
     # v6.1.3 — bare-name fs syscalls + POSIX *at() family (Linux numbers;
     # EMACHO_SYSXLAT maps the emitted ones to Darwin/BSD at emit time).
     SYS_LSTAT = 6;
     SYS_RENAME = 82;
+    SYS_FSYNC = 74;         # v6.4.57 — x86 number; EMACHO_SYSXLAT maps 74→BSD 95
+    SYS_FDATASYNC = 75;     # v6.5.16 — x86 number; EMACHO_SYSXLAT maps 75→BSD 187
     SYS_LINK = 86;
     SYS_OPENAT = 257;
     SYS_MKDIRAT = 258;
+    SYS_FCHOWNAT = 260;
     SYS_NEWFSTATAT = 262;
     SYS_UNLINKAT = 263;
     SYS_RENAMEAT = 264;
     SYS_LINKAT = 265;
     SYS_FCHMODAT = 268;
     SYS_UTIMENSAT = 280;
+    # v6.5.16: sysctl + gettimeofday, backing lib/sys.cyr's macOS sys_uname /
+    # sys_sysinfo (Darwin has neither uname(2) nor sysinfo(2)). These are the ONLY
+    # two entries in this enum that are NOT Linux numbers: this peer's convention
+    # (see the header) is "Linux number, EMACHO_SYSXLAT rewrites it", but Linux has
+    # no live sysctl to borrow (x86 _sysctl 156 is removed), so they use the
+    # private alias band — source numbers >=1000 that no OS will ever mint, spelled
+    # 1000 + the DARWIN BSD number so the alias documents itself. Identical values
+    # in lib/syscalls_aarch64_linux.cyr (the peer macOS-arm64 resolves), which is
+    # what keeps lib/sys.cyr free of an arch #ifdef inside its macOS branch.
+    # Each needs a matching _msx32 row in EMACHO_SYSXLAT (src/backend/x86/emit.cyr);
+    # without one the number reaches Darwin unclassed and SIGSYSes the process
+    # (rc 140) — the v6.5.15 fchmod shape. CHANGELOG [6.5.16]
+    SYS_GETTIMEOFDAY = 1116;  # private alias → EMACHO_SYSXLAT → BSD 116
+    SYS_SYSCTL = 1202;        # private alias → EMACHO_SYSXLAT → BSD 202
 }
 
 # ================================================================
@@ -190,7 +228,13 @@ enum Signal {
     SIGCHLD = 20;
     SIGCONT = 19;
     SIGSTOP = 17;
-    SIGPWR = 30;
+    # v6.5.15: Darwin has NO SIGPWR, and 30 IS Darwin's SIGUSR1 — so `kill(pid, SIGPWR)`
+    # silently delivered SIGUSR1. 0 makes it the liveness probe instead of a wrong
+    # delivery: fail-inert beats fail-wrong, matching the MAP_STACK = 0 precedent for a
+    # flag this OS does not have. Fixed on the aarch64 Darwin arm in the same release;
+    # this is the x86-macOS fork of the identical defect, and ach's crossos leg is what
+    # caught it one fork behind.
+    SIGPWR = 0;
 }
 
 enum SigAction {
@@ -200,20 +244,36 @@ enum SigAction {
 }
 
 # ================================================================
-# struct stat — DARWIN x86_64 layout. st_size sits at offset 72 in the
-# struct the BSD stat syscall fills (empirically dumped on real macOS,
-# NOT the SDK header — see cbt/deps.cyr _file_size + the CHANGELOG
-# [6.0.41] st_size-at-72 precedent). STAT_BUFSZ is 144 to match the
-# other peers' buffer contract.
+# struct stat — DARWIN x86_64 layout, the LEGACY (non-INODE64) struct that
+# syscall 188 fills. The backend maps stat(4) → Darwin 188 via
+# `_msx(S, 4, 0x20000BC)` in backend/x86/emit.cyr, NOT to stat64 (338), so
+# these must be 188's offsets.
+#
+# ⛔ v6.5.7 — THIS ENUM WAS A MIX OF TWO STRUCTS AND MOSTLY WRONG. Only
+# STAT_SIZE was ever corrected (v6.0.41, empirically); MODE / NLINK / UID / GID /
+# MTIME kept **stat64** offsets, which describe a different struct entirely. So on
+# macOS-x86 `STAT_MODE` read the low half of st_ino — every mode test silently
+# false — and `STAT_MTIME` read mtime's NANOSECONDS as its seconds. Nothing
+# noticed because nothing on the x86-macOS path read a mode until `_xdir_exists`
+# did this release; `cbt/deps.cyr:_file_size` uses STAT_SIZE and was fine, which is
+# exactly why the half-fix looked complete.
+#
+# Re-dumped on real ach (Intel, 13.7.8) against a 0755 directory — st_mode came
+# back at offset 8 as 0x241ED, i.e. 0x41ED (S_IFDIR|0755) with st_nlink=2 packed
+# in the high half, since mode_t/nlink_t are u16 here:
+#   dev@0(4) ino@4(4) mode@8(2) nlink@10(2) uid@12 gid@16 rdev@20
+#   atime@24 mtime@40 ctime@56 (each timespec: sec@+0, nsec@+8) size@72
+#   blocks@80 blksize@88
+# STAT_BUFSZ stays 144 to match the other peers' buffer contract.
 # ================================================================
 enum Stat {
-    STAT_MODE = 4;
-    STAT_NLINK = 6;
-    STAT_UID = 16;
-    STAT_GID = 20;
+    STAT_MODE = 8;
+    STAT_NLINK = 10;
+    STAT_UID = 12;
+    STAT_GID = 16;
     STAT_SIZE = 72;
-    STAT_MTIME = 48;
-    STAT_MTIME_NSEC = 56;
+    STAT_MTIME = 40;
+    STAT_MTIME_NSEC = 48;
     STAT_BUFSZ = 144;
 }
 
@@ -331,6 +391,23 @@ fn sys_unlink(path): i64 {
     return syscall(SYS_UNLINK, path);
 }
 
+# Change a file's owner/group, relative to `dirfd`. The ONE wrapped primitive of
+# the chown family: with AT_FDCWD + AT_SYMLINK_NOFOLLOW it gives lchown semantics,
+# with AT_FDCWD + 0 it gives chown, and with a real dirfd it gives the *at form —
+# so wrapping the legacy trio separately buys nothing. Returns 0, or -errno.
+#
+# NOT AVAILABLE ON aarch64 (Linux or macOS-arm64), by construction rather than
+# oversight: aarch64's native fchownat is 54, which the backend's setsockopt shim
+# (`54 -> 208`, src/backend/aarch64/emit.cyr:840) unconditionally rewrites, and that
+# shim is load-bearing for 51 ecosystem repos incl. consumer-authored source. The
+# usual house fallback (use the x86 number, 260) collides with aarch64's own
+# SYS_WAIT4 = 260. See the disproven-steps banner on roadmap.md's W1 item 1 — the
+# aarch64 arm needs a sentinel-number decision and stubs to -ENOSYS until then.
+# CHANGELOG [6.5.7]
+fn sys_fchownat(dirfd, path, uid, gid, flags): i64 {
+    return syscall(SYS_FCHOWNAT, dirfd, path, uid, gid, flags);
+}
+
 # Create a symbolic link at `linkpath` pointing to `target`.
 fn sys_symlink(target, linkpath): i64 {
     return syscall(SYS_SYMLINK, target, linkpath);
@@ -348,6 +425,22 @@ fn sys_lstat(path, buf): i64 {
 # rename(oldpath, newpath) — single-filesystem rename/move.
 fn sys_rename(oldpath, newpath): i64 {
     return syscall(SYS_RENAME, oldpath, newpath);
+}
+# v6.4.57 — flush a file's data + metadata to stable storage (durability half of
+# the atomic write-tmp + fsync + rename pattern; lib/io.cyr xfsync). x86 number 74;
+# EMACHO_SYSXLAT (backend/x86/emit.cyr) renumbers it to Darwin BSD fsync (95).
+fn sys_fsync(fd): i64 {
+    return syscall(SYS_FSYNC, fd);
+}
+
+# v6.5.16 — flush file DATA only (not metadata). The x86_64-Linux and aarch64-Linux
+# peers have carried `sys_fdatasync` since v6.2.14; this peer never got it, so
+# tests/tcyr/platform/fsync.tcyr did not merely fail on Intel-Mac — it failed to
+# COMPILE ("refusing to emit binary with 1 reachable undefined function(s)"), which
+# is why it never showed up as a runtime SIGSYS like its siblings. Darwin HAS the
+# call: BSD 187, live-probed rc 0 on ach. EMACHO_SYSXLAT maps 75→187.
+fn sys_fdatasync(fd): i64 {
+    return syscall(SYS_FDATASYNC, fd);
 }
 
 # Read the target of a symbolic link into `buf` (cap `bufsize`).
@@ -393,4 +486,17 @@ fn is_err(ret): i64 {
 # err_code: negate a negative syscall return into a positive errno.
 fn err_code(ret): i64 {
     return 0 - ret;
+}
+
+# v6.5.27 — Darwin readiness API wrappers. kqueue() takes no arguments and returns a new
+# kernel queue fd; kevent() registers changes and/or collects events in ONE call, which is
+# the structural difference from epoll (epoll_ctl and epoll_wait are separate).
+# Signature: kevent(kq, changelist, nchanges, eventlist, nevents, timeout).
+# A NULL timeout blocks indefinitely, which is what the reactor wants.
+fn sys_kqueue(): i64 {
+    return syscall(SYS_KQUEUE);
+}
+# Register changes and/or wait for events on a kqueue. Returns the event count, or < 0.
+fn sys_kevent(kq, changelist, nchanges, eventlist, nevents, timeout): i64 {
+    return syscall(SYS_KEVENT, kq, changelist, nchanges, eventlist, nevents, timeout);
 }

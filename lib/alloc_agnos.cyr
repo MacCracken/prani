@@ -26,7 +26,7 @@ var AGNOS_CHUNK = 0x200000;
 # macOS peers (alloc.cyr/alloc_windows.cyr/alloc_macos.cyr all = 0x10000000).
 # Defined here because this peer is compiled standalone for CYRIUS_TARGET_AGNOS —
 # the alloc.cyr ALLOC_MAX is inside the CYRIUS_TARGET_LINUX block, out of scope.
-var ALLOC_MAX = 0x10000000;
+var ALLOC_MAX = 0x80000000;   # 2 GiB (v6.4.51: was 256 MiB; output_buf now allocs 1 GiB off-heap)
 
 # Round `n` up to the next 2 MB multiple (agnos mmap granularity).
 fn _agnos_round_2mb(n): i64 {
@@ -91,6 +91,15 @@ fn alloc(size): i64 {
 # this is a cheap reuse of the first chunk, not a full munmap sweep.
 fn alloc_reset(): i64 {
     _alloc_lock_acquire();
+    # Scrub the reused span of the FIRST chunk before rewinding, so a later
+    # alloc() can't read the prior occupant's bytes (memory-reuse info-leak,
+    # CVE-2026-34988 class). alloc_reset is the ONLY reuse point — spills past
+    # the first chunk mmap FRESH zero-filled agnos chunks. Still in the first
+    # chunk (common): written extent is exactly _heap_ptr. Spilled: zero the
+    # whole 2 MB first chunk (exact fill point untracked; cheap here). (v6.4.1)
+    var span = _heap_ptr - _heap_first_base;
+    if (_heap_base != _heap_first_base) { span = _heap_first_end - _heap_first_base; }
+    if (span > 0) { _alloc_zero(_heap_first_base, span); }
     _heap_base = _heap_first_base;
     _heap_ptr = _heap_first_base;
     _heap_end = _heap_first_end;

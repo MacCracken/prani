@@ -2,8 +2,23 @@
 # Usage: include "lib/syscalls.cyr" (the selector picks this peer when
 #        CYRIUS_TARGET_AGNOS is defined; do NOT include directly).
 #
-# Faithful mirror of agnos/docs/development/agnos-userland-abi.md
-# (agnos 1.41.x). STANDALONE — does NOT include syscalls_linux_common.cyr:
+# Mirrors agnos's SYSCALL DISPATCH — `agnos/kernel/core/syscall.cyr` — which is the
+# single canonical source. `agnos/docs/development/agnos-userland-abi.md` is a
+# secondary reference: useful, but it documents 65 of the kernel's 96 arms and is
+# NOT authority.
+#
+# ⛔ v6.5.7 — this header used to read "faithful mirror of …/agnos-userland-abi.md",
+# and that doc in turn names "the cyrius syscalls_x86_64_agnos.cyr peer" as part of
+# ITS authority. For agnos syscalls 45-59 the chain was doc → cyrius → doc:
+# **neither file was canonical and each named the other**, so a wrong number
+# introduced in either could then be "verified" against the other. The kernel
+# dispatch is the tiebreak, and always was — §5 below already said so; the header
+# contradicted it. (Verified at agnos 1.56.39 / cycc 6.5.6: 96 kernel arms #0-#95,
+# 96 SysNrAgnos constants, ZERO gaps — this file is complete and correct; only its
+# stated provenance was wrong. The old `(agnos 1.41.x)` stamp was 15 minors stale,
+# which is worse than no stamp because it invites distrust of a file that is right.)
+#
+# STANDALONE — does NOT include syscalls_linux_common.cyr:
 # agnos has its own syscall numbers, exit=0 (not Linux 60), the a4=r10
 # 4-arg convention (§1a), AO_* open flags (NOT Linux O_*, §3.3), and the
 # explicit-length invariant (every path arg carries its length — no
@@ -11,10 +26,27 @@
 # x86_64-Linux (rax=num, rdi/rsi/rdx/r10 = a1..a4), so the syscall
 # instruction emit is unchanged — only the NUMBERS differ.
 #
-# RE-FREEZE RULE (§5): the agnos kernel is canonical; this file mirrors
-# the doc. If a number / signature / struct layout changes in the doc's
-# §2/§3/§4, update this file in the same change. Return convention:
-# rax >= 0 on success, -1 on error (NOT Linux -errno).
+# RE-FREEZE RULE (§5): the agnos KERNEL is canonical — `kernel/core/syscall.cyr`.
+# If a number / signature / struct layout changes there, update this file in the
+# same change; if the ABI doc disagrees with the kernel, the kernel wins and the
+# doc is the bug. Return convention: rax >= 0 on success, -1 on error (NOT
+# Linux -errno).
+#
+# ⚠ #96 / #97 (agnos, assigned by operator ruling 2026-08-05; next free = #98).
+# Neither may be swapped on first-come grounds.
+#   #97 = chan_op — MINTED at cyrius 6.5.8. The kernel arm shipped in agnos 1.56.40
+#                   (`kernel/core/syscall.cyr:7620`, `if (num == 97)`), with all five
+#                   ops CAPS/MINT/SEND/RECV/CLOSE dispatching and `CH_OP_SUPPORTED`
+#                   = 0x1F advertising exactly those. Verified by reading the kernel,
+#                   not the ABI doc — see the RE-FREEZE RULE above.
+#   #96 = fork    — STILL NOT MINTED. No dispatch arm exists in agnos 1.56.40
+#                   (`grep 'num == 96'` finds nothing). Do NOT add the constant until
+#                   it does: on agnos an unknown `num` falls THROUGH the dispatch
+#                   chain and the caller reads the fall-through value as DATA, so a
+#                   minted-but-unimplemented constant is strictly worse than an absent
+#                   one — and a host build of the same consumer looks healthy either
+#                   way, so nothing off-target catches it. Gated by
+#                   tests/gates/platform/syscall_wrapper_pass.sh axis 5.
 
 # ================================================================
 # Syscall numbers — §2 FROZEN (0-28) + §3 (29-33)
@@ -33,7 +65,7 @@ enum SysNrAgnos {
     SYS_RMDIR = 10;                # rmdir(path, pathlen) → 0
     SYS_MOUNT = 11;                # mount() → 0 (stub)
     SYS_SYNC = 12;                 # sync() → 0
-    SYS_REBOOT = 13;               # reboot() → halts
+    SYS_REBOOT = 13;               # reboot(magic1,magic2,cmd,arg) → power_sys (1.55.25+)
     SYS_PAUSE = 14;                # pause() → 0 (one hlt)
     SYS_GETUID = 15;               # getuid() → 0 (stub, always root)
     SYS_KILL = 16;                 # kill(pid, sig) → 0 / -1
@@ -68,6 +100,221 @@ enum SysNrAgnos {
     #   linkpath/linkpathlen = where the link is created (ext2 only). agnos #63 — the next free
     #   number after WINSIZE (#0–62 taken), kernel `symlink`#63 landed at agnos 1.51.0. Mirrors
     #   SYS_LINK=32's 4-arg ABI exactly. (issue 2026-06-29-agnos-sys-symlink-peer.)
+    # ---- agnos HDA audio band #64-69 (agnos 1.52.x Gate 2) ----
+    #   Frozen output stream: 48000 Hz / 16-bit / stereo (S16 interleaved, 4 B/frame).
+    #   Kernel does NO format conversion (dumb byte-mover) — the producer resamples.
+    #   All calls take an snd_id slot 0..3; #65-69 reject a slot not allocated-and-owned
+    #   by the caller (-1), like flock. (issue 2026-07-04-agnos-snd-audio-syscall-band-64-69.)
+    SYS_SND_OPEN   = 64;          # snd_open() → slot 0..3 / -1; auto-released on proc-exit
+    SYS_SND_CONFIG = 65;          # snd_config(slot, rate, fmt) → 0/-1; rate=48000, fmt=(bits<<8)|ch=0x1002
+    SYS_SND_WRITE  = 66;          # snd_write(slot, buf, frames) → frames / -1; a4=r10 bit0 = O_NONBLOCK
+    SYS_SND_CLOSE  = 67;          # snd_close(slot) → 0 / -1
+    SYS_SND_DRAIN  = 68;          # snd_drain(slot) → 0; blocks until play-out (~1s cap)
+    SYS_SND_AVAIL  = 69;          # snd_avail(slot) → free frames / -1; non-blocking
+    SYS_READLINK   = 70;          # readlink(path, pathlen, buf, buflen) → target bytes / -1 (a4=r10).
+    #   Symlink-INTROSPECTION peer of SYS_SYMLINK=63: reads the link's TEXT target NO-FOLLOW into
+    #   buf (≤ buflen, NOT NUL-terminated); -1 if path absent / not a symlink / target > buflen / non-ext2.
+    SYS_SHM_CREATE = 71;          # shm_create(size) → id (>=1) / -1 — kernel-owned COPY-based shared buffer
+    SYS_SHM_WRITE  = 72;          # shm_write(id, user_src, size) → 0 / -1
+    SYS_SHM_READ   = 73;          # shm_read(id, user_dst, size)  → 0 / -1
+    SYS_SHM_FREE   = 74;          # shm_free(id) → 0 / -1
+    SYS_BLK_ENUM   = 75;          # blk_enum(buf, cap) → registered-device count / -1
+    SYS_BLK_OPEN   = 76;          # blk_open(tag, mode) → handle / arm-ack(0) / -1 (mode 1=RW is capability-gated)
+    SYS_BLK_READ   = 77;          # blk_read(h, lba, buf, nsec) → nsec / -1 (nsec on a4=r10)
+    SYS_BLK_WRITE  = 78;          # blk_write(h, lba, buf, nsec) → nsec / -1 — GATED (arm via blk_open magic)
+    SYS_BLK_INFO   = 79;          # blk_info(h, out) → 0 / -1
+    SYS_BLK_CLOSE  = 80;          # blk_close(h) → 0 / -1
+    SYS_READDIR    = 81;          # readdir(path, buf, max) → count / <0 (agnos #81; fchdir on Linux)
+    SYS_GPU_DISPATCH     = 82;    # gpu_dispatch(a,b,c) → 0/<0; 64xi32 8x8 A*B→C on GPU (RENAME on Linux)
+    SYS_GPU_DISPATCH_F64 = 83;    # gpu_dispatch_f64(a,b,c) → 0/<0; 64xf64, unfused (MKDIR on Linux)
+    SYS_GPU_PRESENT      = 84;    # present() → 1/0; flip back buffer (RMDIR on Linux — DESTRUCTIVE)
+    SYS_GPU_FILL         = 85;    # gpu_fill(color) → 0/-1; CP-DMA constant-fill of the back buffer (CREAT on Linux)
+    SYS_SHM_CREATE_GPU   = 86;    # shm_create_gpu(size) → id/-1; GPU-visible shm page (LINK on Linux)
+    SYS_GPU_BLIT_SHM     = 87;    # gpu_blit_shm(id,wh,dstxy) → 0/-1 (UNLINK on Linux — DELETES A FILE)
+    SYS_GPU_FILL_RECT    = 88;    # gpu_fill_rect(color,wh,dstxy) → 0/-1 (SYMLINK on Linux)
+    SYS_GPU_CAPS         = 89;    # gpu_caps(buf,len) → 0/-1; bb geometry (READLINK on Linux — WRITES arg2)
+    SYS_GPU_READBACK_SHM = 90;    # gpu_readback_shm(id,wh,srcxy) → 0/-1; capture bb→shm (CHMOD on Linux)
+    SYS_GPU_BLIT_BB      = 91;    # gpu_blit_bb(srcxy,wh,dstxy) → 0/-1; bb→bb move (FCHMOD on Linux — SUCCEEDS)
+    SYS_GPU_SHADER_OP    = 92;    # gpu_shader_op(desc_uva,len) → 0/<0; 64B op recs (CHOWN — arg1 read as a PATH)
+    SYS_GPU_MODESET_OP   = 93;    # gpu_modeset_op(desc_uva,len) → 0/<0; descriptor recs (FCHOWN on Linux)
+    SYS_GPU_RECOVER_OP   = 94;    # gpu_recover_op(arm) → 95/-1/-2..-5 (LCHOWN on x86 — arg1 read as a PATH;
+    #   **EXIT_GROUP on aarch64 — a raw syscall(94) TERMINATES THE PROCESS**)
+    SYS_UPTIME_US        = 95;    # uptime_us() → µs since calibration / -1 (UMASK on x86 — nullary here, so the
+    #   Linux call would read a garbage mask and SUCCEED, returning the old one)
+    # v6.5.8 — the local-IPC channel band. ONE syscall, op-dispatched on arg1, which is
+    # the same `MDO_OP_SUPPORTED` shape that grew #93 across a whole arc with no ABI
+    # break. (#96 fork is NOT minted — see the header; no kernel arm exists yet.)
+    SYS_CHAN_OP          = 97;    # chan_op(op, a1, a2, a3) → 0/len / negative CH_E_*
+    SYS_PTRSCAN          = 98;    # ptrscan(buf, max) → 16 / 0 (idle) / -1  (agnos 1.56.42)
+    SYS_PROCLIST         = 99;    # proclist(buf, max) → record count / -1  (agnos 1.56.47)
+    # v6.5.36 — the RESUMABLE directory listing. A separate number from #81, not a 4th argument on
+    # it, for the reason #100 records: the compiler pops only as many registers as a call site
+    # passes, so an unused syscall argument register carries stale data rather than zero — and this
+    # argument is a POINTER the kernel writes through.
+    SYS_READDIR_AT       = 101;   # readdir_at(path, buf, max, &cursor) → count / <0 (agnos 1.56.50)
+}
+
+# ── Pointer band (agnos 1.56.42, `#98 ptrscan`) ─────────────────────
+#
+# Non-blocking drain of ONE MERGED pointer sample. Returns 16 (bytes written) on
+# motion/button activity, 0 when the pointer has been idle since the last call, or -1 on a
+# bad user range or a buffer smaller than one record.
+#
+# Record (16 B, little-endian), layout owned by the kernel's `hid_mouse_take()`:
+#   +0  s32 dx
+#   +4  s32 dy            (POSITIVE = DOWN)
+#   +8  u32 buttons       (current level)
+#   +12 u32 buttons_seen  (OR since last drain — this is what lets a click that starts and
+#                          finishes inside one frame survive)
+#
+# ⭐ ONE MERGED SAMPLE, NOT A BYTE STREAM. `kbscan #42` returns raw scancodes because keys
+# are discrete events; pointer motion is a RELATIVE DELTA, so the useful unit is the sum
+# since the last call and the kernel folds every report before handing it over.
+#
+# ⛔ IT MUST NOT SHARE `kbscan #42`'s RING, and that is a correctness constraint rather
+# than tidiness: a one-pixel-right motion is dX = 0x01, and 0x01 through a Set-1 decoder is
+# HID 0x29 = ESCAPE. Sharing the scancode pipe would mean moving the mouse quits the
+# compositor — and that pipe also feeds cyrius-doom's input_poll.
+#
+# ⚠ `buf` must be at least 16 bytes and in the caller's own address range; the kernel
+# rejects both cases with -1 rather than a short write.
+fn sys_ptrscan(buf, max): i64 {
+    return syscall(SYS_PTRSCAN, buf, max);
+}
+
+# ── Process-enumeration band (agnos 1.56.47, `#99 proclist`) ────────
+#
+# Snapshot of the live process table. Returns the NUMBER OF RECORDS written, or -1 on a
+# bad user range or `max < 1`. `buf` must hold `max * 64` bytes in the caller's own range.
+#
+# Record (64 B, little-endian), one per live slot:
+#   +0   u64 pid
+#   +8   u64 state       1 = ready · 2 = running · 3 = claiming (0 = dead is skipped)
+#   +16  u64 ppid        0 = init
+#   +24  u8  name[32]    NUL-terminated basename, recorded by the ELF loader
+#   +56  u64 reserved    always 0 today
+#
+# ⭐ WHY IT EXISTS. Before this, AGNOS had NO enumeration primitive of any kind — the
+# ring-3 surface offered getpid/spawn/waitpid/kill and nothing that could answer "what is
+# running?", and there is no procfs. A system monitor was therefore impossible on AGNOS:
+# chakshu rendered a column header and zero rows.
+#
+# ⚠ A SNAPSHOT, NOT A HANDLE. The kernel walks the table under preempt_disable so the set
+# cannot change mid-walk, but a pid may exit before the caller acts on it. That race is
+# inherent to any ps(1) and belongs to the caller — re-probe before signalling.
+#
+# ⚠ THE RESERVED FIELD IS NOT SPARE SPACE. Per-process rss and cpu time are not tracked by
+# the kernel yet; when they are, they land at +56 and the record size does NOT change.
+# Consumers should zero-check it rather than assuming it stays 0 forever.
+#
+# ⚠ GUARD THE CALL SITE. A kernel older than 1.56.47 has no `#99` arm. Treat a negative
+# return as "this kernel cannot enumerate" and degrade, rather than reporting an empty
+# system — the two are different facts and a monitor must not conflate them.
+fn sys_proclist(buf, max): i64 {
+    return syscall(SYS_PROCLIST, buf, max);
+}
+
+# ── Local-IPC channel band (agnos 1.56.40, `#97 chan_op`) ───────────
+# agnos is replacing TCP-on-loopback as the desktop's control transport with a
+# kernel-owned channel band. Values mirror kernel/core/syscall.cyr:4556-4574 — keep
+# them in lockstep with that file, it is canonical.
+#
+# ⭐ A CHANNEL IS MINTED AS A PAIR AND HAS NO NAME: MINT hands back both ends or
+# nothing. That deletes the entire unlink-before-bind race class AF_UNIX carries —
+# there is no name for a second process to bind first, so "whoever binds the port
+# first owns the display protocol and every keystroke on it" cannot be reproduced.
+enum ChanOp {
+    CH_CAPS   = 0x00;   # (out_uva, out_len >= 16) → 0; writes the caps block
+    CH_MINT   = 0x01;   # (out_uva) → 0; writes TWO fds (16 B) — a pair, never one end
+    CH_SEND   = 0x02;   # (fd, buf, len <= 64) → len / negative CH_E_*
+    CH_RECV   = 0x03;   # (fd, buf, cap) → len / -CH_E_WOULDBLOCK / -CH_E_PEERGONE
+    CH_CLOSE  = 0x04;   # (fd) → 0
+    # v6.5.9 (agnos 1.56.40 bite 5). ⚠ RETURNS AN FD, NOT 0 — the one op in this band that
+    # does. The number is decided at ARM time because the kernel cannot announce it: by the
+    # time placement happens, `elf_load_from_file` has already baked the child's env into
+    # its init stack. So the PARENT announces it, Wayland's `WAYLAND_SOCKET` shape — arm the
+    # endpoint, take the returned fd, and pass it to the child as `AGNOS_CHAN=<fd>` via
+    # `sys_spawn_path_env` below. Without endowment a child can hold no channel at all: an
+    # inherited fd is inert by construction.
+    # (The kernel's own enum comment at syscall.cyr:4588 still says "-> 0"; the ARM at :7898
+    # does `return tfd` and the design note at :4615 says the fd. Code wins — reported back.)
+    CH_ENDOW  = 0x05;   # (fd) → the fd index the CHILD will hold, or negative CH_E_*
+}
+
+# ⚠ WOULDBLOCK and PEERGONE are per-RECORD RESULTS, not failures — a poll batch that
+# aborts on them is wrong. The kernel comments say so explicitly.
+enum ChanErr {
+    CH_E_BADOP       = 2;   # unknown, reserved, or not implemented in THIS kernel
+    CH_E_OUTBUF      = 3;   # CAPS out_uva/out_len invalid
+    CH_E_NOREGION    = 4;   # the 2 MB region is absent or unreachable from this CR3
+    CH_E_BADFD       = 5;   # not a channel fd, or authority failed (incl. an INHERITED claim)
+    CH_E_ARG         = 6;   # bad buffer / length
+    CH_E_FULL        = 7;   # no free channel
+    CH_E_WOULDBLOCK  = 8;   # per-record result
+    CH_E_PEERGONE    = 9;   # per-record result
+}
+
+# ⚠ `CH_OP_SUPPORTED` is 0x3F on a 1.56.40 kernel (bits 0-5, ENDOW included) — it was 0x1F
+# when 6.5.8 minted this band. A client that negotiates on the mask sees bit 5; the peer
+# having no name for it was the gap this release closes.
+# ⛔ NEGOTIATE ON THE CAPS MASK, DO NOT ASSUME. One bit per IMPLEMENTED op; a merely
+# reserved op reads 0. Advertising an op the kernel cannot run is exactly how a client
+# "works" against a kernel that cannot serve it, so a client that skips CAPS and calls
+# SEND blind is relying on a kernel version it never checked.
+# Caps block layout: +0 op-support mask (u32) · +4 region pages (u32) · +8 region
+# reachable (u64, a LIVE probe under the CALLER's CR3, not a boot-time cached answer).
+var CH_CAPS_BUFSZ = 16;
+
+# ⚠ THE `sys_chan_` PREFIX IS DELIBERATE AND MUST NOT BE SHORTENED. `chan_send`,
+# `chan_recv`, `chan_close` and `chan_new` are ALREADY the in-process MPSC thread
+# channel in lib/thread.cyr; cyrius resolves duplicate fns last-definition-wins, so a
+# bare `chan_send` here would silently replace the thread channel's for any consumer
+# including both files, on agnos only. Different transport, different namespace.
+fn sys_chan_caps(out, outlen): i64 {
+    return syscall(SYS_CHAN_OP, CH_CAPS, out, outlen);
+}
+
+# Mint a channel PAIR. `out` must be a 16-byte buffer; receives two fds.
+fn sys_chan_mint(out): i64 {
+    return syscall(SYS_CHAN_OP, CH_MINT, out);
+}
+
+# Send up to 64 bytes as one record. Returns the length sent, or a negative CH_E_*.
+fn sys_chan_send(fd, buf, len): i64 {
+    return syscall(SYS_CHAN_OP, CH_SEND, fd, buf, len);
+}
+
+# Receive one record. Returns its length, or -CH_E_WOULDBLOCK / -CH_E_PEERGONE, both
+# of which are RESULTS to handle rather than errors to abort on.
+fn sys_chan_recv(fd, buf, cap): i64 {
+    return syscall(SYS_CHAN_OP, CH_RECV, fd, buf, cap);
+}
+
+# Close one END of a channel. The peer stays open and observes -CH_E_PEERGONE on its
+# next RECV, which is a result to handle rather than an error to abort on.
+fn sys_chan_close(fd): i64 {
+    return syscall(SYS_CHAN_OP, CH_CLOSE, fd);
+}
+
+# Arm `fd`'s endpoint for placement into the next `sys_spawn_path*` child, and return the fd
+# index that child will hold (negative CH_E_* on failure). ⚠ The return is an FD, not a
+# status — see CH_ENDOW above. The parent must then announce it to the child itself, e.g.
+# `AGNOS_CHAN=<returned fd>` in the env blob passed to `sys_spawn_path_env`; the child reads
+# it out of its environment and never searches for a channel it was not given.
+fn sys_chan_endow(fd): i64 {
+    return syscall(SYS_CHAN_OP, CH_ENDOW, fd);
+}
+
+# ── GPU recovery arms (agnos 3D arc RUNG 5) ────────────────────
+# Exported so consumers stop hand-rolling the arm numbers, per the same rule that
+# put PWR_MAGIC1/PWR_HALT here at v6.4.68. Values mirror kernel/core/syscall.cyr
+# :3093-3097 — keep them in lockstep with that file, it is canonical.
+enum GpuRecoverArm {
+    RECOV_ARM_A = 1;   # controlled wedge — the bracket must name the WAIT packet
+    RECOV_ARM_B = 2;   # dequeue + re-map — CP_HQD_ACTIVE must read 0, then work must retire
+    RECOV_ARM_C = 3;   # negative control — matmul bit-correct BEFORE and AFTER
+    RECOV_ARM_D = 4;   # free — is the console still painting while wedged?
+    RECOV_ARM_E = 5;   # the guard's own negative control
 }
 
 # ================================================================
@@ -146,10 +393,14 @@ enum SysNrAgnosNet {
     SYS_UDP_SEND = 52;     # udp_send(dst_ip, (sport<<16)|dport, buf, len[=a4]) → bytes / 0 / -1
     SYS_UDP_RECV = 53;     # udp_recv(listener_id, buf, maxlen, addr_out[=a4]) → bytes / 0=none / -1
     SYS_UDP_UNBIND = 54;   # udp_unbind(listener_id) → 0 / -1
-    SYS_ICMP_ECHO = 55;    # icmp_echo(dst_ip) → RTT ms (≥0) / -1; BLOCKS ~3s
+    SYS_ICMP_ECHO = 55;    # icmp_echo(dst_ip) → RTT ms (≥0) / -1; BLOCKS ~3s (fixed kernel bound)
+    SYS_ICMP_ECHO_EX = 100; # icmp_echo_ex(dst_ip, timeout_ms) → RTT ms (≥0) / -1 (agnos 1.56.48)
     SYS_SOCK_LISTEN = 56;  # sock_listen(port) → listen_id 0..7 / -1; merges bind+listen, non-blocking (1.45.5)
     SYS_SOCK_ACCEPT = 57;  # sock_accept(listen_id) → conn_id / -1 (WOULD_BLOCK / bad id); non-blocking (1.45.5)
-    SYS_NET_CONFIG = 61;   # net_config(field) → packed IPv4 / 0 unset / -1 bad field (agnos 1.45.16)
+    # net_config(field) → packed IPv4 (0..3) / counter (4..7) / -1 bad field.
+    #   0=ip 1=netmask 2=gateway 3=dns_server                      (agnos 1.45.16)
+    #   4=icmp_tx 5=icmp_rx 6=icmp_replies_sent 7=icmp_timeouts    (agnos 1.56.48)
+    SYS_NET_CONFIG = 61;
 }
 
 # ================================================================
@@ -253,6 +504,40 @@ var AGNOS_SOCK_RECV_MAX_SPINS = 6000;
 # Terminate the process with `code` (agnos exit = syscall 0; the
 # _start/EEXIT epilogue emits the same). Does not return.
 fn sys_exit(code): i64 { return syscall(SYS_EXIT, code); }
+
+# Terminate every thread in the process — the Linux exit_group(2) peer.
+# agnos defines no exit_group: SYS_EXIT (#0) already tears the whole proc
+# down, so this is sys_exit by another name. It exists so a portable
+# epilogue can call one name on every target rather than #ifdef'ing.
+# CHANGELOG [6.5.6]
+fn sys_exit_group(code): i64 { return syscall(SYS_EXIT, code); }
+
+# Change the working directory — NOT IMPLEMENTED on agnos.
+#
+# agnos ring-3 has no cwd concept and no chdir number, so this returns
+# -ENOSYS (-38) rather than mis-dispatching to whatever occupies the Linux
+# number. An EXPLICIT stub is the point: without it a consumer calling
+# sys_chdir gets a link error on agnos only, which surfaces as "the stdlib
+# does not build for agnos" rather than "this call is unavailable here".
+# CHANGELOG [6.5.7]
+fn sys_chdir(path): i64 { return 0 - 38; }
+
+# fchownat — NOT IMPLEMENTED on agnos. Returns -ENOSYS (-38).
+#
+# agnos has no chown family at all. An EXPLICIT stub, not a missing symbol, and
+# NOT a raw number: two of the agnos 92-95 band TERMINATE THE CALLER on ARM, so
+# guessing a number here is the worst available option. CHANGELOG [6.5.7]
+fn sys_fchownat(dirfd, path, uid, gid, flags): i64 { return 0 - 38; }
+
+# at-family constants. The Linux values, defined here so the PORTABLE surface is
+# complete: this peer is STANDALONE (it does not include syscalls_linux_common.cyr,
+# where these live for the Linux/macOS peers), so without them a consumer calling
+# sys_fchownat(AT_FDCWD, ...) fails to compile on this target even though the
+# wrapper exists. The wrapper is a stub here, so the values are nominal — but
+# source portability is the whole point of having the name. CHANGELOG [6.5.7]
+var AT_FDCWD = 0 - 100;
+var AT_SYMLINK_NOFOLLOW = 256;   # 0x100
+var AT_REMOVEDIR = 512;          # 0x200
 
 # Write `count` bytes from `buf` to `fd` (fd 1/2 → console). Returns
 # bytes written, or -1. Same shape as Linux → portable. v6.2.3: a TAGGED
@@ -394,8 +679,22 @@ fn sys_getuid(): i64 { return syscall(SYS_GETUID); }
 # the Linux/macOS peers) a uniform agnos definition. See lib/sys.cyr is_root.
 fn sys_geteuid(): i64 { return syscall(SYS_GETUID); }
 
-# Halt the machine (does not return).
-fn sys_reboot(): i64 { return syscall(SYS_REBOOT); }
+# agnos power-control constants — the kernel's power_sys magic gate
+# ("PWR1"/"PWR2") + command codes. Exported so consumers stop hand-rolling them.
+var PWR_MAGIC1 = 0x50575231;   # "PWR1"
+var PWR_MAGIC2 = 0x50575232;   # "PWR2"
+var PWR_HALT   = 1;
+var PWR_OFF    = 2;
+var PWR_REBOOT = 3;
+
+# agnos power control — syscall #13 power_sys(magic1, magic2, cmd, arg). agnos
+# 1.55.25 replaced the old halt-only stub with this 4-arg form; the magic pair
+# gates stale / garbage callers closed (agnos kernel/core/power.cyr). Widened
+# here from the old nullary `sys_reboot()` to match. cmd: PWR_HALT / PWR_OFF /
+# PWR_REBOOT. CHANGELOG [6.4.68].
+fn sys_reboot(magic1, magic2, cmd, arg): i64 {
+    return syscall(SYS_REBOOT, magic1, magic2, cmd, arg);
+}
 
 # Create directory `path` (length `pathlen`). Returns 0.
 fn sys_mkdir(path, pathlen): i64 { return syscall(SYS_MKDIR, path, pathlen); }
@@ -462,6 +761,332 @@ fn sys_symlink(target, targetlen, linkpath, linkpathlen): i64 {
     return syscall(SYS_SYMLINK, target, targetlen, linkpath, linkpathlen);
 }
 
+# Read the TEXT target of the symlink at `path` (len `pathlen`) into `buf` (cap `buflen`),
+# returning the target byte count (≤ buflen, NOT NUL-terminated) or -1. 4-arg, a4 in r10. The
+# no-follow INTROSPECTION peer of sys_symlink#63 (agnos readlink#70) — resolves the FINAL path
+# component WITHOUT following it, so a `--agnos` symlink manager (hapi) can SEE an existing link +
+# read its target (there is no lstat peer, and path-based sys_stat#33 FOLLOWS the final symlink).
+# -1 on: path absent / not a symlink / target > buflen / non-ext2. (issue 2026-07-08.)
+fn sys_readlink(path, pathlen, buf, buflen): i64 {
+    return syscall(SYS_READLINK, path, pathlen, buf, buflen);
+}
+
+# ---- agnos shm band (#71-74): COPY-based, kernel-owned shared buffer (agnos 1.53.9). A writer
+# sys_shm_write#72s a buffer, hands the 1-based id over its own IPC, a reader sys_shm_read#73s it —
+# no page mapping, no socket streaming (single-core present without the sock_send preemption deadlock
+# or the proc_free_address_space use-after-free). Backs the setu shared-buffer present
+# (setu/src/buf.cyr). ids are 1-based (0 = the setu "inline" sentinel); size ≤ 2 MB (one pmm page).
+# agnos-kernel-only — no host twin; a portable "shared buffer" keeps its own per-target split.
+# (issue 2026-07-09-agnos-sys-shm-peers.)
+fn sys_shm_create(size): i64         { return syscall(SYS_SHM_CREATE, size); }
+# shm_write(id, src, size) — copy user src → buffer id (is_user_range'd) → 0 / -1.
+fn sys_shm_write(id, src, size): i64 { return syscall(SYS_SHM_WRITE, id, src, size); }
+# shm_read(id, dst, size) — copy buffer id → user dst (is_user_range'd) → 0 / -1.
+fn sys_shm_read(id, dst, size): i64  { return syscall(SYS_SHM_READ, id, dst, size); }
+# shm_free(id) — release the buffer's page + slot → 0 / -1.
+fn sys_shm_free(id): i64             { return syscall(SYS_SHM_FREE, id); }
+
+# ---- agnos raw block-device band (#75-80): the native-install primitive (agnos 1.53.10). Ring-3 raw
+# sector I/O so a sovereign installer/mkfs (agnova) can partition + format a disk with no Linux
+# parted/mkfs — the kernel exposes raw sectors, userland builds the GPT/mkfs structures. RW is
+# capability-gated kernel-side (armed by blk_open(_, BLK_RW_ARM_MAGIC)); these wrappers only marshal.
+# agnos-kernel-only — no host twin (host installers use /dev + parted). (issue 2026-07-09-agnos-sys-blk-peers.)
+# blk_enum(buf, cap) — list registered devices → count / -1 (writes {tag, capacity_lbas, lba_bytes}*count).
+fn sys_blk_enum(buf, cap): i64           { return syscall(SYS_BLK_ENUM, buf, cap); }
+# blk_open(tag, mode) — open a device → handle / arm-ack(0) / -1 (mode 0=RO, 1=RW gated; magic arms RW).
+fn sys_blk_open(tag, mode): i64          { return syscall(SYS_BLK_OPEN, tag, mode); }
+# blk_read(h, lba, buf, nsec) — raw sector read (bounds-checked) → nsec / -1 (nsec rides a4=r10).
+fn sys_blk_read(h, lba, buf, nsec): i64  { return syscall(SYS_BLK_READ, h, lba, buf, nsec); }
+# blk_write(h, lba, buf, nsec) — raw sector write + flush → nsec / -1 — GATED on the RW arm.
+fn sys_blk_write(h, lba, buf, nsec): i64 { return syscall(SYS_BLK_WRITE, h, lba, buf, nsec); }
+# blk_info(h, out) — device geometry → 0 / -1 (writes {capacity_lbas, lba_bytes}).
+fn sys_blk_info(h, out): i64             { return syscall(SYS_BLK_INFO, h, out); }
+# blk_close(h) — release the handle → 0 / -1.
+fn sys_blk_close(h): i64                 { return syscall(SYS_BLK_CLOSE, h); }
+
+# ---- agnos ring-3 directory listing (#81, agnos 1.53.13; kernel `ext2_readdir_sys`). Gives
+# crab / a future `ls` / agnsh a named entry point instead of the raw number. agnos-kernel-only —
+# on Linux x86_64 #81 is `fchdir`, so this band lives only in the agnos syscall stdlib (included
+# under #ifdef CYRIUS_TARGET_AGNOS). (issue 2026-07-10-agnos-sys-readdir-wrapper.)
+# readdir(path, buf, max) — list `path` into `buf` as `max` fixed 64-byte records (name NUL-term
+# at +0, type at +63: 1=dir/0=file; `.`/`..` omitted) → entry count (>=0), or <0 (-1 bad ptr/not
+# ext2, -2 not found, -4 not a dir).
+fn sys_readdir(path, buf, max): i64      { return syscall(SYS_READDIR, path, buf, max); }
+
+# ---- agnos RESUMABLE directory listing (#101, agnos 1.56.50; kernel `ext2_readdir_at_sys`).
+# `#81` always starts at the top of the directory and stops at `max`, so a directory with more
+# entries than the caller's buffer is silently truncated — crab's pane cap was exactly that ceiling.
+# This carries a CURSOR, so the same directory can be read in batches.
+#
+# readdir_at(path, buf, max, cursor) — `cursor` points at ONE i64 the kernel reads AND writes:
+#   in   0 to start at the top of the directory
+#   out  the byte offset to resume from, or -1 when the directory is exhausted
+# → entry count (>=0), or <0 (-1 bad ptr/not ext2, -2 not found, -4 not a dir, -5 misaligned cursor).
+#
+# ⚠ THE CURSOR IS A BYTE OFFSET INTO THE DIRECTORY FILE — POSIX `telldir`'s cookie, and the only
+# value that survives ext2 directories being a chain of variable-length records. It is NOT an entry
+# index; do not compute one from it.
+# ⚠ Callers loop `while (cur != -1)`. Passing -1 back in returns 0 and changes nothing, so a loop
+# that overruns by one is harmless rather than an infinite restart from the top.
+# ⛔ THE CURSOR MUST BE 4-BYTE ALIGNED and inside the directory, or the kernel returns -5. ext2
+# records are 4-byte aligned; an offset inside a record would parse a header out of a filename.
+#
+# ⛔ DO NOT IMPLEMENT THIS BY GIVING `sys_readdir` A 4th ARGUMENT. That is what agnos refused to do
+# kernel-side, for the cyrius fact measured on 6.5.35 and recorded against #100: the compiler pops
+# only as many registers as the call site passes, so unused syscall argument registers carry stale
+# values. Widening #81 would hand the kernel a garbage POINTER from every existing three-argument
+# call site — and unlike #55's timeout, the kernel WRITES through this one. Two wrappers, two arities.
+#
+# ⚠ GUARDING: a kernel older than 1.56.50 has no #101 arm and the dispatcher returns -1. Treat a
+# negative return as "this kernel cannot resume a listing" and fall back to `sys_readdir`, rather
+# than rendering an empty directory. "No entries" and "this kernel cannot page" are different facts.
+fn sys_readdir_at(path, buf, max, cursor): i64 { return syscall(SYS_READDIR_AT, path, buf, max, cursor); }
+
+# ---- agnos GPU-compute band (#82-83; kernel leg agnos 1.54.30 cut / 1.54.33 hardened). The ring-3
+# seam onto the 1.54.x GPU arc: agnos drives the AMD Cezanne iGPU (gfx90c) directly from the kernel
+# — no amdgpu, no ROCm — PSP firmware load → CP/MEC → GPUVM → PM4 → hand-assembled gfx90c shaders.
+# Consumers: gpumm, and mabda / tentib / attn11 for ML inference on agnos.
+#
+# SAFETY — why this band lives ONLY in the agnos peer: on Linux x86_64 #82 is `rename(old, new)` and
+# #83 is `mkdir(path, mode)`. An ungated wrapper would hand the caller's matmul buffer POINTERS to the
+# kernel as filesystem PATHS. That is materially worse than the #81/`fchdir` precedent above. The gate
+# is the selector in lib/syscalls.cyr (`#ifdef CYRIUS_TARGET_AGNOS` around the include of this file),
+# which is STRONGER than a runtime error: off-agnos these fns do not exist at all, so a non-agnos
+# build fails at COMPILE time (undefined fn) and can never emit the syscall instruction. Do not add an
+# in-function #ifdef — this peer is standalone and wrong in its entirety off-agnos (SYS_OPEN=7 would
+# be Linux `lseek`, SYS_EXIT=0 would be `read`, …), so guarding 2 of ~80 wrappers would only give
+# false comfort. Never include this file directly; go through lib/syscalls.cyr.
+# (issue 2026-07-14-agnos-sys-gpu-dispatch-wrappers.)
+#
+# a, b, c — ring-3 pointers to 64-element row-major 8x8 matrices; `c` receives C = A * B.
+#   #82: i32 lanes (256 B each). #83: f64 lanes (512 B each).
+# Return: 0 OK · -1 GPU not ready · -2 dispatch didn't complete · -3 VM fault · -4 pointer outside
+#   user range · -5 user page not mapped.
+# -1 is the NORMAL answer where there is no AMD GPU (e.g. QEMU) — treat it as "no GPU here", not a
+#   failure. BLOCKING: the kernel busy-waits on a bounded watchdog (~100 ms cap) for the dispatch fence.
+# Kernel-side (1.54.33) bounds-checks all three pointers before the C write-back.
+# #83 is deliberately NOT fused-FMA: the shader accumulates with separate v_mul_f64 + v_add_f64 (two
+#   roundings, k-ascending) so the GPU result is BIT-IDENTICAL to rosnet's CPU arithmetic.
+# Fixed 8x8 today; a generalized (M,N,K) form would be new numbers, not a change to these.
+# gpu_dispatch(a, b, c) — 8x8 i32 matmul on the GPU shader cores; C = A * B → 0 / <0 (-1 = no GPU).
+fn sys_gpu_dispatch(a, b, c): i64     { return syscall(SYS_GPU_DISPATCH, a, b, c); }
+# gpu_dispatch_f64(a, b, c) — 8x8 f64 matmul, rosnet-bit-correct (unfused); C = A * B → 0 / <0.
+fn sys_gpu_dispatch_f64(a, b, c): i64 { return syscall(SYS_GPU_DISPATCH_F64, a, b, c); }
+
+# present() — flip the accumulated blit back buffer to the scanout. NULLARY.
+# Tear-free + vsync-paced: BLOCKS until the pipe takes the surface at the next
+# vblank (<= one frame) — it IS the vsync pacer. The explicit half of the P7
+# blit/present split: a compositor blits with blit #39's DEFER_PRESENT bit (no
+# flip), then calls this ONCE per frame. Returns 1 = presented, 0 = nothing to
+# present (double-buffer not armed / direct-FB path). IRON-ONLY: under QEMU this
+# returns 0 CLEANLY — read that as "no GPU here", not a failure (the #82/#83
+# precedent). agnos 1.55.x.
+# SAFETY: syscall 84 is rmdir(pathname) on Linux x86_64 — a DESTRUCTIVE call that
+# would delete a directory at whatever stale pointer sits in rdi. This wrapper is
+# reachable ONLY on agnos: the entire peer is included behind
+# `#ifdef CYRIUS_TARGET_AGNOS` in lib/syscalls.cyr, so off-agnos the fn does not
+# exist and any build referencing it fails at COMPILE time with no binary emitted
+# — stronger than an in-function guard (guarding 2 of ~80 rows would be false
+# comfort when SYS_OPEN=7 is Linux lseek). Both legs gated by
+# scripts/agnos-crossbuild-gate.sh. CHANGELOG [6.4.70].
+fn sys_gpu_present(): i64 { return syscall(SYS_GPU_PRESENT); }
+
+# gpu_fill(color) — GPU-clear the current blit back buffer to `color` (32-bit
+# xRGB8888) via a PM4 CP-DMA DMA_DATA constant fill (SRC_SEL=2 DATA) on the MEC
+# compute ring, replacing a full-screen CPU store loop. Arms the double-buffer
+# lazily; pair with sys_gpu_present() to show it. Only the colour crosses the
+# ring-3 boundary — fb_phys stays unexposed (same discipline as blit #39).
+# BLOCKS on a bounded CP-DMA completion fence (~100 ms cap). Needs NO cache flush
+# to be scanout-visible (CP-DMA writes MC-direct, bypassing GL2). Returns
+# 0 = filled, -1 = no usable display (no GPU/pipe — e.g. QEMU) or the fill failed;
+# treat -1 under QEMU as "no GPU here". agnos 1.55.30 (iron-proven: CP-DMA
+# hardware fill verified 4KB all=pattern).
+# SAFETY: syscall 85 is creat(pathname, mode) on Linux x86_64 — a 32-bit colour
+# reinterpreted as a path pointer would create/truncate a file. Same file-level
+# agnos gate as sys_gpu_present above. CHANGELOG [6.4.70].
+fn sys_gpu_fill(color): i64 { return syscall(SYS_GPU_FILL, color); }
+
+# shm_create_gpu(size) — the GPU-VISIBLE peer of shm_create #71. Same table and the same
+# shm_write #72 / shm_read #73 / shm_free #74 afterwards; only the backing differs: the
+# page is carved from the GPU carveout, so it has an MC address the CP-DMA engine can
+# read. This is NOT an optimisation — #71 uses pmm_alloc_2mb() (system RAM), which the GPU
+# cannot reach at all (bus-master is off by design; the engines see only the FB aperture),
+# so a GPU composite from a #71 buffer is impossible. Returns id (>=1), or -1 when there is
+# no carveout (QEMU) — the caller then falls back to #71 and the CPU path, unchanged.
+# agnos 1.55.31. SAFETY: 86 is link(old,new) on Linux — two garbage pointers, FS litter.
+# Reachable ONLY on agnos (file-level #ifdef CYRIUS_TARGET_AGNOS on the whole peer; off-agnos
+# the fn does not exist and a referencing build fails at COMPILE time). CHANGELOG [6.4.71].
+fn sys_shm_create_gpu(size): i64 { return syscall(SYS_SHM_CREATE_GPU, size); }
+
+# gpu_blit_shm(id, wh, dstxy) — GPU-composite a client surface from its carveout slot
+# straight into the blit back buffer at (dx,dy) via gpu_cp_dma_blit (one CP-DMA per row;
+# src stride w*4, dst stride = framebuffer pitch). Replaces BOTH the shm→userland read and
+# the per-pixel composite loop — pixels never leave kernel GPU-visible memory. Packing
+# matches blit #39: wh = (h<<16)|w, dstxy = (dy<<16)|dx. ⚠ REJECTS rather than clips
+# anything off-screen — the compositor owns clipping, which is why sys_gpu_caps() is a
+# prerequisite for using this correctly. Returns 0 / -1 (-1 under QEMU = "no GPU here").
+# agnos 1.55.31. SAFETY: 87 is unlink(path) on Linux — it DELETES A FILE. Reachable ONLY on
+# agnos via the file-level peer gate. CHANGELOG [6.4.71].
+fn sys_gpu_blit_shm(id, wh, dstxy): i64 { return syscall(SYS_GPU_BLIT_SHM, id, wh, dstxy); }
+
+# gpu_fill_rect(color, wh, dstxy) — GPU-clear a RECTANGLE of the blit back buffer to a
+# 32-bit xRGB8888 colour (h × gpu_cp_dma_fill of w*4 bytes per row). The rect form of
+# #85, which only fills the whole buffer; this is the primitive compositor chrome needs
+# (window body, titlebar, focus accent, buttons — ~10x per window per frame). Packing
+# matches #87: wh = (h<<16)|w, dstxy = (dy<<16)|dx. Rejects rather than clips.
+# Returns 0 / -1 (-1 under QEMU = "no GPU here"). agnos 1.55.32.
+# SAFETY: 88 is symlink(target,link) on Linux — and arg1 is a 32-bit COLOUR that can decode
+# to a mapped address (0x00FF0000 = 16 MB), so the string read is not guaranteed to fault.
+# Reachable ONLY on agnos via the file-level peer gate. CHANGELOG [6.4.71].
+fn sys_gpu_fill_rect(color, wh, dstxy): i64 { return syscall(SYS_GPU_FILL_RECT, color, wh, dstxy); }
+
+# gpu_caps(buf, len) — report back-buffer geometry/capabilities into the caller's buffer.
+# Ring 3 otherwise cannot learn the true back-buffer width/height, and #87/#88 REJECT
+# off-screen rects, so a compositor must call this to clip correctly (the only prior probe
+# was "call #86 and look for -1"). ⚠ It ARMS THE DOUBLE-BUFFER LAZILY — it must: a cold
+# probe would otherwise report width=0/height=0 and, since #87/#88 reject rather than clip,
+# every later blit would fail (caught on iron before any compositor consumed it).
+# Returns 0 / -1 (-1 under QEMU = "no GPU here"). agnos 1.55.32.
+# SAFETY: 89 is readlink(path,buf,sz) on Linux — the kernel WRITES into arg2 for arg3 bytes,
+# a wild process-memory write if rsi ever holds a mapped address. Reachable ONLY on agnos via
+# the file-level peer gate. CHANGELOG [6.4.71].
+fn sys_gpu_caps(buf, len): i64 { return syscall(SYS_GPU_CAPS, buf, len); }
+
+# gpu_readback_shm(id, wh, srcxy) — the INVERSE of #87 gpu_blit_shm: GPU-copy a w×h rect OUT
+# of the blit back buffer at (sx,sy) INTO the client's carveout shm slot `id`. The
+# screen-capture / read-pixels primitive: without it a compositor reading its own shm sees
+# STALE content (the composited frame lives in the kernel back buffer, never the client
+# page). Packing matches #87: wh = (h<<16)|w, srcxy = (sy<<16)|sx. Rejects (does not clip):
+# off-screen, a slot too small for w*h*4, a PMM-backed slot (the GPU can't write it), or no
+# display. Built on the same iron-proven gpu_cp_dma_blit as #87 — direction-agnostic (both
+# operands are MC), so this is #87 with the operands swapped. Returns 0 / -1 (-1 under QEMU =
+# "no GPU here"). agnos 1.55.x (iron-proven /bin/gpucopy 2026-07-23). SAFETY: 90 is
+# chmod(path,mode) on Linux — a packed geometry word as a mode can set SETUID. Reachable ONLY
+# on agnos via the file-level #ifdef CYRIUS_TARGET_AGNOS peer gate. CHANGELOG [6.4.72].
+fn sys_gpu_readback_shm(id, wh, srcxy): i64 { return syscall(SYS_GPU_READBACK_SHM, id, wh, srcxy); }
+
+# gpu_blit_bb(srcxy, wh, dstxy) — GPU rect COPY WITHIN the blit back buffer (move a window /
+# scroll a region); no fb→fb copy existed before. Packing: srcxy = (sy<<16)|sx,
+# wh = (h<<16)|w, dstxy = (dy<<16)|dx. Rejects either rect off-screen. OVERLAP is handled
+# kernel-side (a downward move copies rows bottom-up, memmove semantics) — the wrapper needs
+# no reverse-order logic. Residual: intra-row HORIZONTAL overlap on the SAME source row is
+# undefined; a caller must not self-overlap a single row. Returns 0 / -1 (-1 under QEMU =
+# "no GPU here"). agnos 1.55.x. SAFETY: 91 is fchmod(fd,mode) on Linux — and arg1 is a packed
+# srcxy where (0,0) packs to fd 0 = STDIN, so small coordinates are valid fd numbers and the
+# Linux call would PLAUSIBLY SUCCEED. Reachable ONLY on agnos via the file-level peer gate.
+# CHANGELOG [6.4.72].
+fn sys_gpu_blit_bb(srcxy, wh, dstxy): i64 { return syscall(SYS_GPU_BLIT_BB, srcxy, wh, dstxy); }
+
+# ---- agnos GPU descriptor-array band (#92-93) ----
+# #92 and #93 share ONE shape: `(desc_uva, len)` — a userland VA pointing at an ARRAY of
+# fixed-size records, `len` the array's byte length, and the OP CODE INSIDE each record
+# rather than in the syscall number. That is agnos decisions D-3 (shader) + MD-4 (modeset):
+# per-operation syscalls with inline scalar args run OUT of argument slots — a gradient
+# needing two stops plus geometry had no room left and never got a ring-3 path at all, an
+# ABI break that cost the shader arc its S12. A record has no such ceiling, so these bands
+# are ONE number each, extended by record.
+#
+# Consequence for these wrappers: they are LAYOUT-AGNOSTIC. They pass a pointer and a
+# length and encode not one field of the record, so the kernel-side record layout can keep
+# growing (new ops, new fields, bigger records) without ever touching this signature. That
+# is why #93 is wrapped BEFORE its kernel half lands (agnos bite H3) even though the Tier-2
+# rule for #84-#91 was "don't wrap until agnos ships it" — that rule existed because those
+# syscalls encode PACKED GEOMETRY in their arguments, where a kernel-side repack silently
+# invalidates a shipped wrapper. A (ptr, len) pair has no such failure mode. Frozen for
+# both: the number, the arity/meaning, the 0/negative return, and the name.
+#
+# Kernel side (both): validates in-kernel, derives MC addresses in-kernel — NO MC address
+# ever crosses the ring-3 boundary — and REJECTS rather than clips.
+#
+# IRON-ONLY: QEMU emulates no AMD GPU, so a return under QEMU means "no GPU here", not
+# "the op ran". (issue 2026-07-23-agnos-gpu-modeset-op-93.) CHANGELOG [6.4.73].
+
+# gpu_shader_op(desc_uva, len) — the ring-3 entry point for the SHADER band; an array of
+# 64-byte op records. Every dword an op does not define MUST be zero: the kernel REJECTS a
+# non-zero reserved field rather than ignoring it, which is precisely what keeps the unused
+# dwords safe to define later without an ABI break. agnos SHIPPED and consumed end-to-end
+# by the compositor. SAFETY: 92 is chown(path,uid,gid) on Linux and arg1 is a real user VA
+# that the kernel reads as a PATH — the most dangerous collision in the whole #82-#93 band
+# (a real path-resolving metadata write, not an EBADF). Reachable ONLY on agnos via the
+# file-level #ifdef CYRIUS_TARGET_AGNOS peer gate.
+fn sys_gpu_shader_op(desc_uva, len): i64 { return syscall(SYS_GPU_SHADER_OP, desc_uva, len); }
+
+# gpu_modeset_op(desc_uva, len) — the single ring-3 entry point for the MODESET work; every
+# modeset write bite drives from userland /bin/modeset through this one syscall behind an
+# on-disk arm-once latch. Shape frozen + operator-ratified (MD-4); the kernel half is agnos
+# bite H3 and lands in parallel — see "layout-agnostic" above for why wrapping ahead is
+# safe here. SAFETY: 93 is fchown(fd,uid,gid) on Linux. arg1 is a userland VA — a large
+# value essentially never a valid fd — so a stray off-agnos call is overwhelmingly EBADF.
+# That is a reason for calm, NOT for dropping the gate: "EBADF most of the time" is not a
+# safety property, so the file-level peer gate stays load-bearing and off-agnos this fn
+# must not exist (a referencing build fails at COMPILE time rather than issuing fchown).
+fn sys_gpu_modeset_op(desc_uva, len): i64 { return syscall(SYS_GPU_MODESET_OP, desc_uva, len); }
+
+# gpu_recover_op(arm) — the 3D arc's RUNG 5 hang/recovery battery. `arm` is one of
+# RECOV_ARM_A..E (see the GpuRecoverArm enum above). Returns **95** on the expected
+# path for every arm (the recovery ladder's rung number, NOT a byte count), `-1` when
+# there is no GPU or the arm is unknown, and a per-arm negative on failure: -2 = arm A's
+# wedge RETIRED (so nothing was actually hung and arms B-E prove nothing), -3 = arm C's
+# matmul was not bit-correct, -4 = arm B's escalation ladder did not recover, -5 = arm E's
+# negative control fired. Iron-only: under QEMU `gpu_present == 0` so it returns -1
+# cleanly, which means "no GPU here", not a failure.
+#
+# ⛔ The arms that deliberately WEDGE the GPU are compiled out of agnos unless the kernel
+# is built with GPU_RECOVER, so a production kernel cannot be asked to hang itself. The
+# RECOVERY half is always present — a shipping kernel must survive a hang it did not ask
+# for. That asymmetry is the kernel's, not ours; this wrapper just reaches it.
+#
+# SAFETY — this is the most dangerous number in the band so far. On x86_64 Linux 94 is
+# `lchown(path, uid, gid)`, so `arm` would be read as a PATH POINTER. On **aarch64 94 is
+# `exit_group`** — a raw `syscall(94, arm)` there does not misbehave, it **TERMINATES THE
+# PROCESS**, silently and with `arm` as the exit status. That is the same class the open
+# chown filing documents (a consumer hardcoding 94 for `lchown` gets exit_group on ARM).
+# Off-agnos this fn MUST NOT EXIST: the file-level `#ifdef CYRIUS_TARGET_AGNOS` around the
+# whole peer in lib/syscalls.cyr means a referencing non-agnos build fails at COMPILE time
+# with "reachable undefined function" and emits no binary — strictly stronger than any
+# in-function guard, per the v6.4.63 lesson.
+fn sys_gpu_recover_op(arm): i64 { return syscall(SYS_GPU_RECOVER_OP, arm); }
+
+# uptime_us() — MICROSECOND monotonic clock, read via rdtsc so it works with INTERRUPTS
+# DISABLED. This is not a nicer `uptime_ms`: a FOREGROUND `run` program executes with IF
+# cleared, so the 100 Hz timer never fires and `sys_uptime_ms` (#40, which reads
+# timer_ticks) is FROZEN for that program's entire run — anything timing itself with #40
+# on that path measures zero. rdtsc needs no interrupts, so #95 is the only correct clock
+# there.
+#
+# Returns µs since calibration, or **-1 if calibration was REFUSED** — deliberately never
+# a plausible-looking 0, because a tool that cannot tell "no clock" from "0 µs elapsed" is
+# exactly the failure that burned two flashes on agnos's rung-10 gate. Check `< 0`.
+#
+# SAFETY: on x86_64 Linux 95 is `umask(mask)`. This wrapper is NULLARY, so off-agnos the
+# call would read whatever garbage sits in rdi as the new mask and **SUCCEED**, returning
+# the old umask — a plausible-looking positive number that a caller would happily treat as
+# a timestamp, while having changed the process's file-creation mask as a side effect.
+# Fail-plausible is worse than fail-loud, which is why the file-level peer gate carries
+# this rather than an in-function check. (aarch64 `umask` is 166, so #95 is a different
+# call again there — one more reason not to reason per-arch about an ungated peer.)
+fn sys_uptime_us(): i64 { return syscall(SYS_UPTIME_US); }
+
+# ---- agnos HDA audio band (#64-69) — the ring-3 half of the agnos 1.52.x Gate-2
+# freeze (kernel handlers land in parallel). Single frozen format: 48000 Hz / S16 /
+# stereo (4 B/frame), no kernel resample. snd_id slot 0..3; #65-69 reject a slot not
+# owned by the caller (-1). Consumers: vani agnos backend + cyrius-doom.
+# (issue 2026-07-04-agnos-snd-audio-syscall-band-64-69.)
+# snd_open() — grab the single output stream → slot 0..3 / -1 (auto-released on proc-exit).
+fn sys_snd_open(): i64 { return syscall(SYS_SND_OPEN); }
+# snd_config(slot, rate, fmt) — rate MUST=48000, fmt=(bits<<8)|ch MUST=0x1002 → 0 / -1.
+fn sys_snd_config(slot, rate, fmt): i64 { return syscall(SYS_SND_CONFIG, slot, rate, fmt); }
+# snd_write(slot, buf, frames) — blocking; S16 stereo, frames*4 bytes → frames / -1.
+fn sys_snd_write(slot, buf, frames): i64 { return syscall(SYS_SND_WRITE, slot, buf, frames); }
+# snd_write non-blocking — a4=r10 bit0=O_NONBLOCK (5-arg, like sys_symlink); may return 0=WOULD_BLOCK.
+fn sys_snd_write_nb(slot, buf, frames): i64 { return syscall(SYS_SND_WRITE, slot, buf, frames, 1); }
+# snd_close(slot) — release the slot → 0 / -1.
+fn sys_snd_close(slot): i64 { return syscall(SYS_SND_CLOSE, slot); }
+# snd_drain(slot) — block until queued audio plays out (~1s cap) → 0.
+fn sys_snd_drain(slot): i64 { return syscall(SYS_SND_DRAIN, slot); }
+# snd_avail(slot) — non-blocking free-frame count → free frames / -1.
+fn sys_snd_avail(slot): i64 { return syscall(SYS_SND_AVAIL, slot); }
+
 # ---- Process-exec / framebuffer / input / sched band (36–39, 42–44, 62) ----
 # The AGNOS base-system peers — see the SysNrAgnosProc enum + issue
 # 2026-06-30-agnos-syscall-peer-incomplete-8-wrappers.md. ABI rdi/rsi/rdx/r10.
@@ -483,6 +1108,24 @@ fn sys_kbscan(buf, max): i64 { return syscall(SYS_KBSCAN, buf, max); }
 
 # Non-blocking from-disk spawn of `path`; scheduled, returns its pid immediately.
 fn sys_spawn_path(path, len): i64 { return syscall(SYS_SPAWN_PATH, path, len); }
+
+# v6.5.9: `#43` with a per-process ENV BLOB — the two arguments the 2-arg wrapper above
+# never reached. The kernel has accepted them since 1.44.19 (`a3` = blob ptr, `a4` = len,
+# staged onto the child's init stack); `sys_spawn_path` is exactly this with `env = 0`, so
+# every existing caller is unaffected.
+#
+# Blob format: packed `KEY=VALUE\0…`, ≤1024 B, ≤16 entries. This is how an endowed channel
+# reaches its child: `sys_chan_endow` returns the fd, the parent packs `AGNOS_CHAN=<fd>`,
+# and the child getenv's it.
+#
+# ⛔ THE KERNEL TREATS A GARBAGE a3/a4 AS FALLBACK-TO-DEFAULT-ENV, NEVER AN ERROR. A
+# mis-shaped call therefore degrades SILENTLY — the child simply comes up with the default
+# environment and no AGNOS_CHAN — which is the argument FOR a named wrapper rather than a
+# raw 4-arg `syscall()`: this ecosystem has a confirmed history of raw arity mistakes
+# compiling clean and mis-dispatching (jalwa's `poll`(7)→`open` per frame, `read`(0)→`exit`).
+fn sys_spawn_path_env(path, len, env, envlen): i64 {
+    return syscall(SYS_SPAWN_PATH, path, len, env, envlen);
+}
 
 # Cooperative yield to the scheduler.
 fn sys_sched_yield(): i64 { return syscall(SYS_SCHED_YIELD); }
@@ -594,6 +1237,27 @@ fn sys_udp_unbind(listener_id): i64 { return syscall(SYS_UDP_UNBIND, listener_id
 # BLOCKS ~3s. dst_ip is the kernel ip4() form (resolve via dig first).
 fn sys_icmp_echo(dst_ip): i64 { return syscall(SYS_ICMP_ECHO, dst_ip); }
 
+# icmp_echo_ex(dst_ip, timeout_ms) — #55 with a caller-chosen deadline (agnos 1.56.48).
+# Returns the round-trip time in MILLISECONDS (>= 0), or -1 on timeout / NIC down.
+# `timeout_ms <= 0` selects the kernel default (~3 s), so it degrades exactly to #55;
+# the kernel clamps to 60 s. Resolution is agnos's 100 Hz tick, so the bound rounds DOWN
+# to whole ticks with a floor of 1 — a sub-10 ms request waits one tick, not zero.
+#
+# ⛔ DO NOT "SIMPLIFY" THIS BY GIVING sys_icmp_echo A SECOND ARGUMENT. Two wrappers,
+# two arities, deliberately. This compiler pops only as many registers as a call site
+# passes, so an unused syscall argument register carries whatever the previous code left
+# there — not zero. agnos therefore minted a separate number rather than widening #55,
+# because reading a2 in the #55 arm would hand every already-shipped one-argument caller
+# a garbage timeout: sometimes huge, sometimes milliseconds, never reproducible.
+# Widening a live syscall's arity is not backward compatible on that ABI.
+#
+# Guarding: a kernel older than 1.56.48 has no #100 arm, so the call falls through the
+# dispatch chain and the caller reads the fall-through value as data. Consumers that may
+# meet an older kernel should probe (e.g. sys_net_icmp_tx() >= 0) before relying on it.
+fn sys_icmp_echo_ex(dst_ip, timeout_ms): i64 {
+    return syscall(SYS_ICMP_ECHO_EX, dst_ip, timeout_ms);
+}
+
 # winsize() — live framebuffer character grid (#60). Returns (cols<<16)|rows,
 # or -1. No args, non-blocking, IF=0-safe. Consumed by agnsh / darshana tty
 # sizing / kii / the desktop terminal grid. (agnos 1.45.13)
@@ -616,6 +1280,28 @@ fn sys_net_netmask(): i64 { return syscall(SYS_NET_CONFIG, 1); }
 fn sys_net_gateway(): i64 { return syscall(SYS_NET_CONFIG, 2); }
 # Packed IPv4 of the DHCP-leased DNS resolver, else the gateway (net_config field 3).
 fn sys_net_dns_server(): i64 { return syscall(SYS_NET_CONFIG, 3); }
+
+# --- ICMP counters, net_config fields 4..7 (agnos 1.56.48) -------------------
+# ⚠ THESE ARE COUNTERS, NOT CONFIG, and the difference bites. Fields 0..3 above are
+# packed IPv4 where `0` means "unset, fall back". Fields 4..7 are free-running
+# monotonic counts where `0` legitimately means "nothing has happened yet" — a caller
+# applying the `<= 0 → fall back` rule to these will misread a healthy idle kernel.
+# Only `-1` means "this kernel does not know" (unknown field, i.e. older than 1.56.48).
+#
+# They exist because a ring-3 prober that gets nothing back cannot otherwise separate
+# "we never transmitted" from "we transmitted and nothing answered": tx>0 with rx==0 is
+# a network problem, tx==0 is a local one. Written by the kernel without a lock
+# (net_handle_icmp runs from the timer ISR), so a torn read costs one count —
+# diagnostics only, never control flow.
+
+# Echo requests this kernel has sent (icmp_ping / icmp_echo / icmp_echo_ex).
+fn sys_net_icmp_tx(): i64 { return syscall(SYS_NET_CONFIG, 4); }
+# Echo replies that matched our identifier AND sequence.
+fn sys_net_icmp_rx(): i64 { return syscall(SYS_NET_CONFIG, 5); }
+# Inbound echo requests this kernel answered (i.e. something pinged us).
+fn sys_net_icmp_replies_sent(): i64 { return syscall(SYS_NET_CONFIG, 6); }
+# Echo waits that expired without a matching reply.
+fn sys_net_icmp_timeouts(): i64 { return syscall(SYS_NET_CONFIG, 7); }
 
 # Lazily zero the conn table (defensive — globals are zero-init, but the
 # explicit pass mirrors lib/chrono.cyr's _chrono_init_mdays idiom and is

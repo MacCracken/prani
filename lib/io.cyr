@@ -77,7 +77,7 @@ fn file_open(path: cstring, flags, mode): i64 {
     var namelen = 0;
     while (load8(path + namelen) != 0) { namelen = namelen + 1; }
     var ao = 0;
-    if ((flags & 3) != 0) { ao = ao | 0x1; }       # O_WRONLY/O_RDWR -> AO_WRONLY (O_RDONLY=0)
+    ao = ao | (flags & 3);   # O_/AO_ access mode 1:1 (0/1/2); v6.4.27: was folding O_RDWR→AO_WRONLY
     if ((flags & 64) != 0) { ao = ao | 0x100; }    # O_CREAT  -> AO_CREAT
     if ((flags & 512) != 0) { ao = ao | 0x200; }   # O_TRUNC  -> AO_TRUNC
     if ((flags & 1024) != 0) { ao = ao | 0x400; }  # O_APPEND -> AO_APPEND
@@ -112,11 +112,256 @@ fn xunlink(path): i64 {
     return sys_unlink(path, an);
     #endif
     #ifdef CYRIUS_TARGET_WIN
-    return -1;   # Windows: no POSIX unlink (DeleteFileW — not wired; no consumer)
+    return syscall(0xF035, path);   # v6.4.58: kernel32!DeleteFileW reroute (EDELETEFILEW_PE)
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     #ifndef CYRIUS_TARGET_WIN
     return sys_unlink(path);
+    #endif
+    #endif
+}
+
+# Remove the empty directory `path`. Portable exactly as `xunlink` bridges unlink:
+# agnos's raw wrapper is LENGTH-CARRYING (`sys_rmdir(path, pathlen)`) while POSIX takes a
+# bare pointer, so consumers that reached for `sys_rmdir` directly were correct on Linux and
+# macOS and silently wrong on agnos — the surplus argument bound to garbage. That is exactly
+# how yukti shipped `sys_rmdir(mount_point_cstr)` (v6.5.2 fold): a warning nobody read, until
+# v6.5.1 made an arity mismatch fatal.
+#
+# Windows returns -1 rather than rerouting: unlike `xunlink`'s DeleteFileW (0xF035) there is
+# no RemoveDirectoryW reroute wired, and inventing one is a COMPILER change. Same honest
+# degrade `xstat` already makes on PE. Wire the reroute when a consumer actually needs it.
+fn xrmdir(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var rn = 0;
+    while (load8(path + rn) != 0) { rn = rn + 1; }
+    return sys_rmdir(path, rn);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return -1;   # no RemoveDirectoryW reroute wired (see above)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_rmdir(path);
+    #endif
+    #endif
+}
+
+# Create directory `path` with mode `mode`. The xrmdir counterpart, same shape.
+#
+# AGNOS's raw wrapper is LENGTH-CARRYING (`sys_mkdir(path, pathlen)`) and takes NO
+# mode, while POSIX takes `(path, mode)` — so a consumer reaching for `sys_mkdir`
+# directly is correct on Linux/macOS and silently wrong on agnos, the surplus
+# argument binding to garbage. That divergence is the whole reason this wrapper
+# exists; it is the same trap `xrmdir` was added for at v6.5.2.
+#
+# Windows DOES route here (83 is in the PE reroute set), unlike xrmdir which has no
+# RemoveDirectoryW wired. Returns 0 on success, negative errno on POSIX/agnos.
+# CHANGELOG [6.5.7]
+fn xmkdir(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var mn = 0;
+    while (load8(path + mn) != 0) { mn = mn + 1; }
+    return sys_mkdir(path, mn);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_mkdir(path, mode);
+    #endif
+}
+
+# Create `path` and every missing parent, like `mkdir -p`. Returns 0 on success.
+#
+# Ordering follows Rust's `create_dir_all`: try the FULL path first and walk parents
+# only when that fails, rather than stat-ing every component up front. The common
+# case — the parent already exists — is then a single syscall. An existing directory
+# is success, not an error (EEXIST is swallowed), which is what makes this callable
+# unconditionally.
+#
+# Paths are bounded at 1023 bytes; longer returns -1 rather than truncating, since a
+# silently truncated mkdir would create the WRONG directory. CHANGELOG [6.5.7]
+fn xmkdir_p(path, mode): i64 {
+    var n = 0;
+    while (load8(path + n) != 0) { n = n + 1; }
+    if (n == 0) { return 0 - 1; }
+    if (n > 1023) { return 0 - 1; }
+    if (xmkdir(path, mode) == 0) { return 0; }
+    if (_xdir_exists(path) == 1) { return 0; }
+    # Full-path create failed: build each prefix and create it in turn.
+    var buf[1024];
+    var i = 0;
+    while (i < n) {
+        store8(&buf + i, load8(path + i));
+        i = i + 1;
+    }
+    store8(&buf + n, 0);
+    var j = 1;
+    while (j < n) {
+        if (load8(&buf + j) == 47) {
+            store8(&buf + j, 0);
+            if (_xdir_exists(&buf) == 0) { xmkdir(&buf, mode); }
+            store8(&buf + j, 47);
+        }
+        j = j + 1;
+    }
+    if (xmkdir(path, mode) == 0) { return 0; }
+    if (_xdir_exists(path) == 1) { return 0; }
+    return 0 - 1;
+}
+
+# Does `path` exist and is it a directory? Used by xmkdir_p to treat an existing
+# directory as success. Kept private: consumers want `is_dir` from lib/fs.cyr,
+# which takes a Str; this one takes a raw cstr because that is what xmkdir_p holds.
+fn _xdir_exists(path): i64 {
+    #ifdef CYRIUS_TARGET_WIN
+    # Windows has no POSIX stat — `xstat` returns -1 here — so ask the filesystem
+    # directly, the same way fs_win.cyr's `is_dir` does. Without this arm `xmkdir_p`
+    # loses its idempotence on Windows: CreateDirectoryW fails on an existing directory
+    # and nothing else can tell "already there" from "could not create".
+    # ⚠ The 0xF019 reroute takes an ALREADY-WIDE path, unlike the mkdir/unlink reroutes
+    # which widen inline — hence the widen loop here. ASCII-only, matching `_fs_widen`.
+    var wp = alloc(1024);
+    var wi = 0;
+    while (load8(path + wi) != 0) {
+        if (wi >= 510) { break; }
+        store16(wp + wi * 2, load8(path + wi));
+        wi = wi + 1;
+    }
+    store16(wp + wi * 2, 0);
+    var attrs = syscall(61465, wp);             # GetFileAttributesW
+    if (attrs == 4294967295) { return 0; }      # INVALID_FILE_ATTRIBUTES
+    if ((attrs & 16) != 0) { return 1; }        # FILE_ATTRIBUTE_DIRECTORY
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    var st[144];
+    if (xstat(path, &st) != 0) { return 0; }
+    # ⚠ MUST go through STAT_MODE — `xstat` does NOT normalise the struct, it only
+    # normalises the CALL. st_mode is at 24 on x86-Linux, **16** on aarch64-Linux, and
+    # **4** on macOS-arm64's stat64. A hardcoded 24 reads st_uid on aarch64 and quietly
+    # reports every directory as not-a-directory; found by running
+    # vr01_syscall_wrappers.tcyr under aarch64 (it returned uid 1000 as the mode), never
+    # by the host suite. This is the exact rule the x86 peer's Stat enum is annotated
+    # with — "must use the Stat enum to stay arch-clean", v5.4.11 chunk-A.
+    # S_IFMT 0xF000, S_IFDIR 0x4000.
+    var mode = load32(&st + STAT_MODE);
+    if (mode & 0xF000 == 0x4000) { return 1; }
+    return 0;
+    #endif
+}
+
+# Create a symlink at `linkpath` pointing to `target`.
+#
+# AGNOS is 4-arg length-carrying (`target, targetlen, linkpath, linkpathlen`) where
+# POSIX is 2-arg — the same divergence class as xmkdir. Windows has no POSIX symlink
+# and no CreateSymbolicLinkW reroute wired, so it degrades to -1 the way xrmdir and
+# xstat already do; wire the reroute when a consumer needs it. CHANGELOG [6.5.7]
+fn xsymlink(target, linkpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var tn = 0;
+    while (load8(target + tn) != 0) { tn = tn + 1; }
+    var ln = 0;
+    while (load8(linkpath + ln) != 0) { ln = ln + 1; }
+    return sys_symlink(target, tn, linkpath, ln);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 0 - 1;   # no CreateSymbolicLinkW reroute wired
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_symlink(target, linkpath);
+    #endif
+    #endif
+}
+
+# Read the target of the symlink at `path` into `buf` (capacity `bufsize`).
+# Returns the byte count written, or negative on error. NOT NUL-terminated — that
+# is readlink(2)'s contract and callers already expect it.
+#
+# AGNOS is 4-arg length-carrying; POSIX is 3-arg. Windows degrades to -1.
+# CHANGELOG [6.5.7]
+fn xreadlink(path, buf, bufsize): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var rn = 0;
+    while (load8(path + rn) != 0) { rn = rn + 1; }
+    return sys_readlink(path, rn, buf, bufsize);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 0 - 1;   # no reroute wired
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_readlink(path, buf, bufsize);
+    #endif
+    #endif
+}
+
+# Create a hard link at `newpath` pointing at the same inode as `oldpath`.
+#
+# AGNOS is 4-arg length-carrying; POSIX is 2-arg. Windows has no CreateHardLinkW
+# reroute wired and degrades to -1. CHANGELOG [6.5.7]
+fn xlink(oldpath, newpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var on = 0;
+    while (load8(oldpath + on) != 0) { on = on + 1; }
+    var nn = 0;
+    while (load8(newpath + nn) != 0) { nn = nn + 1; }
+    return sys_link(oldpath, on, newpath, nn);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 0 - 1;   # no CreateHardLinkW reroute wired
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_link(oldpath, newpath);
+    #endif
+    #endif
+}
+
+# Rename `oldpath` → `newpath` on the SAME filesystem (atomic replace of an
+# existing target — the durable half of file_write_atomic). Portable exactly as
+# file_open bridges sys_open: POSIX (Linux/macOS/aarch64) is 2-arg
+# sys_rename(old,new) (the backend ESYSXLAT handles aarch64 82→renameat 38+AT_FDCWD
+# and macho 82→BSD 128); AGNOS is length-carrying 4-arg sys_rename(old,ol,new,nl);
+# Windows has no POSIX rename — route to a MoveFileExW(old,new,
+# MOVEFILE_REPLACE_EXISTING) reroute (syscall 0xF034; backend/x86/emit.cyr
+# EMOVEFILEEX_PE). Returns 0 on success / negative errno (POSIX/AGNOS) or -1
+# (Windows BOOL fail). See issue 2026-07-12-thoth-portable-atomic-file-write.md.
+fn file_rename(oldpath, newpath): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var ol = 0;
+    while (load8(oldpath + ol) != 0) { ol = ol + 1; }
+    var nl = 0;
+    while (load8(newpath + nl) != 0) { nl = nl + 1; }
+    return sys_rename(oldpath, ol, newpath, nl);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return syscall(0xF034, oldpath, newpath);   # kernel32!MoveFileExW (REPLACE_EXISTING)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_rename(oldpath, newpath);
+    #endif
+    #endif
+}
+
+# Flush a file descriptor's data + metadata to stable storage. Portable:
+# Linux x86/aarch64 + macOS use sys_fsync (x86 #74; the backend renumbers to
+# aarch64 82 / Darwin BSD 95). AGNOS has no per-fd fsync in its AO_* syscall set,
+# so a whole-system sys_sync() is the best available approximation (documented
+# residual — coarser than fsync but honestly durable). Windows is a no-op: the
+# MoveFileExW replace after a closed handle is durable enough for the atomic-write
+# use, and there is no cheap portable FlushFileBuffers reroute wired (documented
+# choice). Returns 0 / negative errno.
+fn xfsync(fd): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_sync();          # no per-fd fsync on agnos — whole-fs sync (residual)
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    return 0;                   # MoveFileEx-after-close is durable enough (documented)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_fsync(fd);
     #endif
     #endif
 }
@@ -178,7 +423,14 @@ fn xflock(fd, op): i64 {
     return -1;                                 # Windows: no flock (LockFileEx — not wired)
     #endif
     #ifdef CYRIUS_TARGET_MACOS
-    return syscall(92, fd, op);                # BSD flock
+    # v6.5.16: was `syscall(92, ...)` labelled "BSD flock". Darwin 92 is **fcntl** —
+    # flock is 131 (read off ecb's SDK syscall.h) — so this called fcntl with flock's
+    # (fd, op) args on both Mach-O targets. And 92 is not a routed SOURCE on either
+    # backend, so on x86-macOS the number reached Darwin unprefixed and SIGSYS'd the
+    # process, while on arm64 it ran with a stale x16. Issue the x86-Linux flock number
+    # (73) and let ESYSXLAT renumber it to 131 — the sanctioned "x86 number + an
+    # ESYSXLAT entry" pattern (CLAUDE.md), so ONE source number serves both backends.
+    return syscall(73, fd, op);                # → BSD flock 131 via ESYSXLAT
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     #ifndef CYRIUS_TARGET_WIN
@@ -234,6 +486,114 @@ fn file_write_all(path, buf, len): i64 {
     var written = file_write(fd, buf, len);
     file_close(fd);
     return written;
+}
+
+# ── v6.4.57: portable crash-safe atomic write (thoth's model edit/create tools).
+# file_write_all is NOT crash-safe (O_TRUNC empties the target at open, so a short
+# write / crash leaves the user's file truncated). file_write_atomic writes to a
+# unique sibling temp, fsyncs, then rename()s over the target — an atomic same-fs
+# replace — so the original is never left half-written. See issue
+# 2026-07-12-thoth-portable-atomic-file-write.md.
+
+# Per-process monotonic counter for temp-name uniqueness (combined with the pid so
+# two concurrent writers of the same path pick disjoint temp names).
+var _io_atomic_ctr = 0;
+
+# Portable getpid: Windows via GetCurrentProcessId (0xF01C); everything else
+# (Linux x86/aarch64, macOS, agnos) via sys_getpid.
+fn _io_pid(): i64 {
+    #ifdef CYRIUS_TARGET_WIN
+    return syscall(0xF01C);
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_getpid();
+    #endif
+}
+
+# Append the decimal digits of a non-negative value to `buf` at `pos`; return the
+# new pos. No `%` (division-based; reverse-then-emit).
+fn _io_append_dec(buf, pos, val): i64 {
+    if (val == 0) { store8(buf + pos, 48); return pos + 1; }
+    var tmp[24];
+    var n = 0;
+    var v = val;
+    while (v > 0) {
+        var q = v / 10;
+        store8(&tmp + n, 48 + (v - q * 10));
+        n = n + 1;
+        v = q;
+    }
+    while (n > 0) {
+        n = n - 1;
+        store8(buf + pos, load8(&tmp + n));
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+# Build "<path>.cyrtmp.<pid>.<ctr>" into a freshly alloc'd, NUL-terminated buffer.
+# Returns the pointer (caller does not free — same short-lived-heap convention as
+# getenv's result copy). ~40 bytes of suffix headroom covers pid+ctr decimals.
+fn _io_tmp_name(path): i64 {
+    var plen = strlen(path);
+    var buf = alloc(plen + 48);
+    memcpy(buf, path, plen);
+    memcpy(buf + plen, ".cyrtmp.", 8);
+    var pos = plen + 8;
+    pos = _io_append_dec(buf, pos, _io_pid());
+    store8(buf + pos, 46);   # '.'
+    pos = pos + 1;
+    _io_atomic_ctr = _io_atomic_ctr + 1;
+    pos = _io_append_dec(buf, pos, _io_atomic_ctr);
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Crash-safe write of `len` bytes from `buf` to `path`. Writes a unique sibling
+# temp, loops the write until all bytes land (partial-write-safe), fsyncs, closes,
+# then atomically renames the temp over `path`. On ANY failure the temp is unlinked
+# and the negative errno is returned, leaving the original `path` intact. Returns
+# 0 on success. v6.4.58: the on-failure unlink is now real on EVERY target — xunlink
+# routes to DeleteFileW (0xF035) on Windows, so no rare-path temp leak lingers there.
+fn file_write_atomic(path, buf, len): i64 {
+    var tmp = _io_tmp_name(path);
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return fd; }
+    var off = 0;
+    while (off < len) {
+        var w = file_write(fd, buf + off, len - off);
+        if (w <= 0) {
+            file_close(fd);
+            xunlink(tmp);
+            if (w == 0) { return -5; }   # no forward progress → -EIO
+            return w;                    # negative errno from the kernel
+        }
+        off = off + w;
+    }
+    xfsync(fd);
+    var cr = file_close(fd);
+    if (cr < 0) { xunlink(tmp); return cr; }
+    var rr = file_rename(tmp, path);
+    if (rr < 0) { xunlink(tmp); return rr; }
+    return 0;
+}
+
+# Create `path` ONLY if it does not already exist (no-clobber), returning the new
+# write fd or -EEXIST (-17). On Linux/macOS this is enforced atomically at the
+# kernel via O_CREAT|O_EXCL. AGNOS has no exclusive-create AO_* bit (its AO_* set
+# is RDONLY/WRONLY/RDWR/CREAT/TRUNC/APPEND/DIRECTORY only), so there it degrades to
+# a file_exists pre-check + plain O_CREAT — RESIDUAL: NOT atomic. v6.4.58: Windows is
+# now atomic too — EOPEN_PE maps O_CREAT|O_EXCL (mask 0xC0) → CREATE_NEW, so the open
+# itself fails with ERROR_FILE_EXISTS when the target already exists (no clobber, no
+# race). See issue 2026-07-12-windows-atomic-write-residuals.md (item A).
+fn file_create_exclusive(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    if (file_exists(path) == 1) { return -17; }   # -EEXIST (non-atomic residual)
+    return file_open(path, O_WRONLY | O_CREAT, mode);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return file_open(path, O_WRONLY | O_CREAT | O_EXCL, mode);
+    #endif
 }
 
 # File-lock helpers — portable via xflock, which centralizes the per-target
@@ -399,6 +759,60 @@ fn file_write_all_r(path, buf, len): Result {
     return Ok(n);
 }
 
+# v6.5.36 — the whole environ block, read ONCE to EOF and cached.
+#
+# ⛔ WHAT WAS WRONG: this read `/proc/self/environ` into a FIXED 8 KB stack buffer with a
+# SINGLE `file_read` and scanned only what fit. Any variable whose entry began past byte 8192
+# was invisible, with no loop, no truncation signal and no way for a caller to tell "unset"
+# from "beyond the window" — both returned 0. An 8 KB environment is ordinary: one large
+# `LS_COLORS`, a CI runner's injected secrets, or a long `PATH` is enough. Found by owl,
+# investigating why `NO_COLOR=1` was being ignored.
+#
+# ⭐ READ ONCE, NOT PER CALL. `/proc/self/environ` is fixed at exec, so caching is not just an
+# optimisation — the old code re-read and re-scanned the file on EVERY `getenv`, and on this
+# no-free bump allocator every call that found a value also leaked a fresh copy. One read, one
+# buffer, for the life of the process.
+#
+# ⚠ THE HEAP BUFFER IS ALSO WHAT MAKES THE AGNOS GUARD UNNECESSARY. The old comment here
+# explained that the 8 KB `var buf[]` had to stay inside `#ifndef CYRIUS_TARGET_AGNOS` because
+# a function-local array in a statically-dead region STILL reserves stack at the prologue, and
+# agnos hands ring-3 only ~12 KB of init stack (agnoshi_147 #PF, CHANGELOG [6.1.12]). A heap
+# buffer reserves no frame at all, so that hazard is gone by construction — but the agnos
+# early-return stays, because agnos has no /proc at all and uses the init-stack envp instead.
+var _env_blk = 0;      # cached environ bytes (0 = not loaded yet)
+var _env_len = 0 - 1;  # cached length; -1 = not loaded, 0 = loaded-but-empty/unavailable
+
+fn _env_load(): i64 {
+    if (_env_len >= 0) { return 0; }
+    _env_len = 0;
+    var fd = file_open("/proc/self/environ", 0, 0);
+    if (fd < 0) { return 0; }
+    # Grow-and-read to EOF. /proc files are not stat-sizeable, so the only honest
+    # termination is a short read. Doubling keeps this O(log n) allocations.
+    var cap = 16384;
+    var buf = alloc(cap);
+    var n = 0;
+    var done = 0;
+    while (done == 0) {
+        var got = file_read(fd, buf + n, cap - n);
+        if (got <= 0) { done = 1; }
+        else {
+            n = n + got;
+            if (n >= cap) {
+                var ncap = cap * 2;
+                var nb = alloc(ncap);
+                memcpy(nb, buf, n);
+                buf = nb;
+                cap = ncap;
+            }
+        }
+    }
+    file_close(fd);
+    _env_blk = buf;
+    _env_len = n;
+    return 0;
+}
+
 # Read environment variable by name. Returns pointer to value or 0 if not found.
 # Reads from /proc/self/environ (null-separated KEY=VALUE pairs).
 fn getenv(name): i64 {
@@ -409,18 +823,11 @@ fn getenv(name): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return _agnos_getenv(name);
     #endif
-    # The /proc/self/environ reader (and its 8 KB var buf) must stay out of the
-    # agnos frame entirely: a function-local var[] in a statically-dead region
-    # after the early agnos return still reserves stack at the prologue, and
-    # agnos hands ring-3 only ~12 KB of init stack — an 8 KB phantom frame
-    # overflows it (agnoshi_147 #PF). See CHANGELOG [6.1.12].
     #ifndef CYRIUS_TARGET_AGNOS
-    var buf[8192];
-    var fd = file_open("/proc/self/environ", 0, 0);
-    if (fd < 0) { return 0; }
-    var n = file_read(fd, &buf, 8192);
-    file_close(fd);
+    _env_load();
+    var n = _env_len;
     if (n <= 0) { return 0; }
+    var buf = _env_blk;
     var nlen = strlen(name);
     var pos = 0;
     var eq = 0;
@@ -430,21 +837,21 @@ fn getenv(name): i64 {
         eq = 1;
         ci = 0;
         while (ci < nlen) {
-            if (load8(&buf + pos + ci) != load8(name + ci)) { eq = 0; break; }
+            if (load8(buf + pos + ci) != load8(name + ci)) { eq = 0; break; }
             ci = ci + 1;
         }
-        if (eq == 1) { if (load8(&buf + pos + nlen) == 61) {
+        if (eq == 1) { if (load8(buf + pos + nlen) == 61) {
                 # Found: return pointer to value (copy to heap for safety)
                 var vstart = pos + nlen + 1;
                 var vlen = 0;
-                while (vstart + vlen < n && load8(&buf + vstart + vlen) != 0) { vlen = vlen + 1; }
+                while (vstart + vlen < n && load8(buf + vstart + vlen) != 0) { vlen = vlen + 1; }
                 var result = alloc(vlen + 1);
-                memcpy(result, &buf + vstart, vlen);
+                memcpy(result, buf + vstart, vlen);
                 store8(result + vlen, 0);
                 return result;
             } }
         # Skip to next null terminator
-        while (pos < n) { if (load8(&buf + pos) == 0) { break; } pos = pos + 1; }
+        while (pos < n) { if (load8(buf + pos) == 0) { break; } pos = pos + 1; }
         pos = pos + 1;
     }
     return 0;

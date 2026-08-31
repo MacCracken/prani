@@ -13,7 +13,7 @@
 # result_print) carved out into `lib/result.cyr` with the typed
 # generic shape. Transitively included below so existing
 # consumers (lib/net.cyr, lib/ws_server.cyr, lib/sandhi.cyr,
-# tests/tcyr/tagged.tcyr) keep working without an explicit
+# tests/tcyr/stdlib/tagged.tcyr) keep working without an explicit
 # include of lib/result.cyr. New code should `include
 # "lib/result.cyr"` directly when it only needs Result.
 

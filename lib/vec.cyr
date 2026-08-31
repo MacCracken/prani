@@ -182,3 +182,190 @@ fn vec_remove(v, idx): i64 {
     store64(v + 8, len - 1);
     return 0;
 }
+
+# v6.5.4 — ordering primitives. Closes the agnosai filing
+# (2026-07-28-agnosai-no-nlogn-sort-in-stdlib): until now lib/ carried NO
+# general-purpose comparator-driven ordering routine at all, so ~26 first-party
+# repos each hand-rolled one and two independently built a full O(n log n).
+#
+# `cmp(a, b)` returns <0 if a orders before b, 0 if equivalent, >0 if after —
+# the sign is all that is read, so a plain `a - b` works for i64 keys. It is
+# invoked through fncall2 (lib/fnptr.cyr, pulled in by lib/alloc.cyr:380), NOT
+# through the `callptr` builtin: callptr is a hard compile error on the cx
+# backend (src/backend/cx/emit.cyr ECALLIND), and because lib/vec.cyr is
+# auto-prepended into every build a callptr here would break every cx program
+# — even one that never sorts, since the error fires when the *uncalled* body
+# is emitted. fncall2 is what lib/alloc.cyr and lib/hashmap.cyr already use.
+#
+# All helpers below take the raw data pointer with lo/hi INCLUSIVE, and index
+# `data + i * 8` directly rather than going through vec_get/vec_set — those pay
+# two bounds branches per access, which on an O(n log n) comparison count is the
+# dominant cost. The public entry points do the bounds checking once.
+include "lib/fnptr.cyr"
+
+# Swap the elements at slots i and j (raw data pointer, no bounds check)
+fn _vec_swap(data, i, j): i64 {
+    var t = load64(data + i * 8);
+    store64(data + i * 8, load64(data + j * 8));
+    store64(data + j * 8, t);
+    return 0;
+}
+
+# Insertion sort of data[lo..hi] inclusive — O(n) on already-ordered input,
+# which is why it is also the small-range cutoff for the introsort below
+fn _vec_insertion(data, lo, hi, cmp): i64 {
+    for (var ii = lo + 1; ii <= hi; ii = ii + 1) {
+        var x = load64(data + ii * 8);
+        var ij = ii - 1;
+        while (ij >= lo) {
+            var c = fncall2(cmp, load64(data + ij * 8), x);
+            if (c <= 0) { break; }
+            store64(data + (ij + 1) * 8, load64(data + ij * 8));
+            ij = ij - 1;
+        }
+        store64(data + (ij + 1) * 8, x);
+    }
+    return 0;
+}
+
+# Index of the median of data[a], data[b], data[c] — the pivot choice that keeps
+# quicksort out of its O(n^2) case on sorted and reverse-sorted input
+fn _vec_med3(data, a, b, c, cmp): i64 {
+    var va = load64(data + a * 8);
+    var vb = load64(data + b * 8);
+    var vc = load64(data + c * 8);
+    if (fncall2(cmp, va, vb) < 0) {
+        if (fncall2(cmp, vb, vc) < 0) { return b; }
+        if (fncall2(cmp, va, vc) < 0) { return c; }
+        return a;
+    }
+    if (fncall2(cmp, va, vc) < 0) { return a; }
+    if (fncall2(cmp, vb, vc) < 0) { return c; }
+    return b;
+}
+
+# Hoare partition of data[lo..hi] around a median-of-3 pivot VALUE; returns the
+# split point j, so the halves are [lo..j] and [j+1..hi]. Hoare (not Lomuto) is
+# deliberate: on all-identical keys both scans advance, giving an even split,
+# where Lomuto degenerates to O(n^2) and a naive variant spins forever.
+fn _vec_hoare(data, lo, hi, cmp): i64 {
+    var m = _vec_med3(data, lo, lo + (hi - lo) / 2, hi, cmp);
+    var pivot = load64(data + m * 8);
+    var pi = lo - 1;
+    var pj = hi + 1;
+    while (1 == 1) {
+        pi = pi + 1;
+        while (fncall2(cmp, load64(data + pi * 8), pivot) < 0) { pi = pi + 1; }
+        pj = pj - 1;
+        while (fncall2(cmp, load64(data + pj * 8), pivot) > 0) { pj = pj - 1; }
+        if (pi >= pj) { return pj; }
+        _vec_swap(data, pi, pj);
+    }
+    return pj;
+}
+
+# Sift data[lo + root] down through a max-heap of n elements based at data[lo]
+fn _vec_sift(data, lo, n, root, cmp): i64 {
+    var r = root;
+    while (1 == 1) {
+        var child = 2 * r + 1;
+        if (child >= n) { return 0; }
+        if (child + 1 < n) {
+            var cl = load64(data + (lo + child) * 8);
+            var cr = load64(data + (lo + child + 1) * 8);
+            if (fncall2(cmp, cl, cr) < 0) { child = child + 1; }
+        }
+        var pv = load64(data + (lo + r) * 8);
+        var cv = load64(data + (lo + child) * 8);
+        if (fncall2(cmp, pv, cv) >= 0) { return 0; }
+        _vec_swap(data, lo + r, lo + child);
+        r = child;
+    }
+    return 0;
+}
+
+# Heapsort data[lo..hi] — O(n log n) WORST case with O(1) extra memory and no
+# recursion; the introsort depth-limit fallback, so a hostile input degrades to
+# heapsort rather than to quicksort's quadratic case
+fn _vec_heapsort(data, lo, hi, cmp): i64 {
+    var n = hi - lo + 1;
+    for (var hi2 = n / 2 - 1; hi2 >= 0; hi2 = hi2 - 1) { _vec_sift(data, lo, n, hi2, cmp); }
+    for (var he = n - 1; he > 0; he = he - 1) {
+        _vec_swap(data, lo, lo + he);
+        _vec_sift(data, lo, he, 0, cmp);
+    }
+    return 0;
+}
+
+# Floor of log2(n) for n >= 1 (`>>` is LOGICAL in cyrius; n is always positive)
+fn _vec_log2(n): i64 {
+    var r = 0;
+    var x = n;
+    while (x > 1) { x = x >> 1; r = r + 1; }
+    return r;
+}
+
+# Introsort of data[lo..hi]: median-of-3 quicksort, falling back to heapsort at
+# the depth limit and to insertion sort below the 16-element cutoff. Recurses
+# into the SMALLER side and loops on the larger, which bounds stack depth to
+# O(log n) rather than O(n) on an adversarial input.
+fn _vec_introsort(data, lo, hi, depth, cmp): i64 {
+    var l = lo;
+    var h = hi;
+    var d = depth;
+    while (h - l > 16) {
+        if (d <= 0) { _vec_heapsort(data, l, h, cmp); return 0; }
+        d = d - 1;
+        var p = _vec_hoare(data, l, h, cmp);
+        if (p - l < h - p - 1) {
+            _vec_introsort(data, l, p, d, cmp);
+            l = p + 1;
+        } else {
+            _vec_introsort(data, p + 1, h, d, cmp);
+            h = p;
+        }
+    }
+    _vec_insertion(data, l, h, cmp);
+    return 0;
+}
+
+# Sort the vector in place using `cmp` (a fn pointer from `&name`, called as
+# cmp(a, b) → <0 / 0 / >0). O(n log n) worst case, O(1) extra memory — nothing
+# is allocated, which matters under the default bump allocator where a merge
+# sort's n-slot scratch would be leaked on every call. An O(n) pre-scan returns
+# immediately when the input is already ordered, so the nearly-sorted inputs
+# consumers feed it (directory listings, ascending ids) stay cheap. NOT named
+# bare `vec_sort` — that is occupied by itihas/src/util.cyr:57 in cyrius's flat
+# namespace, and last-definition-wins would silently displace it. Returns 0.
+fn vec_sort_by(v, cmp): i64 {
+    var len = load64(v + 8);
+    if (len < 2) { return 0; }
+    var data = load64(v);
+    var ordered = 1;
+    for (var si = 1; si < len; si = si + 1) {
+        var c = fncall2(cmp, load64(data + (si - 1) * 8), load64(data + si * 8));
+        if (c > 0) { ordered = 0; break; }
+    }
+    if (ordered == 1) { return 0; }
+    _vec_introsort(data, 0, len - 1, 2 * _vec_log2(len), cmp);
+    return 0;
+}
+
+# Return the element that would sit at index k if the vector were sorted by
+# `cmp`, partitioning the vector in place around it (Hoare quickselect,
+# median-of-3). O(n) expected — the reason percentiles never needed a full sort.
+# Aborts on an out-of-range k, matching vec_get/vec_set rather than returning an
+# in-band sentinel that a valid element could equal.
+fn vec_select_nth(v, k, cmp): i64 {
+    var len = load64(v + 8);
+    if (k < 0) { syscall(1, 2, "vec: select_nth k < 0\n", 22); _vec_die(); }
+    if (k >= len) { syscall(1, 2, "vec: select_nth out of bounds\n", 30); _vec_die(); }
+    var data = load64(v);
+    var l = 0;
+    var h = len - 1;
+    while (l < h) {
+        var p = _vec_hoare(data, l, h, cmp);
+        if (k <= p) { h = p; } else { l = p + 1; }
+    }
+    return load64(data + k * 8);
+}

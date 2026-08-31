@@ -20,6 +20,8 @@ var F64_TWO_HALF      = 0x4004_0000_0000_0000;   # 2.5
 var F64_PI            = 0x4009_21FB_5444_2D18;   # π
 var F64_PI_2          = 0x3FF9_21FB_5444_2D18;   # π/2
 var F64_PI_4          = 0x3FE9_21FB_5444_2D18;   # π/4
+var F64_PI_6          = 0x3FE0_C152_382D_7365;   # π/6 ≈ 0.5235987755982988 (atan reduction, v6.4.25)
+var F64_2_PI          = 0x3FE4_5F30_6DC9_C883;   # 2/π ≈ 0.6366197723675814
 var F64_TAU           = 0x4019_21FB_5444_2D18;   # 2π
 var F64_E             = 0x4005_BF0A_8B14_5769;   # e
 var F64_LN2           = 0x3FE6_2E42_FEFA_39EF;   # ln(2)
@@ -27,6 +29,21 @@ var F64_LN10          = 0x4002_6BB1_BBB5_5516;   # ln(10)
 var F64_LOG2E         = 0x3FF7_1547_652B_82FE;   # 1/ln(2) ≈ 1.4426950408889634 (v5.8.4)
 var F64_FRAC_1_SQRT2  = 0x3FE6_A09E_667F_3BCD;   # 1/√2
 var F64_SQRT2         = 0x3FF6_A09E_667F_3BCD;   # √2
+
+# Double-double (Payne-Hanek-lite) trig range-reduction constants (v6.4.25).
+# For |x| ≥ F64_TRIG_BIG the single-constant reduction (r = x − k·π/2 with one
+# π/2 literal) loses precision; a Dekker double-double product x·(2/π) keeps the
+# reduction exact to ~1e-16 through |x| ≈ 1e15. 2/π and π/2 each carry a hi word
+# plus a lo correction; the _SH/_SL pairs are the Dekker split of the hi word
+# (top-26 / bottom bits) so TwoProduct can multiply exactly without FMA.
+var F64_DD_SPLIT      = 0x41A0_0000_0200_0000;   # 2^27+1 (Dekker split factor)
+var F64_TRIG_BIG      = 0x40C0_0000_0000_0000;   # 8192.0 — |x| threshold for the dd path
+var F64_2PI_LO        = 0xBC86_B01E_C541_7056;   # 2/π low word (dd tail)
+var F64_2PI_SH        = 0x3FE4_5F30_7000_0000;   # split-hi of 2/π hi word
+var F64_2PI_SL        = 0xBE31_B1BB_E800_0000;   # split-lo of 2/π hi word
+var F64_PI2_LO        = 0x3C91_A626_3314_5C07;   # π/2 low word (dd tail)
+var F64_PI2_SH        = 0x3FF9_21FB_5800_0000;   # split-hi of π/2 hi word
+var F64_PI2_SL        = 0xBE4D_DE97_4000_0000;   # split-lo of π/2 hi word
 
 # ============================================================
 # v5.7.31: aarch64 polyfills for f64_exp / f64_ln.
@@ -158,6 +175,235 @@ fn _f64_ln_polyfill(x): i64 {
 # blocked aarch64 cross-build via the `f64_log2 is x86-only` hard-reject.
 fn _f64_log2_polyfill(x): i64 {
     return f64_mul(f64_ln(x), F64_LOG2E);
+}
+
+# ============================================================
+# v6.4.16: aarch64 polyfills for f64_sin / f64_cos.
+# ============================================================
+# x86 has native x87 fsin / fcos; aarch64 has no native trig (even
+# hardware sin/cos on ARM is a library affair). Pre-v6.4.16 the
+# aarch64 backend hard-rejected f64_sin / f64_cos; v6.4.16 redirects
+# them to these polyfills (the v5.7.31 exp/ln pattern applied to trig).
+# Consumer-filed by attn11 (hearing lane: Hann-window cos + synth sin +
+# hisab num_fft twiddles) — `issues/2026-07-07-aarch64-no-trig-polyfill.md`.
+#
+# Range-reduce x = k·(π/2) + r with |r| ≤ π/4 and quadrant q = k mod 4;
+# evaluate sin(r) and cos(r) via Horner Taylor (through 1/15! and 1/14!,
+# accurate to ~1e-16 on |r| ≤ π/4) and select/sign per quadrant. Single-
+# constant reduction (like _f64_exp's single ln2) — accurate for typical
+# inputs; extreme-|x| (where the single π/2 subtraction loses precision)
+# is out-of-spec, same posture as the exp/ln polyfills. A Payne-Hanek /
+# Cody-Waite two-part reduction is a future polish slot if a consumer needs it.
+# x86 builds keep emitting native fsin/fcos; these compile on x86 too but
+# are only invoked on aarch64.
+
+# sin(r)/r as a polynomial in r² (Taylor, alternating sign): the coefficients
+# are (-1)^k / (2k+1)! for k = 0..7. dev-computed IEEE-754 bit patterns.
+fn _f64_sin_core(r2): i64 {
+    var p = 0xBD6AE7F3E733B81F;                          # s7 = -1/15!
+    p = f64_add(0x3DE6124613A86D09, f64_mul(r2, p));     # s6 =  1/13!
+    p = f64_add(0xBE5AE64567F544E4, f64_mul(r2, p));     # s5 = -1/11!
+    p = f64_add(0x3EC71DE3A556C734, f64_mul(r2, p));     # s4 =  1/9!
+    p = f64_add(0xBF2A01A01A01A01A, f64_mul(r2, p));     # s3 = -1/7!
+    p = f64_add(0x3F81111111111111, f64_mul(r2, p));     # s2 =  1/5!
+    p = f64_add(0xBFC5555555555555, f64_mul(r2, p));     # s1 = -1/3!
+    p = f64_add(F64_ONE, f64_mul(r2, p));                # s0 =  1
+    return p;
+}
+
+# cos(r) as a polynomial in r² (Taylor, alternating sign): (-1)^k / (2k)!.
+fn _f64_cos_core(r2): i64 {
+    var p = 0xBDA93974A8C07C9D;                          # c7 = -1/14!
+    p = f64_add(0x3E21EED8EFF8D898, f64_mul(r2, p));     # c6 =  1/12!
+    p = f64_add(0xBE927E4FB7789F5C, f64_mul(r2, p));     # c5 = -1/10!
+    p = f64_add(0x3EFA01A01A01A01A, f64_mul(r2, p));     # c4 =  1/8!
+    p = f64_add(0xBF56C16C16C16C17, f64_mul(r2, p));     # c3 = -1/6!
+    p = f64_add(0x3FA5555555555555, f64_mul(r2, p));     # c2 =  1/4!
+    p = f64_add(0xBFE0000000000000, f64_mul(r2, p));     # c1 = -1/2!
+    p = f64_add(F64_ONE, f64_mul(r2, p));                # c0 =  1
+    return p;
+}
+
+# Double-double range reduction for |x| ≥ F64_TRIG_BIG (v6.4.25, Payne-Hanek-
+# lite). Recomputes k_f and r in extended precision so the reduction stays exact
+# to ~1e-16 through |x| ≈ 1e15 — where the single-constant `x − k·π/2` above
+# suffers catastrophic cancellation. Dekker TwoProduct (split via F64_DD_SPLIT,
+# no FMA) forms x·(2/π) and frac·(π/2) with hi+lo words. The dd k_f (not a naive
+# f64_round(x·2/π), which is off-by-one for large x) is what feeds the quadrant,
+# so this block writes k_f directly. Duplicated verbatim in sin/cos (as the
+# small-path reduction already is); factoring is blocked by no multi-return.
+fn _f64_sin_polyfill(x): i64 {
+    var k_f = f64_round(f64_mul(x, F64_2_PI));           # nearest multiple of π/2
+    var r   = f64_sub(x, f64_mul(k_f, F64_PI_2));         # r ∈ [−π/4, π/4]
+    var ax  = x & 0x7FFFFFFFFFFFFFFF;                     # |x| (clear sign bit)
+    if (f64_gt(ax, F64_TRIG_BIG) == 1) {
+        var xc  = f64_mul(x, F64_DD_SPLIT);
+        var xhi = f64_sub(xc, f64_sub(xc, x));
+        var xlo = f64_sub(x, xhi);
+        var ph  = f64_mul(x, F64_2_PI);
+        var pe  = f64_sub(f64_mul(xhi, F64_2PI_SH), ph);   # TwoProduct error term (Dekker)
+        pe = f64_add(pe, f64_mul(xhi, F64_2PI_SL));
+        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SH));
+        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SL));
+        var plo = f64_add(pe, f64_mul(x, F64_2PI_LO));
+        k_f = f64_round(f64_add(ph, plo));
+        var frac = f64_add(f64_sub(ph, k_f), plo);
+        var fc  = f64_mul(frac, F64_DD_SPLIT);
+        var fhi = f64_sub(fc, f64_sub(fc, frac));
+        var flo = f64_sub(frac, fhi);
+        var rh  = f64_mul(frac, F64_PI_2);
+        var re  = f64_sub(f64_mul(fhi, F64_PI2_SH), rh);   # TwoProduct error term (Dekker)
+        re = f64_add(re, f64_mul(fhi, F64_PI2_SL));
+        re = f64_add(re, f64_mul(flo, F64_PI2_SH));
+        re = f64_add(re, f64_mul(flo, F64_PI2_SL));
+        r = f64_add(rh, f64_add(re, f64_mul(frac, F64_PI2_LO)));
+    }
+    var q   = f64_to(k_f) & 3;                            # quadrant (two's-comp mask handles k<0)
+    var r2  = f64_mul(r, r);
+    var sinr = f64_mul(r, _f64_sin_core(r2));
+    var cosr = _f64_cos_core(r2);
+    # sin(x) = [sinr, cosr, -sinr, -cosr][q]
+    if (q == 0) { return sinr; }
+    if (q == 1) { return cosr; }
+    if (q == 2) { return f64_neg(sinr); }
+    return f64_neg(cosr);
+}
+
+fn _f64_cos_polyfill(x): i64 {
+    var k_f = f64_round(f64_mul(x, F64_2_PI));
+    var r   = f64_sub(x, f64_mul(k_f, F64_PI_2));
+    var ax  = x & 0x7FFFFFFFFFFFFFFF;
+    if (f64_gt(ax, F64_TRIG_BIG) == 1) {
+        var xc  = f64_mul(x, F64_DD_SPLIT);
+        var xhi = f64_sub(xc, f64_sub(xc, x));
+        var xlo = f64_sub(x, xhi);
+        var ph  = f64_mul(x, F64_2_PI);
+        var pe  = f64_sub(f64_mul(xhi, F64_2PI_SH), ph);   # TwoProduct error term (Dekker)
+        pe = f64_add(pe, f64_mul(xhi, F64_2PI_SL));
+        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SH));
+        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SL));
+        var plo = f64_add(pe, f64_mul(x, F64_2PI_LO));
+        k_f = f64_round(f64_add(ph, plo));
+        var frac = f64_add(f64_sub(ph, k_f), plo);
+        var fc  = f64_mul(frac, F64_DD_SPLIT);
+        var fhi = f64_sub(fc, f64_sub(fc, frac));
+        var flo = f64_sub(frac, fhi);
+        var rh  = f64_mul(frac, F64_PI_2);
+        var re  = f64_sub(f64_mul(fhi, F64_PI2_SH), rh);   # TwoProduct error term (Dekker)
+        re = f64_add(re, f64_mul(fhi, F64_PI2_SL));
+        re = f64_add(re, f64_mul(flo, F64_PI2_SH));
+        re = f64_add(re, f64_mul(flo, F64_PI2_SL));
+        r = f64_add(rh, f64_add(re, f64_mul(frac, F64_PI2_LO)));
+    }
+    var q   = f64_to(k_f) & 3;
+    var r2  = f64_mul(r, r);
+    var sinr = f64_mul(r, _f64_sin_core(r2));
+    var cosr = _f64_cos_core(r2);
+    # cos(x) = [cosr, -sinr, -cosr, sinr][q]
+    if (q == 0) { return cosr; }
+    if (q == 1) { return f64_neg(sinr); }
+    if (q == 2) { return f64_neg(cosr); }
+    return sinr;
+}
+
+# ============================================================
+# v6.4.25: aarch64 polyfills for f64_exp2 / f64_atan.
+# ============================================================
+# x86 has native x87 for these (f2xm1/fscale for exp2, fpatan for atan);
+# aarch64 has none. Pre-v6.4.25 the aarch64 backend hard-rejected f64_exp2 /
+# f64_atan; v6.4.25 redirects them to these polyfills — the last two of the
+# transcendentals the v5.7.31 / v6.4.16 waves left as "separate unfiled aarch64
+# gaps" (issues/2026-07-07-aarch64-f64-exp2-atan-hard-error.md). x86 builds keep
+# emitting native x87; these compile on x86 too but are only invoked on aarch64.
+# f64_tan needs no backend op — compose sin/cos at the call site.
+
+# exp2(x) = 2^x — range-reduce x = n + f, n = round(x), |f| ≤ 0.5; then
+# 2^x = 2^n · 2^f with 2^f = exp(f·ln2). r = f·ln2, |r| ≤ ln2/2 ≈ 0.347, so
+# the same 11-term Taylor as _f64_exp_polyfill applies; 2^n via exponent
+# bit-pack. Accuracy matches the exp polyfill (~3e-13 worst-case over [-50,50]).
+fn _f64_exp2_polyfill(x): i64 {
+    var LN2 = 0x3FE62E42FEFA39EF;                 # ln(2) ≈ 0.6931471805599453
+
+    # Range reduction: n = round(x), f = x − n, r = f·ln2 (|r| ≤ ln2/2).
+    var n_f = f64_round(x);
+    var f   = f64_sub(x, n_f);
+    var r   = f64_mul(f, LN2);
+
+    # exp(r) — 11-term Taylor (coeffs shared with _f64_exp_polyfill).
+    var c10 = 0x3E927E4FB7789F5C;                 # 1/10!
+    var c9  = 0x3EC71DE3A556C734;                 # 1/9!
+    var c8  = 0x3EFA01A01A01A01A;                 # 1/8!
+    var c7  = 0x3F2A01A01A01A01A;                 # 1/7!
+    var c6  = 0x3F56C16C16C16C17;                 # 1/6!
+    var c5  = 0x3F81111111111111;                 # 1/5!
+    var c4  = 0x3FA5555555555555;                 # 1/4!
+    var c3  = 0x3FC5555555555555;                 # 1/3!
+    var c2  = F64_HALF;                            # 1/2!
+    var c1  = F64_ONE;                             # 1/1!
+    var c0  = F64_ONE;                             # 1/0!
+    var p = c10;
+    p = f64_add(c9, f64_mul(r, p));
+    p = f64_add(c8, f64_mul(r, p));
+    p = f64_add(c7, f64_mul(r, p));
+    p = f64_add(c6, f64_mul(r, p));
+    p = f64_add(c5, f64_mul(r, p));
+    p = f64_add(c4, f64_mul(r, p));
+    p = f64_add(c3, f64_mul(r, p));
+    p = f64_add(c2, f64_mul(r, p));
+    p = f64_add(c1, f64_mul(r, p));
+    p = f64_add(c0, f64_mul(r, p));
+
+    # 2^n via bit pattern: ((n + 1023) << 52) as f64 (mantissa 0 → exact 2^n).
+    var n_int = f64_to(n_f);
+    var two_n_bits = (n_int + 1023) << 52;
+    return f64_mul(two_n_bits, p);
+}
+
+# atan(x) → (−π/2, π/2). Two-stage argument reduction keeps the Taylor
+# argument small: (1) atan(−x) = −atan(x), so work on |x|; (2) atan(ax) =
+# π/2 − atan(1/ax) folds |x| > 1 into [0, 1]; (3) atan(ax) = π/6 +
+# atan((ax − 1/√3)/(1 + ax/√3)) folds ax > 2−√3 into |t| ≤ tan(π/12) ≈ 0.268.
+# On that range an 11-term Taylor (through t^21) gives ~1e-14. Accuracy
+# ~1e-14 worst-case (validated vs reference over ±1e8).
+fn _f64_atan_polyfill(x): i64 {
+    var TAN30 = 0x3FE279A74590331C;               # tan(π/6) = 1/√3 ≈ 0.5773502691896257
+    var T2MS3 = 0x3FD126145E9ECD58;               # 2 − √3 ≈ 0.2679491924311227
+
+    # (1) sign fold: work on |x|, restore at the end.
+    var neg = 0;
+    var ax  = x;
+    if ((x & 0x8000000000000000) != 0) { neg = 1; ax = x & 0x7FFFFFFFFFFFFFFF; }
+
+    # (2) reciprocal fold: |x| > 1 → atan = π/2 − atan(1/ax).
+    var inv = 0;
+    if (f64_gt(ax, F64_ONE) == 1) { inv = 1; ax = f64_div(F64_ONE, ax); }
+
+    # (3) π/6 fold: ax > 2−√3 → subtract π/6 offset, map to |t| ≤ tan(π/12).
+    var addpi6 = 0;
+    if (f64_gt(ax, T2MS3) == 1) {
+        addpi6 = 1;
+        ax = f64_div(f64_sub(ax, TAN30), f64_add(F64_ONE, f64_mul(ax, TAN30)));
+    }
+
+    # atan(t) = t·P(t²), P(u) = 1 − u/3 + u²/5 − u³/7 + … + u^10/21 (Horner).
+    var t2 = f64_mul(ax, ax);
+    var p = 0x3FA8618618618618;                    # +1/21
+    p = f64_add(0xBFAAF286BCA1AF28, f64_mul(t2, p)); # −1/19
+    p = f64_add(0x3FAE1E1E1E1E1E1E, f64_mul(t2, p)); # +1/17
+    p = f64_add(0xBFB1111111111111, f64_mul(t2, p)); # −1/15
+    p = f64_add(0x3FB3B13B13B13B14, f64_mul(t2, p)); # +1/13
+    p = f64_add(0xBFB745D1745D1746, f64_mul(t2, p)); # −1/11
+    p = f64_add(0x3FBC71C71C71C71C, f64_mul(t2, p)); # +1/9
+    p = f64_add(0xBFC2492492492492, f64_mul(t2, p)); # −1/7
+    p = f64_add(0x3FC999999999999A, f64_mul(t2, p)); # +1/5
+    p = f64_add(0xBFD5555555555555, f64_mul(t2, p)); # −1/3
+    p = f64_add(F64_ONE, f64_mul(t2, p));            # +1
+    var res = f64_mul(ax, p);
+
+    if (addpi6 == 1) { res = f64_add(res, F64_PI_6); }
+    if (inv == 1)    { res = f64_sub(F64_PI_2, res); }
+    if (neg == 1)    { res = f64_neg(res); }
+    return res;
 }
 
 # clamp(x, lo, hi) — clamp x to [lo, hi]
@@ -322,9 +568,17 @@ fn f64_parse(s): i64 {
         elif (load8(s + i) == 43) { i = i + 1; }
         var exp_val = 0;
         while (load8(s + i) >= 48 && load8(s + i) <= 57) {
-            exp_val = exp_val * 10 + (load8(s + i) - 48);
+            # SATURATE the accumulator (CHANGELOG [6.4.69]): unbounded growth +
+            # the O(exp_val) apply loop below made "1e100000000" (17 bytes) burn
+            # ~237 ms — an algorithmic-complexity DoS. |exp| > 340 already
+            # overflows f64 to +/-Inf (or underflows to 0), so bounding it is
+            # behaviour-preserving for every representable value.
+            if (exp_val < 100000) { exp_val = exp_val * 10 + (load8(s + i) - 48); }
             i = i + 1;
         }
+        # Clamp the apply loop: 10^340 is already +Inf, so scaling past it can't
+        # change the (saturated) result — O(1) instead of O(exp_val).
+        if (exp_val > 340) { exp_val = 340; }
         # Apply exponent: result * 10^exp
         var exp_scale = f64_from(1);
         var ei = 0;

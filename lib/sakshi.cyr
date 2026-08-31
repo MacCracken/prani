@@ -1,5 +1,5 @@
 # sakshi.cyr — tracing, error handling, and structured logging for Cyrius
-# Bundled distribution of sakshi v2.4.3
+# Bundled distribution of sakshi v2.4.12
 # Source: https://github.com/MacCracken/sakshi
 # License: GPL-3.0-only
 #
@@ -85,7 +85,7 @@ fn _sk_open(path, flags, mode): i64 {
     var n = 0;
     while (load8(path + n) != 0) { n = n + 1; }
     var ao = 0;
-    if ((flags & 3) != 0) { ao = ao | 0x1; }        # O_WRONLY/O_RDWR -> AO_WRONLY
+    ao = ao | (flags & 3);   # O_/AO_ access mode 1:1 (0/1/2); was folding O_RDWR→AO_WRONLY
     if ((flags & 64) != 0) { ao = ao | 0x100; }     # O_CREAT  -> AO_CREAT
     if ((flags & 512) != 0) { ao = ao | 0x200; }    # O_TRUNC  -> AO_TRUNC
     if ((flags & 1024) != 0) { ao = ao | 0x400; }   # O_APPEND -> AO_APPEND
@@ -412,9 +412,21 @@ fn _sk_memset(dst, val, n): i64 {
 fn _sk_fmt_int(n, buf): i64 {
     var bi = 23;
     var neg: i64 = 0;
-    if (n < 0) { neg = 1; n = 0 - n; }
+    # i64::MIN: `n = 0 - n` is a NO-OP there (two's-complement abs overflows back to
+    # itself), so n stayed negative, both the `n == 0` guard and a `n > 0` loop were
+    # skipped, and this emitted the sign byte and NOTHING ELSE — length 1, the string
+    # "-". Keep the sign FLAG, never negate n, extract digits from the negative value
+    # and negate each digit. `!= 0` is the load-bearing half. `/` and `%` truncate
+    # toward zero on x86, aarch64 and cx (all three verified).
+    # Same defect and same fix as cyrius 6.5.8's lib/fmt.cyr sweep; this is the
+    # upstream half of it. sakshi 2.4.8.
+    if (n < 0) { neg = 1; }
     if (n == 0) { store8(buf + bi, 48); bi = bi - 1; }
-    while (n > 0) { store8(buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    while (n != 0) {
+        var d = n % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+    }
     if (neg == 1) { store8(buf + bi, 45); bi = bi - 1; }
     var len = 23 - bi;
     var src = bi + 1;
@@ -427,8 +439,20 @@ fn _sk_fmt_int(n, buf): i64 {
 
 # ================================================================
 # Internal: write an integer into buf at pos, respecting cap. Returns new pos.
+#
+# NAMING (do not rename back): this was `_sk_write_int` until 2.4.7. In cyrius,
+# `X_int` / `X_str` / `X_cstr` are RESERVED overload-dispatch suffixes — the
+# compiler rewrites a call `X(a, ...)` into `X_int`/`X_str` when arg 1 matches
+# that type and the sibling exists. `_sk_write(buf, len)` (output.cyr) is an
+# unrelated flush-to-output fn, so `_sk_write_int` claimed the dispatch slot of a
+# function it has nothing to do with: any `_sk_write(someInt, ...)` whose result
+# is assigned would have been silently redirected here, a 4-parameter fn, with
+# the missing arguments bound to garbage. Latent rather than live only because
+# every `_sk_write` call site passes a buffer address as arg 1.
+# A suffix-named sibling must be the SAME-arity type variant of its base or not
+# carry the suffix at all. See bayan CHANGELOG [1.3.0] for the same defect live.
 # ================================================================
-fn _sk_write_int(buf, pos, cap, val): i64 {
+fn _sk_buf_write_number(buf, pos, cap, val): i64 {
     var tmp[24];
     var tlen = _sk_fmt_int(val, &tmp);
     var ti = 0;
@@ -441,7 +465,10 @@ fn _sk_write_int(buf, pos, cap, val): i64 {
 }
 
 # Internal: write a string into buf at pos, respecting cap. Returns new pos.
-fn _sk_write_str(buf, pos, cap, s, slen): i64 {
+# Was `_sk_write_str` until 2.4.7 — see the naming note on _sk_buf_write_number
+# above; `_str` is a reserved cyrius overload-dispatch suffix and this fn is not
+# a type-variant of `_sk_write`.
+fn _sk_buf_write_string(buf, pos, cap, s, slen): i64 {
     var wi = 0;
     while (wi < slen && pos < cap) {
         store8(buf + pos, load8(s + wi));
@@ -462,18 +489,18 @@ fn _sk_fmt_line(buf, cap, ts, level_str, level_len, msg, msg_len): i64 {
 
     # [timestamp]
     if (pos < cap) { store8(buf + pos, 91); pos = pos + 1; }
-    pos = _sk_write_int(buf, pos, cap, ts);
+    pos = _sk_buf_write_number(buf, pos, cap, ts);
     if (pos < cap) { store8(buf + pos, 93); pos = pos + 1; }
     if (pos < cap) { store8(buf + pos, 32); pos = pos + 1; }
 
     # [LEVEL]
     if (pos < cap) { store8(buf + pos, 91); pos = pos + 1; }
-    pos = _sk_write_str(buf, pos, cap, level_str, level_len);
+    pos = _sk_buf_write_string(buf, pos, cap, level_str, level_len);
     if (pos < cap) { store8(buf + pos, 93); pos = pos + 1; }
     if (pos < cap) { store8(buf + pos, 32); pos = pos + 1; }
 
     # message
-    pos = _sk_write_str(buf, pos, cap, msg, msg_len);
+    pos = _sk_buf_write_string(buf, pos, cap, msg, msg_len);
 
     # newline
     if (pos < cap) { store8(buf + pos, 10); pos = pos + 1; }
@@ -488,24 +515,24 @@ fn _sk_fmt_span(buf, cap, ts, action, action_len, name, name_len, elapsed_ns): i
 
     # [timestamp]
     if (pos < cap) { store8(buf + pos, 91); pos = pos + 1; }
-    pos = _sk_write_int(buf, pos, cap, ts);
+    pos = _sk_buf_write_number(buf, pos, cap, ts);
     if (pos < cap) { store8(buf + pos, 93); pos = pos + 1; }
     if (pos < cap) { store8(buf + pos, 32); pos = pos + 1; }
 
     # [ACTION]
     if (pos < cap) { store8(buf + pos, 91); pos = pos + 1; }
-    pos = _sk_write_str(buf, pos, cap, action, action_len);
+    pos = _sk_buf_write_string(buf, pos, cap, action, action_len);
     if (pos < cap) { store8(buf + pos, 93); pos = pos + 1; }
     if (pos < cap) { store8(buf + pos, 32); pos = pos + 1; }
 
     # name
-    pos = _sk_write_str(buf, pos, cap, name, name_len);
+    pos = _sk_buf_write_string(buf, pos, cap, name, name_len);
 
     # elapsed if provided (> 0)
     if (elapsed_ns > 0) {
         if (pos < cap) { store8(buf + pos, 32); pos = pos + 1; }
         if (pos < cap) { store8(buf + pos, 40); pos = pos + 1; }
-        pos = _sk_write_int(buf, pos, cap, elapsed_ns);
+        pos = _sk_buf_write_number(buf, pos, cap, elapsed_ns);
         # "ns)"
         if (pos < cap) { store8(buf + pos, 110); pos = pos + 1; }
         if (pos < cap) { store8(buf + pos, 115); pos = pos + 1; }
@@ -763,14 +790,14 @@ fn sakshi_ring_decode_event(buf, buf_len, dst, dst_cap, out_text_len): i64 {
     # Format: [timestamp] [LEVEL] msg\n
     var pos: i64 = 0;
     if (pos < dst_cap) { store8(dst + pos, 91); pos = pos + 1; }
-    pos = _sk_write_int(dst, pos, dst_cap, ts);
+    pos = _sk_buf_write_number(dst, pos, dst_cap, ts);
     if (pos < dst_cap) { store8(dst + pos, 93); pos = pos + 1; }
     if (pos < dst_cap) { store8(dst + pos, 32); pos = pos + 1; }
     if (pos < dst_cap) { store8(dst + pos, 91); pos = pos + 1; }
-    pos = _sk_write_str(dst, pos, dst_cap, lstr, llen);
+    pos = _sk_buf_write_string(dst, pos, dst_cap, lstr, llen);
     if (pos < dst_cap) { store8(dst + pos, 93); pos = pos + 1; }
     if (pos < dst_cap) { store8(dst + pos, 32); pos = pos + 1; }
-    pos = _sk_write_str(dst, pos, dst_cap, buf + _SK_BIN_HDR_SIZE, msg_len);
+    pos = _sk_buf_write_string(dst, pos, dst_cap, buf + _SK_BIN_HDR_SIZE, msg_len);
     if (pos < dst_cap) { store8(dst + pos, 10); pos = pos + 1; }
 
     store64(out_text_len, pos);
@@ -798,9 +825,9 @@ fn sakshi_ring_decode_event(buf, buf_len, dst, dst_cap, out_text_len): i64 {
 #     bulk read taken while producers are mid-write may observe a partially
 #     written newest event (the reader does not wait for in-flight writers to
 #     drain). For the flight-recorder use case the reader runs when producers
-#     are quiesced (crash dump / debug pause), so this is acceptable. The full
-#     per-CPU ring with a commit watermark is upstream-blocked (needs
-#     sched_getcpu) — see issues/2026-04-30-cyrius-lang-blockers.md item #4.
+#     are quiesced (crash dump / debug pause), so this is acceptable. A full
+#     per-CPU ring with a commit watermark would need a sched_getcpu wrapper;
+#     sakshi is single-threaded by contract, so the global ring suffices.
 #
 # Separate 4KB buffer from SK_OUT_BUFFER (the two targets are never active at
 # once, but keeping them independent avoids cross-target cursor coupling). The
@@ -991,14 +1018,51 @@ fn sakshi_ipv4(a, b, c, d): i64 {
 # to receive structured events without sakshi knowing their format.
 #
 # Hook signature (6 args, matches fncall6 ABI):
-#   fn my_hook(ts, level, category, msg, msg_len, elapsed_ns)
-#     ts         — monotonic nanoseconds, shared across the event
-#     level      — SK_* log level, or SK_SPAN_ENTER (10) / SK_SPAN_EXIT (11)
-#     category   — ERR_CAT_* for log events, 0 for span events
-#     msg        — message / span-name pointer (NOT NUL-terminated)
-#     msg_len    — byte length of msg
-#     elapsed_ns — span EXIT duration, 0 otherwise
+#   fn my_hook(ts, level, category, msg, msg_len, sixth)
+#     ts       — monotonic nanoseconds, shared across the event
+#     level    — SK_* log level, or SK_SPAN_ENTER (10) / SK_SPAN_EXIT (11)
+#     category — ERR_CAT_* for log events, 0 for span events
+#     msg      — message / span-name pointer (NOT NUL-terminated)
+#     msg_len  — byte length of msg
+#     sixth    — SPAN events (level >= SK_SPAN_ENTER): the EXIT duration in ns.
+#                LOG events (level <= SK_TRACE): 0, or a **fields block**
+#                pointer — see below. `level` is the discriminator and is
+#                never ambiguous: 0-5 are logs, 10-11 are spans.
 # Return value is ignored.
+#
+# ## Fields block (2.4.9)
+#
+# `sakshi_log_kv` used to render `key=value` into the message text *before*
+# reaching this hook, so a subscriber received one flat string and could not
+# recover the pieces — reported by agnosai, which needs them as separate JSON
+# members. It now passes the message **unflattened** and describes the fields
+# through the sixth argument:
+#
+#   offset 0                 count            (i64, >= 1)
+#   offset 8  + i*32 + 0     key pointer      (NOT NUL-terminated)
+#   offset 8  + i*32 + 8     key byte length
+#   offset 8  + i*32 + 16    value pointer    (NOT NUL-terminated)
+#   offset 8  + i*32 + 24    value byte length
+#
+# No accessor functions are exported on purpose: this is a patch release and
+# adding public symbols would make it a minor one. Read it with `load64`:
+#
+#   var n = load64(fields);
+#   var key     = load64(fields + 8 + i * 32);
+#   var key_len = load64(fields + 8 + i * 32 + 8);
+#   var val     = load64(fields + 8 + i * 32 + 16);
+#   var val_len = load64(fields + 8 + i * 32 + 24);
+#
+# ⚠ **The block lives on the caller's stack and dies when the hook returns.**
+# It is valid for the duration of the call and not one instruction longer. A
+# subscriber that wants to keep a field must copy the bytes out, not the
+# pointer. Same contract `msg` has always had.
+#
+# ⚠ **Behaviour change for existing hook subscribers**, scoped to
+# `sakshi_log_kv` and to `SK_OUT_HOOK` only — every other output target still
+# receives the flattened text, byte for byte as before. A subscriber that
+# ignores the sixth argument now sees `msg` without the ` key=value` tail. To
+# keep the old rendering, append it: message, space, key, `=`, value.
 #
 # Consumers of the generated dist/sakshi.cyr bundle MUST also
 # `include "lib/fnptr.cyr"` before including sakshi (the bundle
@@ -1348,8 +1412,41 @@ fn sakshi_trace(msg, msg_len): i64 {
 # are explicit byte counts (sakshi convention — no strlen, no NUL requirement).
 # Folded from agnosys logging.cyr (log_msg_kv) in the agnosys → agnodrm
 # decomposition; sakshi is the ecosystem logging home.
+#
+# ## 2.4.9 — the hook target no longer receives the flattened text
+#
+# Flattening reaches the hook as one string, and a subscriber cannot get the
+# pieces back: `"deploy failed reason=oom"` is indistinguishable from a message
+# that merely happens to contain `reason=oom`. Reported by agnosai, whose JSON
+# formatter needs `reason` as its own member. So for `SK_OUT_HOOK` the message
+# is passed **unflattened** alongside a fields block in the hook's sixth
+# argument — the layout is documented on `sakshi_set_emit_hook`. Every other
+# target still gets the composed text, byte for byte as before.
+#
+# ## Return value — 0, or the number of bytes that did NOT fit
+#
+# The 256-byte scratch used to truncate in silence: a long message plus its
+# pair was cut with no marker and no way for the caller to know. The buffer
+# stays fixed (this is the zero-allocation hot path), but the loss is now
+# reported. Every existing caller ignores the return, and 0 still means "all of
+# it was emitted". The hook path never truncates — it does not compose.
 fn sakshi_log_kv(level, msg, msg_len, key, key_len, val, val_len): i64 {
     if (level > _sk_log_level) { return 0; }
+
+    if (_sk_output_target == SK_OUT_HOOK) {
+        if (_sk_emit_hook != 0) {
+            # count, then one 32-byte {key, key_len, val, val_len} record.
+            var fields[40];
+            store64(&fields, 1);
+            store64(&fields + 8, key);
+            store64(&fields + 16, key_len);
+            store64(&fields + 24, val);
+            store64(&fields + 32, val_len);
+            fncall6(_sk_emit_hook, _sk_now_ns(), level, 0, msg, msg_len, &fields);
+        }
+        return 0;
+    }
+
     var buf[256];
     var pos = 0;
     var i = 0;
@@ -1376,6 +1473,11 @@ fn sakshi_log_kv(level, msg, msg_len, key, key_len, val, val_len): i64 {
         i = i + 1;
     }
     _sk_emit(level, 0, &buf, pos);
+
+    # The composed line is msg + ' ' + key + '=' + val. Anything past 256 was
+    # dropped; report how much rather than losing it silently.
+    var want = msg_len + 1 + key_len + 1 + val_len;
+    if (want > 256) { return want - 256; }
     return 0;
 }
 
@@ -1388,27 +1490,73 @@ fn sakshi_log_kv(level, msg, msg_len, key, key_len, val, val_len): i64 {
 # Depends: clock.cyr, format.cyr, output.cyr, trace.cyr (included via lib.cyr)
 #
 # Recommended usage with defer (Cyrius >= 3.2.0):
+#
 #   fn my_function() {
-    #       sakshi_span_enter("my_function", 11);
-    #       defer { sakshi_span_exit(); }
-    #       # ... function body — span_exit guaranteed on return
-    #   }
+#       sakshi_span_enter("my_function", 11);
+#       defer { sakshi_span_exit(); }
+#       # ... function body — span_exit guaranteed on return
+#   }
 
 # Span stack — fixed depth of 16.
 # Each entry: { name_ptr: i64, name_len: i64, start_ns: i64 } = 24 bytes
 # Total: 16 * 24 = 384 bytes
 var _sk_span_stack[384];
 var _sk_span_depth: i64 = 0;
+# Trace id. `_sk_trace_id` is the LOW 64 bits; `_sk_trace_hi` is the HIGH 64
+# bits (0 unless a 128-bit id was set). A W3C trace-id is 128-bit, so a
+# consumer bridging into distributed tracing keeps the full id via the _128
+# API below; the original i64 API is the low half (hi = 0) for back-compat.
 var _sk_trace_id: i64 = 0;
+var _sk_trace_hi: i64 = 0;
 enum _SkSpanConst {
     _SK_MAX_SPANS = 16;
 }
 
+# Count of spans refused because the stack was full. Never reset — it is a
+# cumulative "how much tracing was lost" figure, not a gauge.
+var _sk_spans_dropped: i64 = 0;
+
 # Enter a span — push name + timestamp onto the stack.
 # One _sk_now_ns per call: the same reading seeds both the stack start time
 # and the emitted event's timestamp.
+#
+# Returns 0 when the span was pushed, and a NON-ZERO count when it was
+# refused because the stack was full.
+#
+# Saturation used to be completely invisible: this returned 0 either way and
+# emitted nothing, so a caller with an unbalanced enter/exit pair burned one
+# of the 16 slots permanently (the depth counter is a global and is never
+# reset) and after 16 of them ALL span tracing stopped, with no diagnostic
+# anywhere. A tracing library that stops tracing has to say so. Reported by
+# yukti 2.3.4, which had 18 unbalanced returns across 7 functions and lost
+# observability in exactly this way.
+#
+# The 0-on-success convention is preserved, matching sakshi_log_kv in 2.4.10
+# (0 = fully emitted, non-zero = what did not fit). Every existing caller
+# ignores the return, so this is additive information, not a break.
+#
+# The warning is ONE-SHOT — a saturated stack means the next call saturates
+# too, and a warning per call would be its own log storm.
 fn sakshi_span_enter(name, name_len): i64 {
-    if (_sk_span_depth >= _SK_MAX_SPANS) { return 0; }
+    # Lower-bound guard. `offset` below is `_sk_span_depth * 24`, and the three
+    # store64s write 24 bytes there — so a NEGATIVE depth writes BEFORE
+    # _sk_span_stack and corrupts whatever precedes it. The upper bound was
+    # already checked; this is the other half of the same buffer contract
+    # (every `var buf[N]` access offset must land inside the N bytes we own).
+    #
+    # A negative depth cannot arise from balanced single-threaded use — exit
+    # refuses to go below 0 — so reaching this means either memory corruption
+    # or sakshi_span_exit called from two threads at once, which the
+    # single-threaded contract forbids but cannot enforce. Recover to a sane
+    # stack rather than scribbling outside it.
+    if (_sk_span_depth < 0) { _sk_span_depth = 0; }
+    if (_sk_span_depth >= _SK_MAX_SPANS) {
+        _sk_spans_dropped = _sk_spans_dropped + 1;
+        if (_sk_spans_dropped == 1) {
+            sakshi_warn("sakshi: span stack full (16) - spans dropped; check for unbalanced sakshi_span_enter", 84);
+        }
+        return _sk_spans_dropped;
+    }
     var ts = _sk_now_ns();
     var offset = _sk_span_depth * 24;
     store64(&_sk_span_stack + offset, name);
@@ -1441,14 +1589,47 @@ fn sakshi_span_depth(): i64 {
     return _sk_span_depth;
 }
 
-# Set the active trace ID for correlating spans and events.
-# Typically set once at the root span of a request/operation.
+# Cumulative count of spans refused because the stack was full.
+#
+# Deliberately NOT prefixed as public API in the 2.4.x line: it exists so the
+# test suite can assert the drop path, and so a consumer debugging lost traces
+# can read it. Promoting it to a documented accessor is a MINOR change (new
+# public surface) and is left for 2.5.0.
+fn _sk_spans_dropped_count(): i64 {
+    return _sk_spans_dropped;
+}
+
+# Set the active (64-bit) trace ID for correlating spans and events.
+# Typically set once at the root span of a request/operation. Clears the high
+# half — a 64-bit id is a full id in the low half.
 fn sakshi_trace_set(id): i64 {
     _sk_trace_id = id;
+    _sk_trace_hi = 0;
     return 0;
 }
 
-# Get the active trace ID.
+# Get the active (low 64 bits of the) trace ID. Unchanged for back-compat.
 fn sakshi_trace_id(): i64 {
+    return _sk_trace_id;
+}
+
+# Set a full 128-bit trace ID (e.g. a W3C `traceparent` trace-id): `hi` is the
+# high 64 bits, `lo` the low 64. A consumer that adopts an inbound distributed
+# trace uses this to preserve the whole id; `sakshi_trace_id()` still returns
+# the low half.
+fn sakshi_trace_set_128(hi, lo): i64 {
+    _sk_trace_hi = hi;
+    _sk_trace_id = lo;
+    return 0;
+}
+
+# High 64 bits of the active trace ID (0 unless a 128-bit id was set).
+fn sakshi_trace_id_hi(): i64 {
+    return _sk_trace_hi;
+}
+
+# Low 64 bits of the active trace ID (== sakshi_trace_id; provided for symmetry
+# with sakshi_trace_id_hi).
+fn sakshi_trace_id_lo(): i64 {
     return _sk_trace_id;
 }

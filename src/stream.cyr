@@ -121,8 +121,8 @@ fn stream_new(voice, voc, intent, sample_rate, duration) {
     var vocalization_tilt = crvoice_vocalization_spectral_offset(voc);
     var species_params = species_params(species);
     var spectral_tilt = f64_add(
-        f64_add(SpeciesParams_spectral_tilt(species_params), vocalization_tilt),
-        effort_tilt_offset);
+      f64_add(SpeciesParams_spectral_tilt(species_params), vocalization_tilt),
+      effort_tilt_offset);
 
     var is_cat_purr = 0;
     if (voc == PRANI_VOC_PURR) {
@@ -207,11 +207,11 @@ fn stream_fill_buffer(self, buffer) {
         if (f64_lt(t, PR_ST_0_1) == 1) {
             # 1 + (1 - t/0.1) * 0.5
             boundary_boost = f64_add(F64_ONE,
-                f64_mul(f64_sub(F64_ONE, f64_div(t, PR_ST_0_1)), PR_ST_0_5));
+              f64_mul(f64_sub(F64_ONE, f64_div(t, PR_ST_0_1)), PR_ST_0_5));
         } elif (f64_gt(t, PR_ST_0_85) == 1) {
             # 1 + (t - 0.85)/0.15 * 0.5
             boundary_boost = f64_add(F64_ONE,
-                f64_mul(f64_div(f64_sub(t, PR_ST_0_85), PR_ST_0_15), PR_ST_0_5));
+              f64_mul(f64_div(f64_sub(t, PR_ST_0_85), PR_ST_0_15), PR_ST_0_5));
         }
         var perturbation_scale = f64_add(boundary_boost, IntentModifiers_urgency(modifiers));
 
@@ -224,7 +224,7 @@ fn stream_fill_buffer(self, buffer) {
     if (have_block == 1) {
         # apply spectral tilt to the block (in place over the full block vec).
         crtract_apply_spectral_tilt(block, SynthStream_spectral_tilt(self),
-            SynthStream_sample_rate(self));
+          SynthStream_sample_rate(self));
         # apply amplitude: amp = amplitude_scale * effort_amp.
         var amp = f64_mul(SynthStream_amplitude_scale(self), SynthStream_effort_amp(self));
         var bi = 0;

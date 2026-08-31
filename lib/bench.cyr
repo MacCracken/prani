@@ -2,23 +2,63 @@
 # Usage: include "lib/bench.cyr"
 # Requires: string.cyr, fmt.cyr, alloc.cyr, agnosys/syscalls.cyr
 #
-# Overhead costs (x86_64 Linux):
-#   clock_gettime:     ~120ns per call
-#   fncall0 dispatch:  ~6ns per call (indirect call via function pointer)
-#   direct call:       ~3ns per call
-#   inline operation:  ~2ns per iteration
+# ⚠ THE TIMER FLOOR IS MEASURED, NOT DECLARED (v6.5.19). `bench_clock_overhead_ns()`
+# calibrates one clock read at first use and every path below subtracts it. Read it
+# at runtime; do NOT write a number for it here again.
 #
-# For sub-1us operations, use bench_batch_start/stop with batch_size >= 1000.
-# The per-iteration bench_start/stop adds ~240ns of clock overhead per op.
-# Function pointer dispatch (bench_run_batch) adds ~6ns per op.
+# RETIRED: this block used to open with `clock_gettime: ~120ns per call`. On the box
+# that fixed it a clock read costs **1,320-1,720 ns** — 11-14× the claim — and the three
+# lines it implied were wrong with it ("~240ns of clock overhead per op", "~40ns syscall
+# overhead", "sub-1us → use batch"). agnosai filed it (2026-08-11) after decomposing
+# two rows as "one clock plus the work" and getting the split backwards: with 120 ns
+# the clock is 6 % of a 2.045 µs row, with the real figure it is 64 %.
 #
-# BEST for hot inner loops:
+# ⭐ AND A SINGLE NUMBER CANNOT BE WRITTEN HERE AT ALL. Measured across the four hosts
+# the release gate runs on, one clock read costs:
+#     this box (x86_64 Linux, hpet)      ~1,320-1,720 ns
+#     pi       (aarch64 Linux)           ~3,550 ns   (its vDSO does it in 55 ns)
+#     ecb      (macOS arm64)             ~15-32 ns
+#     ach      (macOS x86_64)            ~64-68 ns
+# A 230× spread. "Correct the constant to ~1,320 ns" would have been wrong on three of
+# the four. Hence the calibration.
+#
+# ⚠ AND THE FILED CAUSE IS WRONG ON THIS HOST. The filing blamed lib/chrono.cyr's raw
+# `syscall(228)` versus the vDSO path libc takes. Measured here, libc's vDSO
+# clock_gettime costs the SAME as the raw syscall (2,456 ns vs 2,277 ns in one paired
+# run) because `/sys/.../current_clocksource` is **hpet** — the kernel rejected the TSC
+# at boot ("Marking TSC unstable due to clocksource watchdog") and HPET has no
+# userspace fast path, so the vDSO falls back to the syscall. A bare `syscall(getpid)`
+# is 776 ns, so kernel entry is a third of it and the HPET read is the rest. The cost
+# is a property of the box's clocksource, not of cyrius's syscall choice. A vDSO
+# binding would be a real ~64× win on pi and on any normal-TSC x86 box, and a no-op
+# here while hpet is selected.
+#
+# ⚠ THE FLOOR MOVES BETWEEN REBOOTS. The TSC-watchdog trip is per-boot and
+# non-deterministic, so this same machine has recorded a ~400 ns floor and a ~1,700 ns
+# one. Cross-run comparison of micro rows is only sound within one boot; that is why
+# every report below prints the floor it measured.
+#
+# Costs that are still honest, re-measured 2026-08-11 (all conservative):
+#   fncall0 dispatch:  ~2ns per call (indirect call via function pointer)
+#   direct call:       ~2ns per call
+#   inline operation:  <1ns per iteration
+#
+# `bench_run` now sizes its own batches — you no longer have to choose. It pilots the
+# op, then picks a chunk large enough that one clock pair is ≤1 % of the window, so a
+# 0.4 ns op and a 250 µs op are both measured correctly through the same call. Before
+# v6.5.19 it wrapped a clock pair around EVERY iteration, which put all 18 benches in
+# this tree on a floor of ~2 clock reads: the same no-op measured 2,302 ns through
+# `bench_run` and 9 ns batched, a 256× inflation.
+#
+# Explicit batching is still available and still slightly cheaper:
 #   var b = bench_new("my_op");
 #   bench_batch_start(b);
 #   var i = 0;
 #   while (i < 10000) { my_op(); i = i + 1; }
 #   bench_batch_stop(b, 10000);
 #   bench_report(b);
+#
+# See CHANGELOG [6.5.19], docs/development/benchmark-regimes.md.
 
 # clock_gettime clock-id. NOTE: the syscall NUMBER 228 MUST be a literal at each
 # call site below — never a `var`. The macOS __got reroute and Windows IAT reroute
@@ -52,6 +92,65 @@ fn now_ns(): i64 {
     #endif
 }
 
+# ================================================================
+# Timer-floor calibration (v6.5.19)
+# ================================================================
+# What ONE `now_ns()` costs on THIS machine, this boot. -1 = not calibrated yet;
+# calibrated lazily on first use so a program that never benchmarks never pays it.
+var _bench_clock_ns = 0 - 1;
+var _bench_floor_shown = 0;
+
+# Calibrate: min-of-5 batches of 1024 clock reads, net of an identical empty loop.
+# MIN, not mean — we want the floor the framework will subtract, and the mean on a
+# loaded box is dominated by scheduler noise. ~5,000 clock reads, so a few ms on a
+# slow-clock host and microseconds on a fast one; paid once per process.
+#
+# ⚠ Returns 0 rather than a negative or a guess when the platform clock is too coarse
+# to see it — Windows' now_ns is GetTickCount64 (1 ms granularity), where 1024 reads
+# do not move the counter at all. Subtracting 0 is honest; subtracting a number
+# imported from another platform is exactly the bug this replaces.
+fn _bench_calibrate_clock(): i64 {
+    var best = 0x7FFFFFFFFFFFFFFF;
+    var base = 0x7FFFFFFFFFFFFFFF;
+    var r = 0;
+    while (r < 5) {
+        var t = now_ns();
+        var i = 0;
+        while (i < 1024) {
+            now_ns();
+            i = i + 1;
+        }
+        var d = now_ns() - t;
+        if (d < best) { best = d; }
+        t = now_ns();
+        i = 0;
+        while (i < 1024) {
+            i = i + 1;
+        }
+        d = now_ns() - t;
+        if (d < base) { base = d; }
+        r = r + 1;
+    }
+    var per = (best - base) / 1024;
+    if (per < 0) { return 0; }
+    return per;
+}
+
+# Nanoseconds one `now_ns()` costs here, measured. Every timing path below subtracts
+# it, so a bench reports the work rather than the work plus the instrument.
+fn bench_clock_overhead_ns(): i64 {
+    if (_bench_clock_ns < 0) { _bench_clock_ns = _bench_calibrate_clock(); }
+    return _bench_clock_ns;
+}
+
+# Subtract one clock read from a measured window, clamped at 0. A window is bracketed
+# by two now_ns() calls and carries about one call's cost between the timestamps.
+fn _bench_net(elapsed): i64 {
+    var e = elapsed - bench_clock_overhead_ns();
+    if (e < 0) { return 0; }
+    return e;
+}
+
 # Benchmark state: { name_ptr, start_ns, elapsed_ns, iterations, min_ns, max_ns }
 var BENCH_SIZE = 48;
 
@@ -76,10 +175,17 @@ fn bench_start(b): i64 {
     return 0;
 }
 
-# Stop timing, update elapsed/min/max/iterations
+# Stop timing, update elapsed/min/max/iterations. Returns the elapsed nanoseconds
+# NET OF THE TIMER (v6.5.19) — the subtraction the header used to tell consumers to
+# do by hand with a number that was 11× wrong.
+#
+# ⚠ On a host whose clock costs more than the operation this reports 0, and 0 is the
+# correct answer to "how much of this did I measure": use bench_run (which sizes its
+# own batches) or bench_batch_start/stop for anything near the floor. `bench_report`
+# prints the floor so the reader can tell the two apart.
 fn bench_stop(b): i64 {
     var end = now_ns();
-    var elapsed = end - load64(b + 8);
+    var elapsed = _bench_net(end - load64(b + 8));
     store64(b + 16, load64(b + 16) + elapsed);
     var iters = load64(b + 24) + 1;
     store64(b + 24, iters);
@@ -104,24 +210,73 @@ fn bench_avg_ns(b): i64 {
     return load64(b + 16) / iters;
 }
 
-# Run a function N times and measure
+# How many iterations of a `per`-ns operation fit in one timed window before the
+# clock's own `fl` ns of error falls to 1 % of it. An op comfortably above the floor
+# gets 1 (true per-iteration timing, real min/max); an op at or below it gets a batch.
+fn _bench_chunk_for(per, fl): i64 {
+    if (per <= 0) { return 4096; }
+    var want = (fl * 100) / per;
+    if (want < 1) { return 1; }
+    if (want > 1000000) { return 1000000; }
+    return want;
+}
+
+# Run a function N times and measure.
+#
+# ⭐ v6.5.19: SIZES ITS OWN BATCHES. It used to wrap a clock pair around every single
+# iteration, which floors the result at ~2 clock reads no matter what `fp` does — the
+# same no-op measured 2,302 ns here and 9 ns batched. All 18 benches in this tree call
+# this function, so 57 of 79 micro rows in the recorded history are that floor rather
+# than the code, and the error is additive and uniform (the two paths differed by
+# 1,361-1,560 ns across a 2,500× workload range). See docs/development/benchmark-regimes.md.
+#
+# It pilots with a small chunk, then re-sizes after every chunk from what it just
+# measured, so it converges on the right window for fast and slow ops alike through
+# one API. `fp` is still called EXACTLY n times, in order — chunking changes only how
+# many calls share a clock pair.
+#
+# ⚠ min/max are therefore PER-CHUNK once the op is faster than the floor. That is the
+# honest reading: a single sub-floor iteration has no measurable duration, so a
+# per-iteration min for it would be an artefact of clock jitter, which is precisely
+# what the old min=489ns/max=2.826ms spread on a 9 ns no-op was.
 fn bench_run(b, fp, n): i64 {
-    var bi = 0;
-    while (bi < n) {
-        bench_start(b);
-        fncall0(fp);
-        bench_stop(b);
-        bi = bi + 1;
+    if (n <= 0) { return 0; }
+    var fl = bench_clock_overhead_ns();
+    var done = 0;
+    var chunk = 16;
+    if (chunk > n) { chunk = n; }
+    while (done < n) {
+        var t = now_ns();
+        var bi = 0;
+        while (bi < chunk) {
+            fncall0(fp);
+            bi = bi + 1;
+        }
+        var elapsed = _bench_net(now_ns() - t);
+        var per_op = elapsed / chunk;
+        store64(b + 16, load64(b + 16) + elapsed);
+        store64(b + 24, load64(b + 24) + chunk);
+        if (per_op < load64(b + 32)) { store64(b + 32, per_op); }
+        if (per_op > load64(b + 40)) { store64(b + 40, per_op); }
+        done = done + chunk;
+        var nxt = _bench_chunk_for(per_op, fl);
+        if (nxt > n - done) { nxt = n - done; }
+        if (nxt < 1) { nxt = 1; }
+        chunk = nxt;
     }
     return 0;
 }
 
 # ================================================================
-# Batch timing — for sub-100ns operations
+# Batch timing — explicit control over the window
 # ================================================================
-# Wraps one clock_gettime pair around N iterations, avoiding
-# the ~40ns syscall overhead per measurement. Runs `rounds` batches
-# of `batch_size` each, tracking per-op min/max across batches.
+# Wraps one clock pair around N iterations instead of one per iteration, so the
+# clock's cost is divided by batch_size rather than paid in full. That cost is
+# `bench_clock_overhead_ns()` — MEASURED, and 1,320 ns to 3,550 ns on the Linux gate
+# hosts against 15-68 ns on the macOS ones. This header used to say "~40ns"; on this
+# box it was 33× low, which is how "sub-100ns ops" below came to name a threshold
+# ~100× too small. Runs `rounds` batches of `batch_size`, tracking per-op min/max
+# across batches; one clock read is subtracted from every round.
 #
 #   var b = bench_new("my_fast_op");
 #   bench_run_batch(b, &my_fast_op, 10000, 100);
@@ -129,10 +284,15 @@ fn bench_run(b, fp, n): i64 {
 #
 # For ops that need an argument:
 #   bench_run_batch1(b, &my_op, arg, 10000, 100);
+#
+# Since v6.5.19 `bench_run` sizes its own batches, so reach for these only when you
+# want to FIX the window (e.g. to compare two runs at identical batch sizes).
 
 # Batch-time a zero-arg function pointer. Calls fp batch_size times per round,
 # measures total elapsed with one clock pair per round. Runs `rounds` rounds.
-# Use for sub-100ns ops where per-iteration clock overhead dominates.
+# Pick batch_size so batch_size × per_op comfortably exceeds
+# `bench_clock_overhead_ns()` — on a 1.3 µs-clock host that means ≥1000 iterations
+# for anything under a microsecond.
 fn bench_run_batch(b, fp, batch_size, rounds): i64 {
     var ri = 0;
     while (ri < rounds) {
@@ -142,7 +302,7 @@ fn bench_run_batch(b, fp, batch_size, rounds): i64 {
             fncall0(fp);
             bi = bi + 1;
         }
-        var elapsed = now_ns() - start;
+        var elapsed = _bench_net(now_ns() - start);
         var per_op = elapsed / batch_size;
         store64(b + 16, load64(b + 16) + elapsed);
         store64(b + 24, load64(b + 24) + batch_size);
@@ -163,7 +323,7 @@ fn bench_run_batch1(b, fp, arg, batch_size, rounds): i64 {
             fncall1(fp, arg);
             bi = bi + 1;
         }
-        var elapsed = now_ns() - start;
+        var elapsed = _bench_net(now_ns() - start);
         var per_op = elapsed / batch_size;
         store64(b + 16, load64(b + 16) + elapsed);
         store64(b + 24, load64(b + 24) + batch_size);
@@ -184,7 +344,7 @@ fn bench_run_batch2(b, fp, arg1, arg2, batch_size, rounds): i64 {
             fncall2(fp, arg1, arg2);
             bi = bi + 1;
         }
-        var elapsed = now_ns() - start;
+        var elapsed = _bench_net(now_ns() - start);
         var per_op = elapsed / batch_size;
         store64(b + 16, load64(b + 16) + elapsed);
         store64(b + 24, load64(b + 24) + batch_size);
@@ -216,10 +376,11 @@ fn bench_batch_start(b): i64 {
     return 0;
 }
 
-# Stop batch timing, update stats with per-op time. Returns per-op nanoseconds.
+# Stop batch timing, update stats with per-op time. Returns per-op nanoseconds,
+# net of one clock read (v6.5.19).
 fn bench_batch_stop(b, batch_size): i64 {
     var end = now_ns();
-    var elapsed = end - load64(b + 8);
+    var elapsed = _bench_net(end - load64(b + 8));
     var per_op = elapsed / batch_size;
     store64(b + 16, load64(b + 16) + elapsed);
     store64(b + 24, load64(b + 24) + batch_size);
@@ -285,8 +446,32 @@ fn _fmt_time(ns, buf): i64 {
     return tlen + 2;
 }
 
+# Print the measured timer floor, once per process, before the first report.
+#
+# ⭐ THE PROVENANCE HAS TO SHIP WITH THE NUMBERS. The whole defect was a timing
+# constant stated once in a comment and then trusted for two years by readers who had
+# no way to check it. Printing what THIS run measured means a wrong floor is visible
+# in the same output as the rows it distorts, on whatever host produced them.
+#
+# ⚠ The line deliberately does NOT contain " avg". scripts/bench-history.sh selects
+# result rows with the shell pattern `*": "*" avg"*`, so this is invisible to the
+# recorder and cannot land in bench-history.csv as a fake benchmark.
+fn bench_report_clock(): i64 {
+    var cbuf[24];
+    var fl = bench_clock_overhead_ns();
+    syscall(1, 1, "  [timer floor ", 15);
+    _fmt_time(fl, &cbuf);
+    syscall(1, 1, &cbuf, strlen(&cbuf));
+    syscall(1, 1, " per clock read, measured; subtracted from every sample]\n", 57);
+    return 0;
+}
+
 # Print benchmark report
 fn bench_report(b): i64 {
+    if (_bench_floor_shown == 0) {
+        _bench_floor_shown = 1;
+        bench_report_clock();
+    }
     var name = load64(b);
     var tbuf[24];
     syscall(1, 1, "  ", 2);

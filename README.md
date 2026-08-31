@@ -70,7 +70,7 @@ include "dist/prani.cyr"
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.0.0"
+tag = "2.0.2"
 modules = ["dist/prani.cyr"]
 ```
 

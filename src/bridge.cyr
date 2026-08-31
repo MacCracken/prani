@@ -117,10 +117,10 @@ fn bridge_absorption_factor(humidity_pct, temp_c) {
     var humidity_factor = PR_B_1_0;
     if (f64_lt(humidity_pct, PR_B_40_0) == 1) {
         humidity_factor = f64_add(PR_B_0_8,
-            f64_mul(f64_div(humidity_pct, PR_B_40_0), PR_B_0_2));
+          f64_mul(f64_div(humidity_pct, PR_B_40_0), PR_B_0_2));
     }
     var temp_factor = f64_add(PR_B_1_0,
-        f64_mul(f64_sub(temp_c, PR_B_20_0), PR_B_0_005));
+      f64_mul(f64_sub(temp_c, PR_B_20_0), PR_B_0_005));
     return f64_clamp(f64_mul(humidity_factor, temp_factor), PR_B_0_5, PR_B_2_0);
 }
 

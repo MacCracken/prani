@@ -37,7 +37,18 @@ enum SysNr {
     SYS_BRK = 12;       # → VirtualAlloc (grow-at-end via committed pages)
     SYS_MUNMAP = 11;    # → VirtualFree(MEM_RELEASE)
     SYS_EXIT = 60;      # → ExitProcess
-    SYS_EXIT_GROUP = 231; # → ExitProcess (aliased — Windows has no process group)
+    SYS_EXIT_GROUP = 231; # NOT rerouted — call sys_exit_group(), never syscall(231)
+    # v6.5.25 — NOT rerouted (Windows has no ioctl; DeviceIoControl is a different
+    # contract and the request codes are Linux device numbers regardless). The constant
+    # exists so cross-platform stdlib code that names it can COMPILE for PE: without it,
+    # `lib/yukti.cyr`'s CD-ROM eject path made `undefined variable 'SYS_IOCTL'` a HARD
+    # ERROR that blocked a PE build of yukti, vani and mabda — measured: rc=1 with 4 error
+    # lines, clean rc=0 on Linux. Adding the constant is only safe as of v6.5.25, which
+    # made an unrouted LITERAL syscall number return -38/-ENOSYS instead of emitting a raw
+    # `0F 05` that traps as STATUS_ILLEGAL_INSTRUCTION (0xC000001D) on Windows; before
+    # that, defining this would have swapped a loud compile error for a runtime crash.
+    # Callers already handle the failure — yukti checks `if (r < 0)` and reports it.
+    SYS_IOCTL = 16;
 }
 
 # File descriptors mirror Linux convention. GetStdHandle maps
@@ -116,6 +127,39 @@ fn sys_exit(code) {
     return 0;   # unreachable
 }
 
+# Terminate every thread in the process — the Linux exit_group(2) peer.
+# Routes through SYS_EXIT deliberately: ExitProcess already tears down all
+# threads, so on Windows this IS sys_exit. It exists so a portable epilogue
+# can call one name on every target. Do NOT issue SYS_EXIT_GROUP here — 231
+# has no PE reroute and would emit a raw `0F 05` (illegal instruction).
+# CHANGELOG [6.5.6]
+fn sys_exit_group(code) {
+    syscall(SYS_EXIT, code);
+    return 0;   # unreachable
+}
+
+# Change the working directory — NOT WIRED on Windows.
+#
+# There is no SetCurrentDirectoryW reroute, and inventing one is a COMPILER
+# change (a new 0xF0xx pseudo-syscall + a PE emitter arm), not a stdlib one.
+# Returns -1, the same honest degrade xstat and xrmdir already make on PE.
+# Wire the reroute when a consumer actually needs it. CHANGELOG [6.5.7]
+fn sys_chdir(path) { return 0 - 1; }
+
+# fchownat — no Windows equivalent (no POSIX uid/gid model). Returns -1, the same
+# honest degrade xstat/xrmdir make on PE. CHANGELOG [6.5.7]
+fn sys_fchownat(dirfd, path, uid, gid, flags) { return 0 - 1; }
+
+# at-family constants. The Linux values, defined here so the PORTABLE surface is
+# complete: this peer is STANDALONE (it does not include syscalls_linux_common.cyr,
+# where these live for the Linux/macOS peers), so without them a consumer calling
+# sys_fchownat(AT_FDCWD, ...) fails to compile on this target even though the
+# wrapper exists. The wrapper is a stub here, so the values are nominal — but
+# source portability is the whole point of having the name. CHANGELOG [6.5.7]
+var AT_FDCWD = 0 - 100;
+var AT_SYMLINK_NOFOLLOW = 256;   # 0x100
+var AT_REMOVEDIR = 512;          # 0x200
+
 # VirtualAlloc-backed allocation. The PE reroute intercepts
 # syscall(SYS_MMAP, ...) and emits a VirtualAlloc call with
 # MEM_COMMIT | MEM_RESERVE + PAGE_READWRITE.
@@ -173,6 +217,16 @@ fn WIFEXITED(status): i64 { return 1; }
 fn WIFSIGNALED(status): i64 { return 0; }
 # POSIX wait-status accessor: no terminating signal on Windows. 0.
 fn WTERMSIG(status): i64 { return 0; }
+# v6.5.19: `cyrius test`'s child deadline polls `sys_waitpid(pid, &st, WNOHANG)`
+# and SIGKILLs on expiry (cbt/build.cyr `run_binary_timed`). Both names are
+# referenced OUTSIDE any target guard so the shared code stays single-path; on
+# Windows the loop is unreachable anyway (`sys_fork` above returns -1, so the poll
+# takes the `w < 0` exit on its first pass). Same stub contract as the block above:
+# degrade safely rather than leave an undefined reference for the PE cross-build.
+var WNOHANG = 1;
+# No POSIX signals on Windows; a process is terminated via TerminateProcess
+# (PE reroute 0xF01D), not kill(2). Returns -1.
+fn sys_kill(pid, sig): i64 { return 0 - 1; }
 # chmod has no Windows equivalent (ACL model differs); no-op success.
 fn sys_chmod(path, mode): i64 { return 0; }
 # Best-effort dup2 stub: returns the requested newfd (handle dup is rerouted).
@@ -186,3 +240,112 @@ fn sys_mkdir(path, mode): i64 { return syscall(83, path, mode); }
 # (_pe_ensure_deletef, v5.11.22). Returns 0 on success, -1 on failure. (Was a
 # no-op `return 0` stub through v6.3.42 — VR-01 surfaced the file was never deleted.)
 fn sys_unlink(path): i64 { return syscall(87, path); }
+
+# --- v6.5.25: raw floor wrappers this STANDALONE peer never defined ---
+# This file includes nothing, so it inherits nothing: a name missing here is missing for
+# PE entirely, and under the v6.3.2 reachable-undef hard error that is a build failure, not
+# a degrade. All three were roadmap band-D (.25) "cass residual" items, and the premise-check
+# found the same thing for each: the 0xF0xx REROUTE was already live and shipped, and the
+# only missing piece was the wrapper here. No compiler change, no new band slot.
+
+# getpid — 0xF01C (61468) → kernel32!GetCurrentProcessId, live since v6.3.44 and already
+# used by lib/process_win.cyr's portable getpid(). Only this raw-floor name was absent, so
+# `sys_getpid()` failed to COMPILE for PE while every other peer defines it.
+fn sys_getpid(): i64 { return syscall(61468); }
+# No POSIX parent-pid on Windows (a process does not retain its parent). Honest degrade,
+# matching lib/process_win.cyr's own documented behaviour.
+fn sys_getppid(): i64 { return 0 - 1; }
+
+# ================================================================
+# Stat buffer contract — v6.5.30
+# ================================================================
+#
+# ⛔ THESE ARE A COMPILE-TIME CONTRACT, NOT A WINDOWS STAT LAYOUT. `xstat` (lib/io.cyr)
+# returns **-1 unconditionally** on `CYRIUS_TARGET_WIN` — GetFileAttributesExW is not wired,
+# and every correct caller already bails on `r < 0`. Nothing on Windows ever populates a stat
+# buffer, so no byte at these offsets is ever read.
+#
+# They exist because the OTHER four peers all define a `Stat` enum and consumers reference it
+# unconditionally. yukti 2.3.8 does exactly that — `var buf[STAT_BUFSZ]` then
+# `load32(&buf + STAT_MODE)` — so without these names a PE build of yukti (and of anything
+# including it) failed to COMPILE, with `array size identifier must be an enum constant`
+# followed by a run of undefined-variable errors. A build failure, not a runtime one.
+#
+# ⚠ THE HALF-FIX TRAP THIS AVOIDS, which CLAUDE.md records from v6.5.7: adding `STAT_SIZE`
+# alone, or only the names in the first error message, leaves the next consumer hitting the
+# next missing member. The full set the peers publish is defined here in one go.
+#
+# Values mirror the x86_64-Linux peer purely so the buffer SIZE contract (144) matches and the
+# offsets stay in range; they carry no Windows meaning. If GetFileAttributesExW is ever wired,
+# these offsets must be re-derived from what that fills in — do not assume they are already
+# right because the code compiles.
+enum Stat {
+    STAT_MODE = 24;
+    STAT_NLINK = 16;
+    STAT_UID = 28;
+    STAT_GID = 32;
+    STAT_SIZE = 48;
+    STAT_MTIME = 88;
+    STAT_MTIME_NSEC = 96;
+    STAT_BUFSZ = 144;
+}
+
+# access(path, mode) — 0xF019 (61465) → kernel32!GetFileAttributesW, live since v6.1.18.
+# ⚠ THE REROUTE TAKES AN ALREADY-WIDE (UTF-16) PATH, which is the one non-obvious part; the
+# widen loop below is the same shape lib/io.cyr uses for its own CreateFileW calls.
+# INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF → the path does not exist (or is unreachable).
+# Returns 0 on success and -1 otherwise, the POSIX contract callers expect.
+# NOTE: existence only. W_OK is deliberately NOT modelled from FILE_ATTRIBUTE_READONLY —
+# a read-only ACL, a directory and a locked file all differ from the DOS attribute bit, and
+# a wrong "writable" answer is worse than an unmodelled one. Callers needing write
+# permission should attempt the open and handle the failure.
+fn sys_access(path, mode): i64 {
+    var wp[520];
+    var i = 0;
+    while (i < 259) {
+        var c = load8(path + i);
+        store8(&wp + i * 2, c);
+        store8(&wp + i * 2 + 1, 0);
+        if (c == 0) { i = 259; } else { i = i + 1; }
+    }
+    store8(&wp + 518, 0);
+    store8(&wp + 519, 0);
+    var attrs = syscall(61465, &wp);
+    if (attrs == 4294967295) { return 0 - 1; }
+    return 0;
+}
+
+# socketpair — Windows has NO socketpair primitive, and no blocking-accept reroute to build
+# a loopback pair from, so this is an honest degrade rather than an emulation. A real one
+# needs a NEW PE pseudo-syscall plus fd↔HANDLE namespace decisions — a design-level task,
+# NOT the wrapper-parity item the roadmap bundled it with. Filed separately; this line only
+# stops the hard compile error, which is what blocked PE builds.
+fn sys_socketpair(domain, type, protocol, fds): i64 { return 0 - 1; }
+
+# v6.4.66 — getpeername / getsockname now route to ws2_32 (was a fail-closed -ENOSYS
+# stub v6.4.64→.65). The PE syscall router maps 0xF036 → ws2_32!getpeername and
+# 0xF037 → ws2_32!getsockname (src/backend/x86/emit.cyr EGETPEERNAME_PE / EGETSOCKNAME_PE),
+# 3-arg, same shape as bind — so sandhi's per-IP rate limiting has a real peer address
+# on Windows. Winsock returns 0 on success, SOCKET_ERROR (-1) with WSAGetLastError =
+# WSAENOTCONN (10057) on an unconnected socket (NOT the POSIX errno space). Consumers
+# still treat <0 as "peer unknown" and fail open — sandhi's peer API already does.
+# Closes docs/development/issues/2026-07-14-windows-getpeername-reroute-missing.md
+#
+# Normalize to the POSIX contract consumers check (`r < 0` = failure): ws2_32
+# returns 0 on success (peer written) or SOCKET_ERROR (int -1, which cyrius sees
+# ZERO-extended as 0xFFFFFFFF — a POSITIVE value that would defeat a `< 0` check
+# and let a caller fabricate a peer, cf. sandhi_server_peer_sockaddr's
+# `if (r < 0) return 0`). On failure return `-WSAGetLastError` (negative, and it
+# carries the real Winsock error, e.g. -10057 WSAENOTCONN). WSAGetLastError is read
+# immediately, before any other call can reset the per-thread last-error.
+fn sys_getpeername(fd, addr, addrlen): i64 {
+    var r = syscall(61494, fd, addr, addrlen);
+    if (r == 0) { return 0; }
+    return 0 - syscall(61476);      # -WSAGetLastError (0xF024)
+}
+# getsockname (0xF037 → ws2_32!getsockname): same normalization as getpeername.
+fn sys_getsockname(fd, addr, addrlen): i64 {
+    var r = syscall(61495, fd, addr, addrlen);
+    if (r == 0) { return 0; }
+    return 0 - syscall(61476);
+}

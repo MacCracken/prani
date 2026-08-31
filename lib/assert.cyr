@@ -64,10 +64,16 @@ fn assert_eq(a, b, name): i64 {
         _assert_fail = _assert_fail + 1;
         syscall(1, 2, "  FAIL: ", 8);
         syscall(1, 2, name, strlen(name));
+        # ⚠ efmt_int, NOT fmt_int (v6.5.19). fmt_int writes to fd 1 while every other
+        # byte of this message goes to fd 2, so any harness that captures the two
+        # streams separately — scripts/cross-os-libtest-runner.sh, every cross-OS ssh
+        # probe, `2> err` in the gates — saw `FAIL: name (got , expected )` with the
+        # two numbers orphaned in stdout, unattached to the assertion that produced
+        # them. It cost real time diagnosing the ecb/ach bench_timer_floor failure.
         syscall(1, 2, " (got ", 6);
-        fmt_int(a);
+        efmt_int(a);
         syscall(1, 2, ", expected ", 11);
-        fmt_int(b);
+        efmt_int(b);
         syscall(1, 2, ")\n", 2);
     }
     return 0;

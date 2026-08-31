@@ -128,7 +128,7 @@ fn crvoice_to_json(self, sb) {
 }
 
 fn crvoice_from_json_str(json) {
-    var root = bayan_json_v_parse_str(json, strlen(json));
+    var root = bayan_json_v_parse_buf(json, strlen(json));
     var self = alloc(sizeof(CreatureVoice));
     CreatureVoice_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));
     CreatureVoice_set_f0_offset(self, bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset")));
@@ -201,7 +201,7 @@ fn crvoice_vocal_effort(self) {
 fn crvoice_apply_lombard_effect(self, ambient_spl_db) {
     var boost = bridge_lombard_effort_boost(ambient_spl_db);
     CreatureVoice_set_vocal_effort(self,
-        f64_clamp(f64_add(CreatureVoice_vocal_effort(self), boost), 0, F64_ONE));
+      f64_clamp(f64_add(CreatureVoice_vocal_effort(self), boost), 0, F64_ONE));
 }
 
 # species(self) -- the species constant.
@@ -234,13 +234,13 @@ fn crvoice_effective_tract_scale(self) {
 #must_use
 fn crvoice_clone_params(src) {
     return species_params_make(
-        SpeciesParams_apparatus(src),
-        SpeciesParams_f0_min(src), SpeciesParams_f0_max(src), SpeciesParams_f0_default(src),
-        SpeciesParams_tract_scale(src),
-        SpeciesParams_formant0(src), SpeciesParams_formant1(src), SpeciesParams_formant2(src),
-        SpeciesParams_bandwidth0(src), SpeciesParams_bandwidth1(src), SpeciesParams_bandwidth2(src),
-        SpeciesParams_breathiness(src), SpeciesParams_jitter(src), SpeciesParams_shimmer(src),
-        SpeciesParams_spectral_tilt(src), SpeciesParams_resonance_seed(src));
+      SpeciesParams_apparatus(src),
+      SpeciesParams_f0_min(src), SpeciesParams_f0_max(src), SpeciesParams_f0_default(src),
+      SpeciesParams_tract_scale(src),
+      SpeciesParams_formant0(src), SpeciesParams_formant1(src), SpeciesParams_formant2(src),
+      SpeciesParams_bandwidth0(src), SpeciesParams_bandwidth1(src), SpeciesParams_bandwidth2(src),
+      SpeciesParams_breathiness(src), SpeciesParams_jitter(src), SpeciesParams_shimmer(src),
+      SpeciesParams_spectral_tilt(src), SpeciesParams_resonance_seed(src));
 }
 
 # ================================================================
@@ -481,16 +481,16 @@ fn crvoice_make_cat_meow_howl() {
     var kf = vec_new();
     # (0.0, [400,2000,3500], [150,200,250], 0.8)
     crvoice_keyframe_push(kf, 0,
-        f64_from(400), f64_from(2000), f64_from(3500),
-        f64_from(150), f64_from(200), f64_from(250), PR_V_0_8);
+      f64_from(400), f64_from(2000), f64_from(3500),
+      f64_from(150), f64_from(200), f64_from(250), PR_V_0_8);
     # (0.4, [1000,2800,4500], [100,130,180], 1.0)
     crvoice_keyframe_push(kf, PR_V_0_4,
-        f64_from(1000), f64_from(2800), f64_from(4500),
-        f64_from(100), f64_from(130), f64_from(180), F64_ONE);
+      f64_from(1000), f64_from(2800), f64_from(4500),
+      f64_from(100), f64_from(130), f64_from(180), F64_ONE);
     # (1.0, [500,1800,3800], [140,180,220], 0.6)
     crvoice_keyframe_push(kf, F64_ONE,
-        f64_from(500), f64_from(1800), f64_from(3800),
-        f64_from(140), f64_from(180), f64_from(220), PR_V_0_6);
+      f64_from(500), f64_from(1800), f64_from(3800),
+      f64_from(140), f64_from(180), f64_from(220), PR_V_0_6);
     var self = alloc(sizeof(FormantTransitionContour));
     FormantTransitionContour_set_keyframes(self, kf);
     return self;
@@ -502,20 +502,20 @@ fn crvoice_make_wolf_howl() {
     var kf = vec_new();
     # (0.0, [420,1250,2100], [100,120,150], 0.0)
     crvoice_keyframe_push(kf, 0,
-        f64_from(420), f64_from(1250), f64_from(2100),
-        f64_from(100), f64_from(120), f64_from(150), 0);
+      f64_from(420), f64_from(1250), f64_from(2100),
+      f64_from(100), f64_from(120), f64_from(150), 0);
     # (0.3, [500,1400,2300], [90,110,140], 0.6)
     crvoice_keyframe_push(kf, PR_V_0_3,
-        f64_from(500), f64_from(1400), f64_from(2300),
-        f64_from(90), f64_from(110), f64_from(140), PR_V_0_6);
+      f64_from(500), f64_from(1400), f64_from(2300),
+      f64_from(90), f64_from(110), f64_from(140), PR_V_0_6);
     # (0.7, [480,1350,2200], [95,115,145], 0.4)
     crvoice_keyframe_push(kf, PR_V_0_7,
-        f64_from(480), f64_from(1350), f64_from(2200),
-        f64_from(95), f64_from(115), f64_from(145), PR_V_0_4);
+      f64_from(480), f64_from(1350), f64_from(2200),
+      f64_from(95), f64_from(115), f64_from(145), PR_V_0_4);
     # (1.0, [400,1200,2000], [110,130,160], 0.3)
     crvoice_keyframe_push(kf, F64_ONE,
-        f64_from(400), f64_from(1200), f64_from(2000),
-        f64_from(110), f64_from(130), f64_from(160), PR_V_0_3);
+      f64_from(400), f64_from(1200), f64_from(2000),
+      f64_from(110), f64_from(130), f64_from(160), PR_V_0_3);
     var self = alloc(sizeof(FormantTransitionContour));
     FormantTransitionContour_set_keyframes(self, kf);
     return self;
@@ -581,8 +581,8 @@ fn crvoice_apply_nasal_antiformant(samples, sample_rate, nasal_fraction) {
         var x0 = vec_get(samples, i);
         # y0 = x0 + b1*x1 + x2 - a1*y1 - a2*y2
         var y0 = f64_sub(
-            f64_sub(f64_add(f64_add(x0, f64_mul(b1, x1)), x2), f64_mul(a1, y1)),
-            f64_mul(a2, y2));
+          f64_sub(f64_add(f64_add(x0, f64_mul(b1, x1)), x2), f64_mul(a1, y1)),
+          f64_mul(a2, y2));
         x2 = x1;
         x1 = x0;
         y2 = y1;
@@ -625,7 +625,7 @@ fn crvoice_apply_am_pattern(samples, voc, sample_rate) {
     while (i < n) {
         var t = f64_div(f64_from(i), sample_rate);
         var modulator = f64_add(PR_V_0_65,
-            f64_mul(PR_V_0_35, f64_sin(f64_mul(f64_mul(F64_TAU, am_rate), t))));
+          f64_mul(PR_V_0_35, f64_sin(f64_mul(f64_mul(F64_TAU, am_rate), t))));
         vec_set(samples, i, f64_mul(vec_get(samples, i), modulator));
         i = i + 1;
     }
@@ -716,7 +716,7 @@ fn crvoice_synthesize_cat_purr(self, sample_rate, num_samples, modifiers) {
     var tract = crtract_new(CreatureVoice_params(self), sample_rate);
     # purr f0 25-30 Hz, size-scaled; larger cat = slightly lower purr.
     var purr_f0 = f64_clamp(f64_div(f64_from(27), CreatureVoice_size_scale(self)),
-        f64_from(20), f64_from(35));
+      f64_from(20), f64_from(35));
     var samples = crtract_synthesize_purr(tract, num_samples, purr_f0);
     # amplitude scaling from intent x vocal effort
     var effort_amp = f64_add(PR_V_0_3, f64_mul(CreatureVoice_vocal_effort(self), PR_V_1_2));
@@ -781,7 +781,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # voice's own params -- Rust cloned; here we allocate a fresh copy).
     var effort_params = crvoice_clone_params(params);
     SpeciesParams_set_breathiness(effort_params,
-        f64_clamp(f64_add(SpeciesParams_breathiness(effort_params), effort_breathiness_delta), 0, F64_ONE));
+      f64_clamp(f64_add(SpeciesParams_breathiness(effort_params), effort_breathiness_delta), 0, F64_ONE));
 
     var tract = crtract_new(effort_params, sample_rate);
 
@@ -848,11 +848,11 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
         if (f64_lt(t, PR_V_0_1) == 1) {
             # 1 + (1 - t/0.1) * 0.5
             boundary_boost = f64_add(F64_ONE,
-                f64_mul(f64_sub(F64_ONE, f64_div(t, PR_V_0_1)), PR_V_0_5));
+              f64_mul(f64_sub(F64_ONE, f64_div(t, PR_V_0_1)), PR_V_0_5));
         } elif (f64_gt(t, PR_V_0_85) == 1) {
             # 1 + (t - 0.85)/0.15 * 0.5
             boundary_boost = f64_add(F64_ONE,
-                f64_mul(f64_div(f64_sub(t, PR_V_0_85), PR_V_0_15), PR_V_0_5));
+              f64_mul(f64_div(f64_sub(t, PR_V_0_85), PR_V_0_15), PR_V_0_5));
         }
         var perturbation_scale = f64_add(boundary_boost, IntentModifiers_urgency(modifiers));
 
@@ -889,7 +889,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
             }
             var sub_amp = f64_mul(PR_V_0_4, sub_env);
             var s = f64_add(vec_get(samples, i),
-                f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, sub_f0), t_sec)), sub_amp));
+              f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, sub_f0), t_sec)), sub_amp));
             # deterministic chaos during peak (sub_env > 0.6)
             if (f64_gt(sub_env, PR_V_0_6) == 1) {
                 var chaos_intensity = f64_div(f64_sub(sub_env, PR_V_0_6), PR_V_0_4);
@@ -916,7 +916,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
             }
             var noise = prani_rng_next_f32(fire_rng);
             vec_set(samples, i2,
-                f64_add(vec_get(samples, i2), f64_mul(f64_mul(noise, fire_amp), fire_env)));
+              f64_add(vec_get(samples, i2), f64_mul(f64_mul(noise, fire_amp), fire_env)));
             i2 = i2 + 1;
         }
     }

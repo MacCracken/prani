@@ -87,12 +87,63 @@ enum SysNr {
     # 280→88 by ESYSXLAT — the aarch64-native 88 COLLIDES with ESYSXLAT's
     # x86 symlink(88→36) entry. Same class as newfstatat above.
     SYS_UTIMENSAT = 280;    # x86 utimensat → ESYSXLAT 280→88 (collision-free)
+    # ── v6.5.7: THE PRIVATE ALIAS BAND (1000 + native aarch64 number).
+    # Every collision above was resolved the documented way — pick the OTHER
+    # architecture's number and add a pure-renumber ESYSXLAT entry. fchownat is the
+    # first case where BOTH candidates are already owned:
+    #   - native 54 is consumed by the x86-compat socket shim (setsockopt 54→208),
+    #     which is load-bearing for 51 ecosystem repos that emit raw `syscall(54,…)`;
+    #   - the x86 number 260 is this peer's own SYS_WAIT4 (:102), which is aarch64-
+    #     native and MUST pass through untranslated.
+    # So there is no real number left to borrow, and the answer is to stop borrowing:
+    # source numbers ≥1000 are cyrius-private aliases that no OS will ever mint
+    # (Linux is in the 400s and grows ~5/yr; Darwin numbers are routed separately),
+    # and each one is renumbered to its true target by ESYSXLAT. The convention is
+    # 1000 + the native aarch64 number so the alias reads as its own documentation.
+    # Requires an ESYSXLAT arm on BOTH aarch64 branches — Linux (→54) and macho
+    # (→Darwin 468) — plus a `_macho_arm_routes` row, because macOS-arm64 resolves
+    # THIS peer. Adding an alias without all three is a stale-x16 garbage call.
+    # ⚠ The Linux arm MUST sit at the END of the chain: it produces x8=54, and the
+    # setsockopt entry earlier in that chain compares against 54 and would re-catch
+    # it — the same ordering trap already documented on flock/poll and epoll_wait.
+    SYS_FCHOWNAT = 1054;    # private alias → ESYSXLAT 1054→54 (a64) / →468 (Darwin)
     SYS_PIPE2 = 59;         # → sys_pipe (flags=0)
-    SYS_PPOLL = 73;         # → sys_pause (NULL fds, NULL timeout)
+    # v6.5.36 — PRIVATE ALIAS. 73 is aarch64's NATIVE ppoll, but ESYSXLAT's x86-compat
+    # row rewrites 73 (x86 flock) → 32, so a native 73 was *matched as an x86 number* and
+    # sys_pause() issued flock(2). Both candidates are owned — 73 is eaten by the shim and
+    # the x86 ppoll number (271) is not a usable escape — so this takes the >=1000 band.
+    SYS_PPOLL = 1073;       # private alias → ESYSXLAT 1073→73 (a64). → sys_pause (NULL fds, NULL timeout)
 
     # Directory + cwd
     SYS_GETCWD = 17;
-    SYS_CHDIR = 49;
+    # ⚠ NOT the native 49 — see the private-alias comment above SYS_FCHOWNAT. aarch64's
+    # chdir IS 49, but ESYSXLAT's x86-compat shim rewrites source-49 to 200 (bind), so a
+    # native-numbered `syscall(49, path)` ran bind(path, …) and returned -EBADF. The x86
+    # number (80) is no escape either: this peer's own SYS_FSTAT is 80. Second occupant of
+    # the alias band. **Found by running `vr01_syscall_wrappers.tcyr` on aarch64** — the
+    # constant read correctly, compiled on every target, and was wrong only after the
+    # backend rewrote it. CHANGELOG [6.5.7]
+    SYS_CHDIR = 1049;       # private alias → ESYSXLAT 1049→49 (a64) / →12 (Darwin)
+    # v6.5.16: sysctl + gettimeofday — the two Darwin-ONLY occupants of the band.
+    # Both back lib/sys.cyr's macOS sys_uname/sys_sysinfo (Darwin has neither
+    # uname(2) nor sysinfo(2); the data comes from sysctl, and uptime needs a
+    # wall-clock "now" to subtract kern.boottime from).
+    # ⚠ These two DEVIATE from the band's "1000 + native aarch64 number" spelling,
+    # deliberately: Linux has no live sysctl (x86 _sysctl 156 is removed, aarch64
+    # never had one), so there is no native number to build on. They are spelled
+    # 1000 + the DARWIN BSD number instead, which is the only self-documenting
+    # choice available — do not read 202/116 as aarch64-Linux numbers.
+    # Consequence: unlike FCHOWNAT/CHDIR these get NO aarch64-Linux ESYSXLAT arm
+    # (there is nothing to renumber to), so the "Linux arm must sit LAST" ordering
+    # rule above has no arm to apply to here. That is safe ONLY because every call
+    # site sits inside `#ifdef CYRIUS_TARGET_MACOS` and cyrius's #ifdef is a real
+    # preprocessor (src/frontend/lex_pp.cyr) — the lines are REMOVED before parse
+    # on Linux, so an untranslated `svc x8=1202` can never be emitted for
+    # aarch64-Linux. Calling either outside that guard breaks the invariant.
+    # Still requires the macho ESYSXLAT row + the `_macho_arm_routes` row, because
+    # macOS-arm64 resolves THIS peer. CHANGELOG [6.5.16]
+    SYS_GETTIMEOFDAY = 1116;  # private alias → ESYSXLAT →116 (Darwin); no Linux arm
+    SYS_SYSCTL = 1202;        # private alias → ESYSXLAT →202 (Darwin); no Linux arm
 
     # Process control
     SYS_CLONE = 220;        # → sys_fork (clone(SIGCHLD,...)); also thread spawning
@@ -134,7 +185,9 @@ enum SysNr {
     # Signals + sync primitives
     SYS_RT_SIGPROCMASK = 135;
     SYS_FUTEX = 98;
-    SYS_SIGNALFD4 = 74;
+    # v6.5.36 — PRIVATE ALIAS, same collision as SYS_PPOLL above: ESYSXLAT rewrites
+    # 74 (x86 fsync) → 82, so a native 74 made sys_signalfd() issue fsync(2).
+    SYS_SIGNALFD4 = 1074;   # private alias → ESYSXLAT 1074→74 (a64)
 
     # Epoll
     SYS_EPOLL_CREATE1 = 20;
@@ -159,6 +212,7 @@ enum SysNr {
     SYS_PRCTL = 167;
     SYS_SECCOMP = 277;
     SYS_EXECVEAT = 281;
+    SYS_PIDFD_OPEN = 434;         # pidfd_open(pid, flags) → fd readable on child exit (Linux 5.3+)
     SYS_LANDLOCK_CREATE_RULESET = 444;
     SYS_LANDLOCK_ADD_RULE = 445;
     SYS_LANDLOCK_RESTRICT_SELF = 446;
@@ -170,6 +224,13 @@ enum SysNr {
     SYS_SETSOCKOPT = 208;
     SYS_BIND = 200;
     SYS_LISTEN = 201;
+    # v6.4.64: NATIVE aarch64 numbers — deliberately NOT the x86 51/52. x86-52 collides
+    # with this peer's own SYS_FCHMOD = 52, and an ESYSXLAT entry for it would remap
+    # fchmod to getpeername (CI caught exactly that: sandbox_syscalls RED on pi). Native
+    # numbers pass through untranslated on aarch64-Linux; the macho backend dual-maps
+    # 204/205 → BSD 32/31 for macOS-arm64, same shape as socket 198→97.
+    SYS_GETSOCKNAME = 204;
+    SYS_GETPEERNAME = 205;
     SYS_CONNECT = 203;
     SYS_RECVFROM = 207;
     SYS_RECVMSG = 212;
@@ -200,6 +261,26 @@ enum CloneFlag {
 # ================================================================
 # mmap constants (cross-arch identical)
 # ================================================================
+# v6.5.15: MAP_ANONYMOUS and MAP_STACK are VALUES, not syscall numbers, so
+# ESYSXLAT never corrects them (see the Signal block below). MAP_ANONYMOUS was
+# fixed for macOS at v6.5.11 in lib/mmap.cyr, which SHADOWS this enum because
+# consumers include syscalls.cyr first and mmap.cyr second — but that only
+# helps a consumer that includes mmap.cyr. Declaring the right value HERE too
+# means both orders are correct, and the two agree rather than race.
+# Darwin has no MAP_STACK at all; 0 is inert, which is what a nonexistent flag
+# should contribute to a bitwise OR. Linux's 131072 on Darwin is a live bit in
+# a field Darwin reads differently.
+#ifdef CYRIUS_TARGET_MACOS
+enum MmapConst {
+    PROT_READ = 1;
+    PROT_WRITE = 2;
+    PROT_EXEC = 4;
+    MAP_PRIVATE = 2;
+    MAP_ANONYMOUS = 0x1000;
+    MAP_STACK = 0;
+}
+#endif
+#ifdef CYRIUS_TARGET_LINUX
 enum MmapConst {
     PROT_READ = 1;
     PROT_WRITE = 2;
@@ -208,6 +289,7 @@ enum MmapConst {
     MAP_ANONYMOUS = 32;
     MAP_STACK = 131072;
 }
+#endif
 
 # ================================================================
 # Futex operations (cross-arch identical)
@@ -257,8 +339,47 @@ enum OpenFlag {
 #endif
 
 # ================================================================
-# Signals (cross-arch identical — asm-generic/signal.h)
+# Signals — cross-ARCH identical (asm-generic/signal.h) but NOT cross-OS.
+#
+# ⚠ v6.5.15: this file is the constant peer for BOTH aarch64-Linux AND
+# macOS-arm64 (`lib/syscalls.cyr:64-71`), and `ESYSXLAT` renumbers SYSCALL
+# NUMBERS ONLY — it never touches VALUES. A signal number is a VALUE, so an
+# unsplit Linux number is simply wrong on Darwin and nothing downstream can
+# notice. Measured on real ecb at v6.5.11: five of these were wrong.
+#
+# ⭐ WRONG HERE DOES NOT MEAN "FAILS" — IT MEANS "SIGNALS THE WRONG THING".
+# Linux SIGCHLD=17 is Darwin's SIGSTOP, so a process waiting on child-exit was
+# watching for a stop. That is why this survived: there is no error to see.
+# Split per-OS, mirroring the `Stat` precedent lower in this file.
+# See issues/2026-08-07-macos-arm64-inherits-linux-signal-and-errno-constants.md.
 # ================================================================
+#ifdef CYRIUS_TARGET_MACOS
+enum Signal {
+    SIGHUP = 1;
+    SIGINT = 2;
+    SIGQUIT = 3;
+    SIGKILL = 9;
+    SIGUSR1 = 30;
+    SIGUSR2 = 31;
+    SIGTERM = 15;
+    SIGCHLD = 20;
+    SIGCONT = 19;
+    SIGSTOP = 17;
+    # Darwin has NO SIGPWR. The x86-macOS peer declares it 30, which is
+    # Darwin's SIGUSR1 — so `kill(pid, SIGPWR)` there silently delivers
+    # SIGUSR1. 0 is the inert choice (`kill(pid, 0)` is the liveness probe,
+    # not a delivery), matching the MAP_STACK = 0 precedent for a flag that
+    # does not exist on this OS. Fail-inert beats fail-wrong.
+    SIGPWR = 0;
+}
+
+enum SigAction {
+    SIG_BLOCK = 1;
+    SIG_UNBLOCK = 2;
+    SIG_SETMASK = 3;
+}
+#endif
+#ifdef CYRIUS_TARGET_LINUX
 enum Signal {
     SIGHUP = 1;
     SIGINT = 2;
@@ -278,6 +399,7 @@ enum SigAction {
     SIG_UNBLOCK = 1;
     SIG_SETMASK = 2;
 }
+#endif
 
 # ================================================================
 # Mount flags (cross-arch identical)
@@ -331,6 +453,19 @@ enum RebootCmd {
     RB_HALT_SYSTEM = 0xCDEF0123;
 }
 
+# v6.5.15: EAGAIN is the ONLY errno in this list whose value differs on Darwin
+# (35, vs Linux 11 — Darwin's 11 is EDEADLK). Split out ALONE rather than
+# duplicating the whole enum per-OS: the other 16 are identical on both, and a
+# duplicated block is how one arm silently drifts from the other (the exact
+# shape of the Darwin `AT_*` and macOS `Stat` half-fixes). One divergent value,
+# one guarded declaration.
+#ifdef CYRIUS_TARGET_MACOS
+enum ErrnoOs { EAGAIN = 35; }
+#endif
+#ifdef CYRIUS_TARGET_LINUX
+enum ErrnoOs { EAGAIN = 11; }
+#endif
+
 enum Errno {
     EPERM = 1;
     ENOENT = 2;
@@ -338,7 +473,6 @@ enum Errno {
     EINTR = 4;
     EIO = 5;
     ENXIO = 6;
-    EAGAIN = 11;
     EACCES = 13;
     EBUSY = 16;
     EEXIST = 17;
@@ -473,6 +607,17 @@ fn sys_fdatasync(fd): i64 {
     return syscall(SYS_FDATASYNC, fd);
 }
 
+# Change owner/group of `path` relative to `dirfd`. With AT_FDCWD +
+# AT_SYMLINK_NOFOLLOW this is lchown; uid/gid of -1 leaves that field unchanged.
+#
+# Issues the PRIVATE ALIAS 1054, not the native 54 — 54 is owned by the x86-compat
+# setsockopt shim and 260 (the x86 number, the usual escape) is this peer's native
+# SYS_WAIT4. See the SYS_FCHOWNAT comment in the enum above for why the alias band
+# exists and what has to move in lockstep. CHANGELOG [6.5.7]
+fn sys_fchownat(dirfd, path, uid, gid, flags): i64 {
+    return syscall(SYS_FCHOWNAT, dirfd, path, uid, gid, flags);
+}
+
 # Create a symbolic link at `linkpath` pointing to `target`.
 # Translates to symlinkat(target, AT_FDCWD, linkpath).
 # Returns 0 on success, negative errno on failure.
@@ -512,9 +657,16 @@ fn sys_chmod(path, mode): i64 {
 }
 
 # Check file access permissions.
-# Translates to faccessat(AT_FDCWD, path, mode).
+# Translates to faccessat(AT_FDCWD, path, mode, 0).
+# v6.5.15: the flags word used to be OMITTED. Linux's faccessat syscall really is
+# 3-arg (faccessat2/439 is the 4-arg one), so the register was simply ignored there
+# — but Darwin's faccessat IS 4-arg and VALIDATES flags, so the stale value left in
+# x3 by the previous call made every macOS-arm64 sys_access return -22 EINVAL
+# (measured on ecb: flags=0 → 0; flags=1/420/0xDEADBEEF → -22). Passing an explicit
+# 0 is inert on Linux and required on Darwin — the same shape sys_chmod above has
+# always used for fchmodat. Surfaced once ESYSXLAT actually routed 269→466.
 fn sys_access(path, mode): i64 {
-    return syscall(SYS_FACCESSAT, AT_FDCWD, path, mode);
+    return syscall(SYS_FACCESSAT, AT_FDCWD, path, mode, 0);
 }
 
 # Process operations.
@@ -577,21 +729,26 @@ fn sigset_has(set, signum): i64 {
 # sys_sigprocmask / sys_signalfd / sys_epoll_create moved to
 # lib/syscalls_linux_common.cyr at v5.11.20.
 
-# epoll_event: { u32 events, u64 data } = 12 bytes
+# epoll_event: { u32 events, u64 data } = 16 bytes on aarch64. Unlike x86_64 (which
+# has EPOLL_PACKED → data @4), aarch64 leaves the struct unpacked, so the u64 aligns
+# to offset 8. Must match the reactor's data offset in lib/async.cyr. (v6.4.42)
 fn epoll_event_new(events, data): i64 {
     var ev = alloc(16);
     store32(ev, events);
-    store64(ev + 4, data);
+    store64(ev + 8, data);
     return ev;
 }
 
 # sys_epoll_ctl moved to lib/syscalls_linux_common.cyr at v5.11.20.
 
-# Wait for epoll events. aarch64 has only epoll_pwait (no bare
-# epoll_wait); we pass NULL sigmask + sigset size 0 to mimic
-# epoll_wait semantics.
+# Wait for epoll events. aarch64 has only epoll_pwait (#22) — but 22 is x86 `pipe`,
+# which ESYSXLAT rewrites to pipe2(x0, 0). Issuing raw 22 here therefore ran
+# pipe2(epfd, 0) → -EFAULT, so the epoll reactor NEVER worked on aarch64 (the async
+# gates only run on x86; caught on real pi hardware). Issue the x86 epoll_wait number
+# (232) instead; ESYSXLAT arg-extends it to epoll_pwait(...,NULL sigmask,0). The x86
+# sibling issues 232 natively, so the wrapper surface matches. See CHANGELOG [6.4.42].
 fn sys_epoll_wait(epfd, events, maxevents, timeout): i64 {
-    return syscall(SYS_EPOLL_PWAIT, epfd, events, maxevents, timeout, 0, 8);
+    return syscall(232, epfd, events, maxevents, timeout);
 }
 
 # sys_timerfd_create moved to lib/syscalls_linux_common.cyr at v5.11.20.
@@ -650,3 +807,22 @@ fn sys_inotify_rm_watch(fd, wd): i64 { return syscall(SYS_INOTIFY_RM_WATCH, fd, 
 # sys_landlock_add_rule / sys_landlock_restrict_self / sys_socket /
 # sys_bind / sys_listen / sys_connect / sys_recvfrom / sys_accept4 /
 # sys_recvmsg moved to lib/syscalls_linux_common.cyr at v5.11.20.
+
+# v6.5.27 — kqueue/kevent for arm64-macOS ONLY.
+# ⚠ THIS FILE IS SHARED: lib/syscalls.cyr selects it for aarch64-LINUX *and* for
+# arm64-macOS (see syscalls.cyr:68-70 — macOS+AARCH64 resolves HERE, not to
+# syscalls_macos.cyr, which is x86-macOS only). That surprise is exactly why the first
+# kqueue pass built on Intel-Mac and failed on ecb with `undefined function sys_kqueue`.
+# Guarded so real aarch64-Linux, which has epoll and no kqueue, is untouched.
+# Private-alias band 1000+native: 1362→BSD 362 kqueue, 1363→BSD 363 kevent, renumbered by
+# the aarch64 macho translator (_macho_arm_routes + the ESYSXLAT rows added at v6.5.27).
+#ifdef CYRIUS_TARGET_MACOS
+# Create a Darwin kernel queue. Returns the kqueue fd, or < 0.
+fn sys_kqueue(): i64 {
+    return syscall(1362);
+}
+# Register changes and/or collect events on a kqueue. Returns the event count, or < 0.
+fn sys_kevent(kq, changelist, nchanges, eventlist, nevents, timeout): i64 {
+    return syscall(1363, kq, changelist, nchanges, eventlist, nevents, timeout);
+}
+#endif

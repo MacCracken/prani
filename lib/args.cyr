@@ -16,7 +16,7 @@
 # `dst` (≤ cap bytes), NUL-terminated; returns the total bytes written
 # INCLUDING the trailing NUL. Surrogate pairs (U+10000+) decode to 4-byte
 # UTF-8. Pure (no syscall), target-agnostic, so it is unit-testable on any
-# host (tests/tcyr/args_win_utf8.tcyr); dead on Linux/macOS (DCE-stubbed).
+# host (tests/tcyr/platform/args_win_utf8.tcyr); dead on Linux/macOS (DCE-stubbed).
 #
 # v6.0.69 §3: lib/args_win.cyr now splits the command line with the real
 # shell32!CommandLineToArgvW (correct \\"-quote semantics) and converts

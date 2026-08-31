@@ -72,7 +72,13 @@ vec of f64 output samples   (or a negative PRANI_ERR_* on failure)
 
 ## Key Dependencies (Cyrius distlib bundles)
 
-- **svara** 3.0.0 — glottal source, formant filter, vocal tract, vowel target
-- **naad** 2.1.0 — biquad filters (NoiseOnly bandpass shaping)
-- **hisab** 2.6.7 — `ease_in_out_smooth` (envelope curves)
-- **goonj** 2.0.0, **sakshi** 2.4.3 — referenced transitively by svara/naad
+> Tags are volatile; `cyrius.cyml` is the source of truth and
+> [`development/state.md`](../development/state.md) carries the live set. Listed
+> here for the shape of the stack, current as of 2.0.2.
+
+- **svara** 3.5.3 — glottal source, formant filter, vocal tract, vowel target
+- **naad** 2.2.2 — biquad filters (NoiseOnly bandpass shaping;
+  `NAAD_FILTER_BANDPASS`)
+- **hisab** 2.11.2 — `ease_in_out_smooth` (envelope curves)
+- **goonj** 2.0.4, **sakshi** 2.4.12 — goonj referenced transitively by
+  svara/naad; sakshi also called directly by `src/logging.cyr`

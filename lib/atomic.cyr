@@ -34,6 +34,27 @@
 #
 # >>> include "lib/atomic.cyr"
 
+# ================================================================
+# _threads_active — the process-wide "are we concurrent yet?" flag
+# ================================================================
+# Armed 0→1 by thread_create / _thread_spawn (lib/thread.cyr,
+# thread_win.cyr, thread_agnos.cyr, thread_macos.cyr) BEFORE the child
+# runs. clone/CreateThread is a full barrier, so the set happens-before
+# any concurrency and both parent and child then take the locked path.
+# While it is 0 the stdlib's allocator spinlocks are no-ops, which is
+# what keeps the single-threaded bump path at ~10 ns (PF-02, v6.3.17).
+#
+# ⚠ IT LIVES HERE, not in lib/alloc.cyr, since v6.5.19. It was declared
+# in alloc.cyr while lib/thread.cyr — which WRITES it — includes only
+# atomic.cyr, so thread.cyr was not self-sufficient: it compiled purely
+# because every real consumer happened to include alloc.cyr too. Two
+# allocators now need the flag (alloc.cyr's bump lock and freelist.cyr's
+# freelist lock) and freelist.cyr does not include alloc.cyr, so the flag
+# belongs in the lowest module all three already share. ONE flag, not two
+# — a second copy would be armed by thread_create and silently missed by
+# whichever allocator read the other one. See CHANGELOG [6.5.19].
+var _threads_active = 0;
+
 # Atomic 8-byte load. Aligned i64 loads are atomic on both x86_64
 # and aarch64 — no special instruction needed, but expose as API
 # so callers document intent.

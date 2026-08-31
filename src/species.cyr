@@ -178,8 +178,8 @@ struct SpeciesParams {
 # Internal builder -- fills every field in declaration order.
 #must_use
 fn species_params_make(apparatus, f0_min, f0_max, f0_default, tract_scale,
-    formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
-    breathiness, jitter, shimmer, spectral_tilt, resonance_seed) {
+  formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
+  breathiness, jitter, shimmer, spectral_tilt, resonance_seed) {
     var p = alloc(sizeof(SpeciesParams));
     SpeciesParams_set_apparatus(p, apparatus);
     SpeciesParams_set_f0_min(p, f0_min);
@@ -207,95 +207,95 @@ fn species_params_make(apparatus, f0_min, f0_max, f0_default, tract_scale,
 fn species_params(species) {
     if (species == PRANI_SP_WOLF) {
         return species_params_make(PRANI_APP_LARYNGEAL,
-            f64_from(150), f64_from(1200), f64_from(400), PR_TS_1_2,
-            f64_from(420), f64_from(1250), f64_from(2100),
-            f64_from(100), f64_from(120), f64_from(150),
-            PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_WOLF);
+          f64_from(150), f64_from(1200), f64_from(400), PR_TS_1_2,
+          f64_from(420), f64_from(1250), f64_from(2100),
+          f64_from(100), f64_from(120), f64_from(150),
+          PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_WOLF);
     }
     if (species == PRANI_SP_DOG) {
         return species_params_make(PRANI_APP_LARYNGEAL,
-            f64_from(100), f64_from(2000), f64_from(300), PR_TS_0_9,
-            f64_from(550), f64_from(1650), f64_from(2750),
-            f64_from(100), f64_from(130), f64_from(160),
-            PR_BR_0_03, PR_JI_0_012, PR_SH_0_025, f64_neg(f64_from(2)), PR_SEED_DOG);
+          f64_from(100), f64_from(2000), f64_from(300), PR_TS_0_9,
+          f64_from(550), f64_from(1650), f64_from(2750),
+          f64_from(100), f64_from(130), f64_from(160),
+          PR_BR_0_03, PR_JI_0_012, PR_SH_0_025, f64_neg(f64_from(2)), PR_SEED_DOG);
     }
     if (species == PRANI_SP_CAT) {
         return species_params_make(PRANI_APP_LARYNGEAL,
-            f64_from(200), f64_from(1000), f64_from(500), PR_TS_0_5,
-            f64_from(850), f64_from(2500), f64_from(4200),
-            f64_from(120), f64_from(150), f64_from(200),
-            PR_BR_0_08, PR_JI_0_02, PR_SH_0_04, f64_neg(f64_from(2)), PR_SEED_CAT);
+          f64_from(200), f64_from(1000), f64_from(500), PR_TS_0_5,
+          f64_from(850), f64_from(2500), f64_from(4200),
+          f64_from(120), f64_from(150), f64_from(200),
+          PR_BR_0_08, PR_JI_0_02, PR_SH_0_04, f64_neg(f64_from(2)), PR_SEED_CAT);
     }
     if (species == PRANI_SP_LION) {
         return species_params_make(PRANI_APP_LARYNGEAL,
-            f64_from(40), f64_from(200), f64_from(80), f64_from(2),
-            f64_from(250), f64_from(750), f64_from(1250),
-            f64_from(80), f64_from(100), f64_from(130),
-            PR_BR_0_1, PR_JI_0_025, PR_SH_0_05, f64_neg(f64_from(6)), PR_SEED_LION);
+          f64_from(40), f64_from(200), f64_from(80), f64_from(2),
+          f64_from(250), f64_from(750), f64_from(1250),
+          f64_from(80), f64_from(100), f64_from(130),
+          PR_BR_0_1, PR_JI_0_025, PR_SH_0_05, f64_neg(f64_from(6)), PR_SEED_LION);
     }
     if (species == PRANI_SP_SONGBIRD) {
         return species_params_make(PRANI_APP_SYRINGEAL,
-            f64_from(1000), f64_from(8000), f64_from(3000), PR_TS_0_15,
-            f64_from(3500), f64_from(7000), f64_from(10500),
-            f64_from(500), f64_from(800), f64_from(1100),
-            PR_BR_0_02, PR_JI_0_005, PR_SH_0_01, f64_neg(f64_from(1)), PR_SEED_SONGBIRD);
+          f64_from(1000), f64_from(8000), f64_from(3000), PR_TS_0_15,
+          f64_from(3500), f64_from(7000), f64_from(10500),
+          f64_from(500), f64_from(800), f64_from(1100),
+          PR_BR_0_02, PR_JI_0_005, PR_SH_0_01, f64_neg(f64_from(1)), PR_SEED_SONGBIRD);
     }
     if (species == PRANI_SP_CROW) {
         return species_params_make(PRANI_APP_SYRINGEAL,
-            f64_from(500), f64_from(2000), f64_from(800), PR_TS_0_3,
-            f64_from(1400), f64_from(4200), f64_from(7000),
-            f64_from(350), f64_from(500), f64_from(700),
-            PR_BR_0_18, PR_JI_0_03, PR_SH_0_05, f64_neg(f64_from(2)), PR_SEED_CROW);
+          f64_from(500), f64_from(2000), f64_from(800), PR_TS_0_3,
+          f64_from(1400), f64_from(4200), f64_from(7000),
+          f64_from(350), f64_from(500), f64_from(700),
+          PR_BR_0_18, PR_JI_0_03, PR_SH_0_05, f64_neg(f64_from(2)), PR_SEED_CROW);
     }
     if (species == PRANI_SP_RAPTOR) {
         return species_params_make(PRANI_APP_SYRINGEAL,
-            f64_from(2000), f64_from(4000), f64_from(2500), PR_TS_0_2,
-            f64_from(2100), f64_from(5500), f64_from(8500),
-            f64_from(400), f64_from(600), f64_from(800),
-            PR_BR_0_1, PR_JI_0_01, PR_SH_0_02, PR_TILT_NEG_1_5, PR_SEED_RAPTOR);
+          f64_from(2000), f64_from(4000), f64_from(2500), PR_TS_0_2,
+          f64_from(2100), f64_from(5500), f64_from(8500),
+          f64_from(400), f64_from(600), f64_from(800),
+          PR_BR_0_1, PR_JI_0_01, PR_SH_0_02, PR_TILT_NEG_1_5, PR_SEED_RAPTOR);
     }
     if (species == PRANI_SP_SNAKE) {
         return species_params_make(PRANI_APP_NOISE_ONLY,
-            f64_from(0), f64_from(0), f64_from(0), PR_TS_0_4,
-            f64_from(2500), f64_from(5000), f64_from(8000),
-            f64_from(1500), f64_from(2000), f64_from(2500),
-            f64_from(1), f64_from(0), f64_from(0), f64_from(0), PR_SEED_SNAKE);
+          f64_from(0), f64_from(0), f64_from(0), PR_TS_0_4,
+          f64_from(2500), f64_from(5000), f64_from(8000),
+          f64_from(1500), f64_from(2000), f64_from(2500),
+          f64_from(1), f64_from(0), f64_from(0), f64_from(0), PR_SEED_SNAKE);
     }
     if (species == PRANI_SP_CROCODILIAN) {
         return species_params_make(PRANI_APP_LARYNGEAL,
-            f64_from(30), f64_from(200), f64_from(60), PR_TS_2_5,
-            f64_from(200), f64_from(600), f64_from(1000),
-            f64_from(70), f64_from(90), f64_from(120),
-            PR_BR_0_15, PR_JI_0_03, PR_SH_0_06, f64_neg(f64_from(5)), PR_SEED_CROCODILIAN);
+          f64_from(30), f64_from(200), f64_from(60), PR_TS_2_5,
+          f64_from(200), f64_from(600), f64_from(1000),
+          f64_from(70), f64_from(90), f64_from(120),
+          PR_BR_0_15, PR_JI_0_03, PR_SH_0_06, f64_neg(f64_from(5)), PR_SEED_CROCODILIAN);
     }
     if (species == PRANI_SP_CRICKET) {
         return species_params_make(PRANI_APP_STRIDULATORY,
-            f64_from(3000), f64_from(8000), f64_from(4500), PR_TS_0_05,
-            f64_from(4500), f64_from(9000), f64_from(13500),
-            f64_from(500), f64_from(800), f64_from(1000),
-            f64_from(0), PR_JI_0_002, PR_SH_0_005, f64_neg(f64_from(1)), PR_SEED_CRICKET);
+          f64_from(3000), f64_from(8000), f64_from(4500), PR_TS_0_05,
+          f64_from(4500), f64_from(9000), f64_from(13500),
+          f64_from(500), f64_from(800), f64_from(1000),
+          f64_from(0), PR_JI_0_002, PR_SH_0_005, f64_neg(f64_from(1)), PR_SEED_CRICKET);
     }
     if (species == PRANI_SP_BEE) {
         return species_params_make(PRANI_APP_VIBRATILE,
-            f64_from(200), f64_from(500), f64_from(300), PR_TS_0_03,
-            f64_from(300), f64_from(600), f64_from(900),
-            f64_from(100), f64_from(200), f64_from(300),
-            f64_from(0), PR_JI_0_001, PR_SH_0_003, f64_neg(f64_from(1)), PR_SEED_BEE);
+          f64_from(200), f64_from(500), f64_from(300), PR_TS_0_03,
+          f64_from(300), f64_from(600), f64_from(900),
+          f64_from(100), f64_from(200), f64_from(300),
+          f64_from(0), PR_JI_0_001, PR_SH_0_003, f64_neg(f64_from(1)), PR_SEED_BEE);
     }
     if (species == PRANI_SP_DRAGON) {
         return species_params_make(PRANI_APP_LARYNGEAL,
-            f64_from(30), f64_from(500), f64_from(70), f64_from(3),
-            f64_from(170), f64_from(500), f64_from(850),
-            f64_from(60), f64_from(80), f64_from(110),
-            PR_BR_0_2, PR_JI_0_04, PR_SH_0_08, f64_neg(f64_from(4)), PR_SEED_DRAGON);
+          f64_from(30), f64_from(500), f64_from(70), f64_from(3),
+          f64_from(170), f64_from(500), f64_from(850),
+          f64_from(60), f64_from(80), f64_from(110),
+          PR_BR_0_2, PR_JI_0_04, PR_SH_0_08, f64_neg(f64_from(4)), PR_SEED_DRAGON);
     }
     # PRANI_SP_FANTASY (default / fallthrough -- preserves totality since the
     # Rust enum is #[non_exhaustive]; every valid species maps above).
     return species_params_make(PRANI_APP_LARYNGEAL,
-        f64_from(50), f64_from(2000), f64_from(200), f64_from(1),
-        f64_from(500), f64_from(1500), f64_from(2500),
-        f64_from(80), f64_from(100), f64_from(130),
-        PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_FANTASY);
+      f64_from(50), f64_from(2000), f64_from(200), f64_from(1),
+      f64_from(500), f64_from(1500), f64_from(2500),
+      f64_from(80), f64_from(100), f64_from(130),
+      PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_FANTASY);
 }
 
 # species_params_resonance_seed -- SpeciesParams::resonance_seed(). Returns the

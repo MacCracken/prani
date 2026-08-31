@@ -41,13 +41,34 @@ var AT_FDCWD = 0 - 2;
 var AT_FDCWD = 0 - 100;
 #endif
 # fstatat(fd, "", ..., AT_EMPTY_PATH) — operate on the fd itself.
+# ⚠ Darwin has NO equivalent; the value below is Linux-only and any Darwin call
+# passing it will be rejected. Left unguarded because no at-family wrapper here uses
+# it on the macOS path.
 var AT_EMPTY_PATH = 4096;          # 0x1000
+# ⛔ v6.5.7 — THE AT_* FLAGS DIVERGE ON DARWIN, exactly like AT_FDCWD above, and only
+# the dirfd half was fixed when that was found by ports. Darwin
+# ($(xcrun --show-sdk-path)/usr/include/sys/fcntl.h, read off ecb):
+#   AT_SYMLINK_NOFOLLOW 0x0020 (Linux 0x100) · AT_SYMLINK_FOLLOW 0x0040 (Linux 0x400)
+#   AT_REMOVEDIR        0x0080 (Linux 0x200)
+# These reach Darwin UNTRANSLATED — the at-family entries are pure renumbers that pass
+# their flags straight through — so a Linux value is simply an invalid flag: EINVAL, no
+# warning, no fault. Consequence, measured on real ecb: `xrmdir` has never worked on
+# macOS-arm64 since it shipped at v6.5.2, and `sys_fchownat` returned -22 the first time
+# it was ever RUN there. The host suite cannot see any of this; only
+# vr01_syscall_wrappers.tcyr on hardware can.
+#ifdef CYRIUS_TARGET_MACOS
+var AT_REMOVEDIR = 128;            # 0x0080
+var AT_SYMLINK_NOFOLLOW = 32;      # 0x0020
+var AT_SYMLINK_FOLLOW = 64;        # 0x0040
+#endif
+#ifndef CYRIUS_TARGET_MACOS
 # unlinkat(...) treated as rmdir.
 var AT_REMOVEDIR = 512;            # 0x200
 # fstatat / fchmodat: do NOT follow a trailing symlink (safe-walk default).
 var AT_SYMLINK_NOFOLLOW = 256;     # 0x100
 # linkat: follow the source symlink.
 var AT_SYMLINK_FOLLOW = 1024;      # 0x400
+#endif
 var AT_NO_AUTOMOUNT = 2048;        # 0x800
 # utimensat tv_nsec sentinels.
 var UTIME_NOW  = 1073741823;       # (1 << 30) - 1
@@ -132,15 +153,62 @@ fn sys_fchmod(fd, mode): i64 {
     return syscall(SYS_FCHMOD, fd, mode);
 }
 
+# ioctl(fd, request, argp) — device control. Filed by kybernet (PID 1 for AGNOS), which
+# needs TCGETS/TCSETS on /dev/console to stop an emergency-shell password echoing; darshana
+# hand-rolled the same call. `SYS_IOCTL` has been defined on every peer for years with no
+# wrapper, so it was the ONE place in an otherwise fully-wrapped surface where consumer code
+# had to reach for bare `syscall()` — which reads like a violation of the no-raw-syscall rule
+# those repos audit against, and invited the shadowing bug darshana filed separately.
+#
+# ⚠ THE NUMBER IS PER-ARCH AND MUST STAY THE PEER'S NATIVE ONE: x86_64 16, aarch64 29,
+# Darwin 29 (routed 29→54 by ESYSXLAT's Mach-O arm). Do NOT "normalise" these to the x86
+# value — on ELF-aarch64 a literal 16 is not translated at all (there is no 16→29 row), so a
+# consumer that hardcodes the x86 number silently issues a different, valid syscall. That is
+# the exact defect `2026-08-23-darshana-aarch64-syscall-shadow-no-diagnostic` reports.
+#
+# The third argument is untyped by design: it is a pointer for TCGETS/TCSETS and an integer
+# for many drivers, and the kernel's interpretation is request-specific.
+fn sys_ioctl(fd, request, argp): i64 {
+    return syscall(SYS_IOCTL, fd, request, argp);
+}
+
 # ================================================================
 # Process lifecycle
 # ================================================================
 
-# Terminate process with exit code. (syscall doesn't return; the
-# trailing `return 0` is unreachable but kept for cyrius syntax.)
+# Terminate the CALLING THREAD with exit code — exit(2), not exit_group(2).
+# In a single-threaded program that ends the process; once any thread has
+# been spawned it does NOT, and the process is left running with its main
+# thread gone. Prefer `sys_exit_group` in a program epilogue.
+# (syscall doesn't return; the trailing `return 0` is unreachable but kept
+# for cyrius syntax.)
 fn sys_exit(code): i64 {
     syscall(SYS_EXIT, code);
     return 0;
+}
+
+# Terminate EVERY thread in the process with exit code — exit_group(2).
+# This is the one to call from a program epilogue: `sys_exit` ends only the
+# caller, so a program that spawned any worker (thread_create, a pooled
+# server, chan_* fan-out) hangs after main returns with no diagnostic.
+# CHANGELOG [6.5.6]
+fn sys_exit_group(code): i64 {
+    syscall(SYS_EXIT_GROUP, code);
+    return 0;
+}
+
+# Change the calling process's working directory. Returns 0, or -errno.
+#
+# One definition covers x86-Linux (80), aarch64-Linux (49) and macOS-x86 —
+# each peer resolves SYS_CHDIR to its own number, and the Mach-O backend
+# renumbers to Darwin 12. Windows and agnos are STANDALONE peers and carry
+# their own (see lib/syscalls_windows.cyr / lib/syscalls_x86_64_agnos.cyr).
+#
+# This was CALLED at lib/regression.cyr:658 and DEFINED NOWHERE, so
+# regression_exec_in_dir3 could not compile for any consumer that reached it.
+# CHANGELOG [6.5.7]
+fn sys_chdir(path): i64 {
+    return syscall(SYS_CHDIR, path);
 }
 
 # execve: replace process image. argv and envp are null-terminated
@@ -174,6 +242,13 @@ fn sys_setsid(): i64 {
 # Wait for state change in a child process; reaping form.
 fn sys_waitpid(pid, status_ptr, options): i64 {
     return syscall(SYS_WAIT4, pid, status_ptr, options, 0);
+}
+
+# pidfd_open(pid, flags) — a file descriptor for `pid` that becomes readable when
+# the process exits. Lets the async runtime await a child on the epoll reactor
+# without blocking (Linux 5.3+). v6.4.36 (P2 — async subprocess).
+fn sys_pidfd_open(pid, flags): i64 {
+    return syscall(SYS_PIDFD_OPEN, pid, flags);
 }
 
 # Wait-status decoding macros — same shape across both arches
@@ -236,8 +311,22 @@ fn sys_setresgid(rgid, egid, sgid): i64 { return syscall(SYS_SETRESGID, rgid, eg
 
 # Per-process control verbs (PR_SET_NO_NEW_PRIVS, PR_SET_PDEATHSIG,
 # PR_SET_KEEPCAPS, etc.). 5-arg.
+# prctl is a Linux-only concept — Darwin has no `prctl` anywhere in the SDK's
+# sys/*.h and no equivalent. v6.5.15: the macOS build used to emit the raw svc
+# anyway. Because the Mach-O chain writes x16 only on a MATCH and has no
+# `mov x16, x8` fallback, an unrouted number does not fault cleanly — it fires
+# whatever BSD number the PREVIOUS syscall left in x16, with prctl's arguments.
+# In sandbox_syscalls.tcyr the preceding call is sys_unlink, so PR_GET_DUMPABLE
+# ran as unlinkat(3, NULL, 0). Return -ENOSYS instead. Same two-#ifdef shape as
+# sys_utimensat above, which keeps syscall(167) out of the Mach-O emit entirely
+# (no "syscall not routed" warning). See CHANGELOG [6.5.15].
 fn sys_prctl(option, arg2, arg3, arg4, arg5): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 38;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_PRCTL, option, arg2, arg3, arg4, arg5);
+    #endif
 }
 
 # Install a seccomp BPF filter; `op` is SECCOMP_SET_MODE_FILTER (1)
@@ -408,6 +497,32 @@ fn sys_socketpair(domain, type, protocol, fds): i64 {
     return syscall(SYS_SOCKETPAIR, domain, type, protocol, fds);
 }
 
+# v6.4.64 — the socket band's last missing pair. `addr` points to a caller-owned
+# sockaddr (>= 16 B for sockaddr_in), `addrlen` to an i32 holding its capacity,
+# which the kernel overwrites with the actual length. Return 0 or -errno;
+# getpeername on an unconnected socket is -ENOTCONN.
+#
+# WHY THESE EXIST: there was no wrapper, so sandhi 1.9.0 hardcoded a raw
+# `syscall(52, ...)` for its peer-address API. That is right on x86_64-Linux (52 IS
+# getpeername) and silently catastrophic elsewhere: on aarch64, 52 is **fchmod**, and
+# it SUCCEEDS — the caller believes it obtained a peer address while its buffer is
+# untouched garbage. Verified on real pi. Each peer supplies the number for ITS OWN
+# arch (x86 52/51 · aarch64 205/204 · macOS x86-numbered + EMACHO xlat to BSD 31/32),
+# which is what this file's per-arch split is for. Do NOT "solve" this with an
+# ESYSXLAT entry for x86-52: it collides with the aarch64 peer's SYS_FCHMOD = 52 and
+# remaps fchmod to getpeername (CI caught precisely that — sandbox_syscalls RED on pi).
+# Gate: tests/tcyr/crossos/getpeername_xlat.tcyr.
+fn sys_getpeername(fd, addr, addrlen): i64 {
+    return syscall(SYS_GETPEERNAME, fd, addr, addrlen);
+}
+
+# getsockname(fd, addr, addrlen) — the LOCAL address of a socket. 0 / -errno.
+# Succeeds on an unconnected socket (unlike getpeername), which is what
+# vr01_getpeername_xlat.tcyr uses to prove 51 and 52 are not swapped.
+fn sys_getsockname(fd, addr, addrlen): i64 {
+    return syscall(SYS_GETSOCKNAME, fd, addr, addrlen);
+}
+
 # Set a socket option (e.g. SOL_SOCKET=1 / SO_REUSEADDR=2 to allow
 # rapid rebind of a listening port). `val` points to the option value,
 # `vallen` its byte length. Returns 0 or -errno.
@@ -443,6 +558,35 @@ fn sys_listen(fd, backlog): i64 {
 
 # Accept a connection on a listening socket; `flags` accepts
 # SOCK_CLOEXEC | SOCK_NONBLOCK to set them atomically.
+# v6.5.16: Darwin has NO accept4 — it is absent from the syscall table on both macOS
+# hosts, so the number reached the kernel unclassed and SIGSYS-killed the process (this
+# is what took out tests/tcyr/crypto/tls_native_scaffold on ach: its OpenSSL interop
+# branch calls sys_accept4(lfd,0,0,0)). Compose it from plain accept + fcntl, which is
+# what accept4 is a fusion of and what Darwin actually offers. The bare `43` is the
+# sanctioned "x86 number + an ESYSXLAT entry" form (CLAUDE.md): both Mach-O backends
+# already route 43 -> BSD accept 30, so one spelling serves both.
+# ⚠ The FLAG VALUES are Linux's and must be translated, not passed through — ESYSXLAT
+# renumbers syscalls, never arguments. Darwin's O_NONBLOCK is 4 (Linux 2048), and CLOEXEC
+# is an fd-level F_SETFD bit rather than a status flag at all.
+# The atomicity accept4 buys is lost; there is no Darwin primitive that keeps it.
+# ⚠ ONE definition with the arms INSIDE the body, not two under #ifdef/#ifndef: the
+# api-surface tool scans SOURCE TEXT rather than post-preprocessor output, so a pair of
+# guarded definitions registers the same fn TWICE in docs/api-surface.snapshot. Same
+# in-body shape lib/io.cyr's file_lock uses.
 fn sys_accept4(fd, srcaddr, srcaddrlen, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    var afd = syscall(43, fd, srcaddr, srcaddrlen);
+    if (afd < 0) { return afd; }
+    if ((flags & 2048) != 0) {                          # Linux SOCK_NONBLOCK
+        var fl = syscall(SYS_FCNTL, afd, 3, 0);         # F_GETFL
+        syscall(SYS_FCNTL, afd, 4, fl | 4);             # F_SETFL |= Darwin O_NONBLOCK (4)
+    }
+    if ((flags & 524288) != 0) {                        # Linux SOCK_CLOEXEC
+        syscall(SYS_FCNTL, afd, 2, 1);                  # F_SETFD FD_CLOEXEC
+    }
+    return afd;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_ACCEPT4, fd, srcaddr, srcaddrlen, flags);
+    #endif
 }

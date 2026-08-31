@@ -237,10 +237,10 @@ test_group("preset_build -- applied breathiness reaches the voice params");
 # with_breathiness mutates the voice's params in place; verify the override
 # lands (svara-independent). Alpha wolf breathiness 0.03.
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_alpha)), T_0_03,
-    "build alpha_wolf breathiness override 0.03 in voice params");
+  "build alpha_wolf breathiness override 0.03 in voice params");
 # Ancient dragon breathiness 0.25.
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_anc)), T_0_25,
-    "build ancient_dragon breathiness override 0.25 in voice params");
+  "build ancient_dragon breathiness override 0.25 in voice params");
 
 # ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
