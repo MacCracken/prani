@@ -15,8 +15,19 @@
 #   tract.rs tracing::warn!("species formants out of range")  -> prani_log_warn
 #   voice.rs trace!("synthesizing creature vocalization")     -> prani_log_debug
 
+# The five level wrappers. Each takes a NUL-terminated cstring, forwards
+# (ptr, len) to the matching sakshi sink, and returns 0 -- they are called for
+# their side effect, so none is #must_use. Verbosity is a RUNTIME choice
+# (sakshi_set_level); nothing here is compiled out, which is why the message
+# must stay a literal rather than something built per call on a hot path.
+# `msg` must not be 0: these forward to strlen.
+# fatal -- an unrecoverable condition; prani itself never calls this.
 fn prani_log_fatal(msg) { sakshi_fatal(msg, strlen(msg)); return 0; }
+# error -- a synthesis step failed and an error code is being returned.
 fn prani_log_error(msg) { sakshi_error(msg, strlen(msg)); return 0; }
+# warn -- degraded but continuing (ports tract.rs's out-of-range formants).
 fn prani_log_warn(msg)  { sakshi_warn(msg, strlen(msg));  return 0; }
+# info -- lifecycle notes; prani itself never calls this.
 fn prani_log_info(msg)  { sakshi_info(msg, strlen(msg));  return 0; }
+# debug -- per-call synthesis trace (ports voice.rs's tracing::trace!).
 fn prani_log_debug(msg) { sakshi_debug(msg, strlen(msg)); return 0; }

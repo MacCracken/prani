@@ -15,6 +15,10 @@ include "lib/bayan.cyr"
 include "lib/svara.cyr"
 include "dist/prani.cyr"
 
+# main -- the smoke binary. Not part of the library surface: it links the whole
+# dist bundle, synthesizes nothing, and prints one line, which is what proves the
+# bundle's symbols resolve and the entry order in cyrius.cyml [lib].modules is
+# correct. Returns 0.
 fn main() {
     alloc_init();
 

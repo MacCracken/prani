@@ -5,6 +5,205 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - The P(-1) sweep: one segfault on the primary API, and the contract that changed underneath it
+
+Scaffold-hardening and security sweep of the whole tree, closing the one unmet
+2.0.0 criterion the roadmap still carried (*"Security audit pass — deferred to a
+work-loop cycle"*). **11 findings, 8 repaired, 3 accepted and written down**;
+full report in [`docs/audit/2026-08-30-audit.md`](docs/audit/2026-08-30-audit.md),
+three divergences from the oracle in [`docs/adr/`](docs/adr/). Suite **717 → 770
+assertions / 17 suites**; `cyrius audit` **exits 0 for the first time** (fmt ·
+lint · docs · tests · bench all clean). No behaviour change on any valid input:
+every one of the 717 pre-existing parity assertions passes untouched.
+
+### Fixed — CRITICAL: `crvoice_vocalize` segfaulted on any sample rate svara rejects
+
+`rust-old`'s `VocalTract::new` returned `Self` — it could not fail, so
+`CreatureTract::new` returns `Self` too. svara 3.x hardened that constructor into
+a checkable negative code (svara's own ADR: *"`svara_tract_new` errors where Rust
+panics"*) and it rejects **every sample rate at or below 1000 Hz**, plus negative
+and non-finite ones. The port kept the oracle's shape and used the return value
+as a pointer regardless:
+
+```
+crvoice_vocalize(wolf, HOWL, /*sample_rate*/ 10.0, /*duration*/ 1.0)   ->  exit 139
+```
+
+`svara_tract_set_formants_from_target(-1, target)` dereferenced `-1`. Reachable
+from `crvoice_vocalize`, `crvoice_vocalize_with_intent`, the cat-purr path,
+`stream_fill_buffer` and `crtract_from_json_str` — the entire public synthesis
+surface. `crtract_new` now checks `svara_is_err` and returns a negative
+`PRANI_ERR_*`; all five call sites propagate it
+([ADR-0001](docs/adr/0001-check-svara-tract-constructor.md)).
+
+⭐ **This is a third defect category, distinct from the two the port's parity bar
+was built to catch.** It is not an inherited oracle defect and not a
+transcription error: it is **a contract that changed underneath the port**. hisab
+recorded the value-level form of this as *"a constant derived from a dependency
+is a measurement, and it goes stale silently."* This is the same sentence one
+level up — **a contract derived from a dependency is a measurement.** 2.0.2's
+dependency bump checked every symbol prani calls for renames and signature
+changes and found two; nothing in that check asks whether a return value still
+*means* what it used to, and nothing in 717 parity assertions asks either,
+because the oracle has no such failure to compare against.
+
+### Fixed — HIGH: a JSON parse failure was indistinguishable from a successful parse
+
+The four deserializers never looked at `bayan_json_v_parse_buf`'s result. bayan's
+value accessors are all null-safe by design (`bayan_json_v_obj_get(0, k)` and
+`bayan_json_v_int(0)` both return 0), so the two behaviours composed into a
+silent one: **a malformed document produced a fully-formed struct with every
+field 0, returned as a success.** The zeros are not inert — a `CreatureVoice`
+with `size_scale` 0.0 makes `crvoice_effective_f0` divide by zero, and a
+`SpeciesParams` with `f0_min == f0_max == 0` collapses every downstream clamp.
+
+`crvoice_from_json_str`, `crtract_from_json_str`, `preset_from_json_str` and
+`sequence_call_phrase_from_json_str` now return a negative `PRANI_ERR_*` on a
+null or unparseable input. This **restores** the oracle's contract rather than
+diverging from it — Rust's `serde_json::from_str` returns `Result`, and 2.0.1
+restored the codecs without the failure half
+([ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)). Field-range
+validation is explicitly still out of scope and now written down as such.
+
+### Fixed — HIGH: NoiseOnly synthesis dereferenced a filter that may be absent
+
+`crtract_synthesize_noise` carried the comment *"noise_filter is always present
+here"* while `crtract_new` populates that field only for `PRANI_APP_NOISE_ONLY`
+and only `if (prani_is_err(nf) == 0)`. The invariant the comment asserted is one
+the code beside it admits can be false. Now checked, returning
+`PRANI_ERR_SYNTHESIS_FAILED`.
+
+### Fixed — MEDIUM: a failed stream fill reported success
+
+`rust-old/src/stream.rs:184` guards only the copy with `if let Ok(block)`, then
+unconditionally advances `samples_rendered` and returns `to_render` — telling the
+host it wrote N samples having written none, so the host plays whatever the
+buffer held before (on a reused audio buffer, the previous block: an audible
+repeat attributed to prani, with no error anywhere). Inherited by the port. A
+failed fill now returns **0** and retires the stream, so a host draining
+`while (stream_is_finished(s) == 0)` terminates instead of spinning on a failure
+that repeats every call ([ADR-0003](docs/adr/0003-failed-fill-reports-zero-and-retires.md)).
+A zero-length caller buffer also returns 0 immediately — it could never advance
+the stream either. The same ADR records a divergence that had never been written
+down: the port applies tilt and amplitude only when a block was produced, where
+the oracle applies them to the stale buffer regardless.
+
+### Fixed — MEDIUM: an RTPC setter allocated on every call, forever
+
+`prani_ffi_voice_set_size` is a real-time parameter a host may call every frame,
+per creature. It built a fresh `CreatureVoice` **and**, through `crvoice_new`, a
+fresh `SpeciesParams`, copied five fields out and dropped the shell. Cyrius's
+allocator is a bump arena that never frees, so **every call retained 168 bytes
+permanently** — measured, not calculated: 1000 calls, `alloc_used()` before and
+after, 168,000 bytes (`sizeof(CreatureVoice)` 40 + `sizeof(SpeciesParams)` 128).
+At 60 fps across 100 creatures that is about 1 MB/second retained for the life of
+the process. svara's own `streaming.cyr` states the rule this broke: *an
+allocation inside an audio callback is not a leak that grows slowly, it is one
+that ends the process.*
+
+It now allocates **exactly 0 bytes**, asserted over 1000 calls in
+`tests/hardening.tcyr`, and is proven field-for-field identical to the rebuild it
+replaced. Making that possible is the one structural change in this release:
+`species_params` is split into `species_params_into` (the 13-species table,
+writing into a caller-owned struct) and a thin allocating wrapper, so both an
+allocating and a non-allocating entry point are served by **one** copy of the
+table.
+
+⚠ The first attempt at this repair still measured **128 B/call** and the
+assertion failed — `crvoice_reset_individual` had been written to call
+`species_params()`, which allocates. Only the table split got it to 0. The
+assertion was written before the repair was believed, which is the only reason
+the shortfall was caught rather than shipped as "no longer allocates".
+
+### Fixed — LOW: two allocation and loop-termination hardenings
+
+- **One `SynthesisOptions` per synthesis call, not one per 20 ms block** (50 per
+  second of audio, each retained forever). Nothing reads it after
+  `crtract_synthesize` returns, so it is allocated once above the loop and
+  re-armed per block.
+- **`block_size` is floored at 1.** `(sample_rate * 0.02) as usize` is 0 below
+  50 Hz and the oracle's loop (`voice.rs:227-231`) advances `rendered` by exactly
+  that, so it never terminates. This is **defense in depth, not a fix for a live
+  defect** — the CRITICAL guard above now rejects everything below ~1000 Hz
+  before the loop is built, so nothing can reach it. Kept because a loop should
+  not depend on a distant guard for termination, and asserted as arithmetic.
+
+### Accepted, not repaired — written down rather than silently carried
+
+- **Unchecked allocation (27 sites).** `alloc()` returns 0 on exhaustion and
+  prani stores through it; `vec_push` returns -1 and no call site checks, so an
+  exhausted arena silently truncates a buffer. The fix is an error return on
+  every constructor in the library — a larger API decision than a repair release
+  should make. On the roadmap; the two measured allocation reductions above
+  attack the same problem from the other end.
+- **`sequence_synthesize_chorus` length overflow** on a `timing_spread` around
+  1e14 seconds, and **NaN propagation** through `f64_clamp` into svara. Both are
+  bounded rather than open (`f64_to(NaN)` saturates to i64::MIN, so every
+  affected loop bound is negative and simply does not run), and both belong with
+  the general input-range validation deferred in ADR-0002.
+
+### Changed — refactor
+
+Two loop shapes had reached **three verbatim call sites each**, which is the bar
+CLAUDE.md sets, so they were extracted into `dsp.cyr`:
+`prani_vec_extend(dst, src)` and `prani_vec_push_zeros(v, n)`. Behaviour is
+unchanged; `prani_vec_push_zeros` makes one shared edge explicit instead of
+incidental — every call site derives its count from `f64_to(seconds * rate)`,
+which saturates to i64::MIN on NaN, so a non-positive count must append nothing.
+
+**Two duplications were found and deliberately left alone**, both at two
+instances rather than three: `crtract_synthesize_stridulatory`'s bee branch is
+byte-identical to `crtract_synthesize_vibratile`, and the `boundary_boost` block
+is duplicated verbatim between `voice.cyr` and `stream.cyr`. Both are on the
+roadmap for the third instance.
+
+### Added — `tests/hardening.tcyr` (53 assertions)
+
+One group per repaired finding, each written so it **fails on the 2.0.2 tree** —
+the memory-safety groups crash the process there rather than reporting, which is
+what makes them worth keeping. Every group carries controls (44100 and 8000 still
+build a tract; valid JSON is still accepted; a 128-sample buffer still fills) so
+it cannot pass vacuously by rejecting everything.
+
+### Fixed — the lint and docs gates
+
+- **7 lint warnings** in `src/vocalization.cyr:100-106` — the aligned
+  `prani_intent_modifiers` dispatch table ran to 123 characters against a
+  120-character limit. Rewrapped to block form; `cyrius lint` is clean tree-wide.
+- **10 undocumented public functions** now documented: the four
+  `*_from_json_str` deserializers (each stating its failure code), the three
+  `sequence_*_new` constructors, the two `*_modifiers_make` builders, the five
+  `prani_log_*` wrappers, and `main`. `cyrius audit`'s docs gate is complete, and
+  with fmt and lint already clean **`cyrius audit` now exits 0** — it had exited
+  1 on the docs gate since the port landed.
+
+### Notes
+
+- **No performance claim.** `dcblocker_process` 19 ns/sample, `prani_rng_next_f32`
+  14 ns/sample, `emotion_evaluate` 69 ns/frame, `crvoice_vocalize` (wolf howl,
+  0.05 s @ 8 kHz) 211 µs — every row within noise of 2.0.2. The optimization work
+  in this release is measured in **bytes retained**, not nanoseconds, and both
+  ends of each figure were measured with `alloc_used()`.
+- ⚠ **The probe was wrong before the code was.** The first three bisect runs
+  reported a hang, and the CRITICAL was very nearly filed as an infinite loop.
+  Two instrument defects produced that: `${PIPESTATUS[0]}` is a bashism that
+  expands to nothing under this project's zsh, so every *"exit=124 / timed out"*
+  reading was fabricated by the harness rather than measured; and the probes
+  printed through `print`, which was silently emitting nothing in that unit, so
+  the bisect markers that would have located the fault never appeared. With `$?`
+  captured directly and markers written through `test_group`'s raw syscall, the
+  same input reported **exit 139 — SIGSEGV**, and the real defect was three
+  frames further up than the one being chased. *Check the probe before believing
+  the probe.*
+- **What was checked and found clean** is recorded in the audit report rather
+  than omitted: `vec_get` is bounds-checked and aborts loudly; both contour
+  interpolations guard their divisor correctly (the guard class hisab has seen
+  fail thirty times); the chorus modulo divisor is floored before use; the Doppler
+  output length is bounded by the velocity clamp; every `prani_ffi_*` entry point
+  null-checks its handle; and prani has no syscall, command-execution, path or
+  network surface at all.
+- `dist/prani.cyr` regenerated at v2.0.3.
+
 ## [2.0.2] - Toolchain + dependency catch-up
 
 Maintenance release. Bumps the Cyrius pin **6.3.45 → 6.5.36** (124 toolchain

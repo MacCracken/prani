@@ -95,8 +95,15 @@ fn preset_to_json(self, sb) {
     return 0;
 }
 
+# from_json_str(json) -- rebuild a VoicePreset from preset_to_json output.
+# `json` is a NUL-terminated cstring; the display `name` is restored as a real
+# string and the f64 fields as exact i64 bit patterns.
+# Returns the VoicePreset ptr, or a NEGATIVE PRANI_ERR_INVALID_SPECIES if `json`
+# is 0 or does not parse.
 fn preset_from_json_str(json) {
+    if (json == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
+    if (root == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var self = alloc(sizeof(VoicePreset));
     VoicePreset_set_name(self, str_data(bayan_json_v_str(bayan_json_v_obj_get(root, "name"))));
     VoicePreset_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));

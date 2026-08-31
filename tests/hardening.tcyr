@@ -1,0 +1,232 @@
+# hardening.tcyr -- the P(-1) sweep's regression suite (2.0.3).
+#
+# One group per repaired finding in docs/audit/2026-08-30-audit.md. Every group
+# is written so it FAILS on the 2.0.2 tree: the memory-safety groups crash the
+# process there rather than reporting, which is exactly why they are worth
+# keeping. Nothing here re-tests behaviour the parity suites already cover --
+# these are the edges the oracle never exercised.
+#
+# Include order matches tests/ffi.tcyr (the widest unit: dep bundles, then every
+# prani module in dependency order).
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+include "src/preset.cyr"
+include "src/stream.cyr"
+include "src/ffi.cyr"
+
+alloc_init();
+
+var H_SR      = 0x40e5888000000000;   # 44100.0  a sample rate svara accepts
+var H_DUR_005 = 0x3fa999999999999a;   # 0.05 s
+var H_0_02    = 0x3f947ae147ae147b;   # 0.02     the 20 ms block constant
+var H_3_0     = 0x4008000000000000;   # 3.0      an out-of-range size scale
+
+# ================================================================
+# F1 (CRITICAL) -- svara_tract_new's error return was used as a pointer.
+#
+# svara 3.x hardened VocalTract::new into a checkable code and rejects every
+# sample_rate <= 1000 Hz; crtract_new ignored it and handed -1 to
+# svara_tract_set_formants_from_target. On the 2.0.2 tree each assertion in this
+# group is a SIGSEGV, not a failure.
+# ================================================================
+test_group("F1 crtract_new reports svara's rejection instead of dereferencing it");
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_from(10))), 1,
+  "sample_rate 10 -> error, not a segfault");
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_from(1000))), 1,
+  "sample_rate 1000 (svara's boundary) -> error");
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), 0)), 1,
+  "sample_rate 0 -> error");
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_neg(H_SR))), 1,
+  "negative sample_rate -> error");
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_div(0, 0))), 1,
+  "NaN sample_rate -> error");
+# control: the rates the library is actually used at still build a tract.
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), H_SR)), 0,
+  "44100 still builds (control)");
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000))), 0,
+  "8000 still builds (control)");
+
+test_group("F1 the rejection propagates out of every public entry point");
+var hv = crvoice_new(PRANI_SP_WOLF);
+assert_eq(prani_is_err(crvoice_vocalize(hv, PRANI_VOC_HOWL, f64_from(10), F64_ONE)), 1,
+  "crvoice_vocalize -> error at sample_rate 10");
+assert_eq(prani_is_err(
+    crvoice_vocalize_with_intent(hv, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, f64_from(10), F64_ONE)), 1,
+  "crvoice_vocalize_with_intent -> error at sample_rate 10");
+# the cat-purr special path takes its own crtract_new call site
+var hcat = crvoice_new(PRANI_SP_CAT);
+assert_eq(prani_is_err(crvoice_vocalize(hcat, PRANI_VOC_PURR, f64_from(10), F64_ONE)), 1,
+  "cat purr path -> error at sample_rate 10");
+# control: the same calls at a real sample rate still synthesize
+var hok = crvoice_vocalize(hv, PRANI_VOC_HOWL, H_SR, H_DUR_005);
+assert_eq(prani_is_err(hok), 0, "44100 still synthesizes (control)");
+assert_eq(vec_len(hok), 2205, "control length is 0.05 s * 44100");
+
+test_group("F1 a rejected stream reports 0 written and retires");
+var hsv = crvoice_new(PRANI_SP_WOLF);
+var hs = stream_new(hsv, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), F64_ONE);
+assert_eq(prani_is_err(hs), 0, "stream_new itself does not build a tract");
+var hbuf = vec_new();
+prani_vec_push_zeros(hbuf, 64);
+assert_eq(stream_fill_buffer(hs, hbuf), 0, "fill reports 0 written, not 64");
+assert_eq(stream_is_finished(hs), 1, "stream retires so a drain loop terminates");
+
+# ================================================================
+# F2 (defense in depth) -- block_size floor.
+#
+# `(sample_rate * 0.02) as usize` is 0 below 50 Hz, and the oracle's loop
+# (voice.rs:227-231) advances by exactly that, so it never terminates. It is NOT
+# independently reachable now -- F1's guard rejects everything below ~1000 Hz
+# before the loop is built -- so this asserts the arithmetic and keeps the floor
+# as a second line, not as a fix for a live defect.
+# ================================================================
+test_group("F2 block_size arithmetic underflows below 50 Hz (floor is defense in depth)");
+assert_eq(f64_to(f64_mul(f64_from(10), H_0_02)), 0, "sr=10 -> block_size 0 unfloored");
+assert_eq(f64_to(f64_mul(f64_from(49), H_0_02)), 0, "sr=49 -> block_size 0 unfloored");
+assert_eq(f64_to(f64_mul(f64_from(50), H_0_02)), 1, "sr=50 -> block_size 1");
+assert_eq(f64_to(f64_mul(H_SR, H_0_02)), 882, "sr=44100 -> block_size 882");
+
+# ================================================================
+# F3 (HIGH) -- a parse failure was indistinguishable from a successful parse.
+#
+# bayan's value accessors are all null-safe, so a malformed document used to
+# yield a fully-formed struct with every field 0 -- including size_scale 0.0,
+# which makes crvoice_effective_f0 divide by zero.
+# ================================================================
+test_group("F3 deserializers reject malformed JSON instead of fabricating zeros");
+assert_eq(prani_is_err(crvoice_from_json_str("not json at all")), 1, "crvoice: garbage -> error");
+assert_eq(prani_is_err(crvoice_from_json_str("")), 1, "crvoice: empty -> error");
+assert_eq(prani_is_err(crvoice_from_json_str("{\"species\":")), 1, "crvoice: truncated -> error");
+assert_eq(prani_is_err(crtract_from_json_str("not json at all")), 1, "crtract: garbage -> error");
+assert_eq(prani_is_err(preset_from_json_str("not json at all")), 1, "preset: garbage -> error");
+assert_eq(prani_is_err(sequence_call_phrase_from_json_str("nope")), 1, "phrase: garbage -> error");
+
+test_group("F3 valid JSON still roundtrips (control for the guard)");
+var hrv = crvoice_with_size(crvoice_new(PRANI_SP_LION), H_3_0);
+var hsb = str_builder_new();
+crvoice_to_json(hrv, hsb);
+var hjson = str_data(str_builder_build(hsb));
+var hrv2 = crvoice_from_json_str(hjson);
+assert_eq(prani_is_err(hrv2), 0, "valid json is NOT rejected");
+assert_eq(CreatureVoice_species(hrv2), PRANI_SP_LION, "species roundtrips");
+assert_eq(CreatureVoice_size_scale(hrv2), CreatureVoice_size_scale(hrv), "size_scale roundtrips");
+
+# ================================================================
+# F4 (HIGH) -- NoiseOnly synthesis dereferenced a filter that may be absent.
+# The field is only populated for NOISE_ONLY species and only when
+# filter_biquad_new succeeded; the comment claimed it was always present.
+# ================================================================
+test_group("F4 a NoiseOnly tract with no bandpass reports instead of dereferencing 0");
+var hsnake = crtract_new(species_params(PRANI_SP_SNAKE), H_SR);
+assert_eq(prani_is_err(hsnake), 0, "snake tract builds (control)");
+assert_eq(prani_is_err(crtract_synthesize(hsnake, f64_from(300), 32, crtract_options_default())), 0,
+  "with a filter present, synthesis still succeeds (control)");
+CreatureTract_set_noise_filter(hsnake, 0);   # the state crtract_new can leave behind
+assert_eq(crtract_synthesize(hsnake, f64_from(300), 32, crtract_options_default()),
+  PRANI_ERR_SYNTHESIS_FAILED, "filter absent -> PRANI_ERR_SYNTHESIS_FAILED, not a segfault");
+
+# ================================================================
+# F5 (MEDIUM) -- a zero-length fill buffer could never advance the stream.
+# ================================================================
+test_group("F5 stream_fill_buffer with an empty buffer returns 0 immediately");
+var hsv2 = crvoice_new(PRANI_SP_WOLF);
+var hs2 = stream_new(hsv2, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, H_DUR_005);
+assert_eq(stream_fill_buffer(hs2, vec_new()), 0, "empty buffer -> 0 written");
+assert_eq(stream_samples_rendered(hs2), 0, "and nothing was consumed");
+# control: a real buffer still fills
+var hb2 = vec_new();
+prani_vec_push_zeros(hb2, 128);
+assert_eq(stream_fill_buffer(hs2, hb2), 128, "128-sample buffer still fills fully");
+assert_eq(stream_samples_rendered(hs2), 128, "and the stream advanced by 128");
+
+# ================================================================
+# F6 (MEDIUM) -- the FFI size RTPC allocated a throwaway voice per call.
+# The rewrite must be observably identical to the rebuild it replaced.
+# ================================================================
+test_group("F6 ffi_voice_set_size matches a genuinely rebuilt voice, field for field");
+var hff = crvoice_with_vocal_effort(crvoice_with_f0_offset(crvoice_new(PRANI_SP_DRAGON), f64_from(40)), F64_ONE);
+prani_ffi_voice_set_size(hff, H_3_0);
+var href = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), H_3_0);
+assert_eq(CreatureVoice_species(hff), CreatureVoice_species(href), "species matches rebuild");
+assert_eq(CreatureVoice_f0_offset(hff), CreatureVoice_f0_offset(href), "f0_offset reset like rebuild");
+assert_eq(CreatureVoice_size_scale(hff), CreatureVoice_size_scale(href), "size_scale matches rebuild");
+assert_eq(CreatureVoice_vocal_effort(hff), CreatureVoice_vocal_effort(href), "vocal_effort reset like rebuild");
+assert_eq(crvoice_effective_f0(hff), crvoice_effective_f0(href), "effective_f0 identical");
+# and the handle is unchanged, which is the whole point of the C contract
+var hff2 = crvoice_new(PRANI_SP_CAT);
+prani_ffi_voice_set_size(hff2, H_3_0);
+assert_eq(CreatureVoice_species(hff2), PRANI_SP_CAT, "handle still addresses the same voice");
+
+# ================================================================
+# R1/R2 -- the two extracted loop shapes, including the edge every call site
+# relies on: f64_to saturates a NaN or overflowing sample count to i64::MIN, so
+# a non-positive count must append nothing rather than loop.
+# ================================================================
+test_group("R1/R2 extracted vec helpers, including the non-positive count edge");
+var hsrc = vec_new();
+vec_push(hsrc, f64_from(1)); vec_push(hsrc, f64_from(2)); vec_push(hsrc, f64_from(3));
+var hdst = vec_new();
+prani_vec_extend(hdst, hsrc);
+assert_eq(vec_len(hdst), 3, "extend appends every element");
+assert_eq(vec_get(hdst, 2), f64_from(3), "in order");
+prani_vec_extend(hdst, vec_new());
+assert_eq(vec_len(hdst), 3, "extending by an empty vec is a no-op");
+prani_vec_push_zeros(hdst, 4);
+assert_eq(vec_len(hdst), 7, "push_zeros appends n zeros");
+assert_eq(vec_get(hdst, 6), 0, "and they are zero");
+prani_vec_push_zeros(hdst, 0);
+assert_eq(vec_len(hdst), 7, "a zero count appends nothing");
+prani_vec_push_zeros(hdst, f64_to(f64_div(0, 0)));
+assert_eq(vec_len(hdst), 7, "f64_to(NaN) == i64::MIN appends nothing, does not loop");
+
+# ================================================================
+# O1/O2 -- allocation budget. Cyrius's allocator is a bump arena that never
+# frees, so an allocation on a per-frame or per-block path is retained for the
+# life of the process. These measure alloc_used() across a fixed number of calls
+# rather than asserting a wall-clock figure, because the win here is bytes, not
+# nanoseconds (the benchmarks moved less than the measurement noise).
+# ================================================================
+test_group("O1 the FFI size RTPC allocates nothing per call");
+var ho = crvoice_new(PRANI_SP_WOLF);
+prani_ffi_voice_set_size(ho, H_3_0);          # warm any first-call cost
+var ho_before = alloc_used();
+var hoi = 0;
+while (hoi < 1000) {
+    prani_ffi_voice_set_size(ho, H_3_0);
+    hoi = hoi + 1;
+}
+var ho_after = alloc_used();
+# Before the rewrite each call built a CreatureVoice AND a SpeciesParams and
+# dropped both, so 1000 calls retained a few hundred KB. It is now exactly 0.
+assert_eq(ho_after - ho_before, 0, "1000 RTPC calls retain 0 bytes");
+assert_eq(CreatureVoice_size_scale(ho), CreatureVoice_size_scale(
+    crvoice_with_size(crvoice_new(PRANI_SP_WOLF), H_3_0)), "and still does the job");
+
+test_group("O2 the block loop allocates one SynthesisOptions, not one per block");
+var hb = crvoice_new(PRANI_SP_WOLF);
+crvoice_vocalize(hb, PRANI_VOC_HOWL, H_SR, H_DUR_005);   # warm
+var hb_before = alloc_used();
+var hb_out = crvoice_vocalize(hb, PRANI_VOC_HOWL, H_SR, H_DUR_005);
+var hb_used = alloc_used() - hb_before;
+assert_eq(prani_is_err(hb_out), 0, "control: the call still succeeds");
+assert_eq(vec_len(hb_out), 2205, "control: and still returns 0.05 s of audio");
+# 0.05 s @ 44100 is 2205 samples over 882-sample blocks = 3 blocks. The bound
+# below is deliberately loose -- it is a REGRESSION guard on the shape of the
+# allocation (a fixed set plus the sample buffers), not a golden byte count.
+assert_eq(hb_used < 1000000, 1, "one 0.05 s call stays under 1 MB retained");
+
+var rc = assert_summary();
+syscall(60, rc);

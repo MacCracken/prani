@@ -96,10 +96,27 @@ struct CreatureTract {
 # with species-specific formants (F4/F5 estimated at 1.3x/1.5x F3), pre-builds
 # a naad bandpass for NoiseOnly species, seeds the rng from the species'
 # resonance seed. Rust only WARNS if set_formants_from_target errors, then
-# continues -- so the return is ignored here too.
+# continues -- so that return is ignored here too.
+#
+# Returns a CreatureTract ptr on success, or a NEGATIVE PRANI_ERR_* on failure.
+#
+# The error return is a DIVERGENCE FROM THE ORACLE, and a necessary one
+# (ADR-0001). `rust-old/src/tract.rs:CreatureTract::new` returns `Self`, because
+# the svara it was written against had an INFALLIBLE `VocalTract::new`. svara 3.x
+# hardened that constructor to return a checkable negative code instead of
+# panicking (svara's own ADR: "`svara_tract_new` errors where Rust panics"), and
+# it rejects every sample_rate <= 1000 Hz as well as negative and non-finite
+# ones. The port kept the oracle's shape and used the return AS A POINTER
+# regardless -- so `svara_tract_set_formants_from_target(-1, target)` dereferenced
+# -1 and the process took SIGSEGV. Checking it is mandatory, and the check cannot
+# be hidden inside this function because there is no valid tract to return.
 #must_use
 fn crtract_new(params, sample_rate) {
     var tract = svara_tract_new(sample_rate);
+    if (svara_is_err(tract) == 1) {
+        prani_log_error("prani: svara vocal tract rejected the sample rate");
+        return prani_from_svara(tract);
+    }
 
     var f0 = SpeciesParams_formant0(params);
     var f1 = SpeciesParams_formant1(params);
@@ -174,12 +191,21 @@ fn crtract_to_json(self, sb) {
     return 0;
 }
 
+# from_json_str(json) -- rebuild a CreatureTract from crtract_to_json output.
+# `json` is a NUL-terminated cstring. The opaque svara tract and naad filter are
+# reconstructed from the serialized SpeciesParams (see the DEVIATION note above),
+# then the saved rng / phase / dc_blocker state is restored over the rebuild.
+# Returns the CreatureTract ptr, or a NEGATIVE PRANI_ERR_INVALID_TRACT if `json`
+# is 0, does not parse, or names a sample rate svara rejects.
 fn crtract_from_json_str(json) {
+    if (json == 0) { return PRANI_ERR_INVALID_TRACT; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
+    if (root == 0) { return PRANI_ERR_INVALID_TRACT; }
     var params = species_params_from_node(bayan_json_v_obj_get(root, "params"));
     var sample_rate = bayan_json_v_int(bayan_json_v_obj_get(root, "sample_rate"));
     # rebuild the svara tract + naad filter + fresh rng/dc_blocker from params
     var self = crtract_new(params, sample_rate);
+    if (prani_is_err(self) == 1) { return self; }
     # then restore the serialized rng / phase / dc_blocker state over the rebuild
     CreatureTract_set_phase(self, bayan_json_v_int(bayan_json_v_obj_get(root, "phase")));
     var rng = CreatureTract_rng(self);
@@ -293,10 +319,21 @@ fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
 
 # synthesize_noise -- filtered broadband noise (snakes). naad-backend path:
 # the pre-built bandpass shapes white noise. The svara FormantFilter fallback
-# is dropped (naad-backend default -- noise_filter is always present here).
+# is dropped (naad-backend default).
+#
+# The filter is NOT unconditionally present, despite what this comment used to
+# claim: crtract_new builds it only for PRANI_APP_NOISE_ONLY and only keeps it
+# `if (prani_is_err(nf) == 0)`, leaving the field 0 when filter_biquad_new
+# rejects the species f0 for the sample rate. Passing that 0 to
+# filter_biquad_process_sample is a null dereference, so the invariant the
+# comment asserted is checked instead of assumed.
 fn crtract_synthesize_noise(self, num_samples) {
-    var output = vec_new();
     var filter = CreatureTract_noise_filter(self);
+    if (filter == 0) {
+        prani_log_error("prani: noise-only synthesis has no bandpass filter");
+        return PRANI_ERR_SYNTHESIS_FAILED;
+    }
+    var output = vec_new();
     var rng = CreatureTract_rng(self);
     var i = 0;
     while (i < num_samples) {

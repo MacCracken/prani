@@ -179,12 +179,27 @@ fn stream_fill_buffer(self, buffer) {
     var remaining = total - rendered;
     var to_render = vec_len(buffer);
     if (remaining < to_render) { to_render = remaining; }   # buffer.len().min(remaining)
+    # A zero-length buffer can never advance the stream; returning early keeps a
+    # caller's `while (stream_is_finished(s) == 0) { fill(s, buf); }` from
+    # spinning on tract setup it will only discard.
+    if (to_render <= 0) { return 0; }
 
     # ensure the tract is initialized (Option::get_or_insert_with)
     var tract = SynthStream_tract(self);
     if (tract == 0) {
         var params = species_params(crvoice_species(SynthStream_voice(self)));
         tract = crtract_new(params, SynthStream_sample_rate(self));
+        # crtract_new returns a negative PRANI_ERR_* when svara rejects the
+        # sample rate. Do NOT cache an error code as the tract -- a later call
+        # would see a non-zero `tract` field and use the code as a pointer.
+        # Retire the stream and report 0 written: the failure is a property of
+        # the stream's own sample_rate, so it will repeat on every call, and a
+        # caller draining `while (stream_is_finished(s) == 0)` has to be able to
+        # leave the loop.
+        if (prani_is_err(tract) == 1) {
+            SynthStream_set_samples_rendered(self, total);
+            return 0;
+        }
         SynthStream_set_tract(self, tract);
     }
 
@@ -221,6 +236,19 @@ fn stream_fill_buffer(self, buffer) {
         if (prani_is_err(block) == 0) { have_block = 1; }
     }
 
+    # A synthesis failure must not be reported as a successful fill. The oracle
+    # (rust-old/src/stream.rs:184) wraps only the COPY in `if let Ok(block)`, then
+    # unconditionally runs `self.samples_rendered += to_render; to_render` -- so a
+    # failed block returns "I wrote N samples" while the caller's buffer still
+    # holds whatever it held before, and that stale audio is played. DIVERGENCE
+    # (ADR-0003): report 0 written, and retire the stream so a caller draining
+    # `while (stream_is_finished(s) == 0)` terminates instead of spinning on a
+    # failure that will repeat every call.
+    if (have_block == 0) {
+        SynthStream_set_samples_rendered(self, total);
+        return 0;
+    }
+
     if (have_block == 1) {
         # apply spectral tilt to the block (in place over the full block vec).
         crtract_apply_spectral_tilt(block, SynthStream_spectral_tilt(self),
@@ -254,11 +282,7 @@ fn stream_next_block(self, block_size) {
     if (remaining < actual) { actual = remaining; }
     if (actual == 0) { return vec_new(); }
     var buf = vec_new();
-    var i = 0;
-    while (i < actual) {
-        vec_push(buf, 0);
-        i = i + 1;
-    }
+    prani_vec_push_zeros(buf, actual);
     stream_fill_buffer(self, buf);
     return buf;
 }

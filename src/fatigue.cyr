@@ -166,6 +166,12 @@ struct FatigueModifiers {
     jitter_scale: i64;
 }
 
+# modifiers_make(f0_scale, amplitude_scale, breathiness_add, jitter_add) --
+# construct a FatigueModifiers. The four fields are applied multiplicatively
+# (f0/amplitude) and additively (breathiness/jitter) to a voice's parameters;
+# an unfatigued creature is (1.0, 1.0, 0.0, 0.0). Callers normally get one from
+# fatigue_modifiers(), not from here -- this is the explicit constructor the
+# table and the tests build with.
 #must_use
 fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) {
     var m = alloc(sizeof(FatigueModifiers));

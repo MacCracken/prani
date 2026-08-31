@@ -5,16 +5,17 @@
 
 ## Version
 
-**2.0.2** — toolchain + dependency catch-up on top of the completed port. The
-Rust line shipped through 1.1.0; the language migration was a major break
-(2.0.0); 2.0.1 restored logging (sakshi) + serde (`#derive(Serialize)`+bayan);
-2.0.2 moves the Cyrius pin 124 releases forward and every dependency to its
-current tag, absorbing two breaking upstream renames (`FILTER_BANDPASS` →
-`NAAD_FILTER_BANDPASS`, `bayan_json_v_parse_str` → `bayan_json_v_parse_buf`).
-All 16 modules (15 ported + `logging.cyr`) remain cross-checked
-function-for-function against the frozen 3,527-line Rust oracle at `rust-old/`.
-**717 parity assertions green across 16 suites** — unchanged from 2.0.1,
-assertion for assertion. Per-module parity ledger:
+**2.0.3** — the P(-1) scaffold-hardening + security sweep, on top of the
+completed port. 1.1.0 was the last Rust release; 2.0.0 was the language port;
+2.0.1 restored logging + serde; 2.0.2 was the toolchain and dependency catch-up;
+2.0.3 audits the whole tree and repairs what it found. **11 findings, 8 repaired,
+3 accepted and documented** — report in
+[`../audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md), three oracle
+divergences in [`../adr/`](../adr/). Headline: `crvoice_vocalize` **segfaulted**
+on any sample rate svara rejects (<= 1000 Hz), because svara 3.x turned an
+infallible constructor into a checkable code and the port kept using the return
+as a pointer. **770 assertions across 17 suites**, and `cyrius audit` **exits 0
+for the first time**. Per-module parity ledger:
 [`port-audit.md`](port-audit.md).
 
 ## Toolchain
@@ -84,6 +85,15 @@ each integrated and independently re-verified in the main tree against `rust-old
 
 ## Tests
 
+`cyrius audit` is green end to end as of 2.0.3: fmt · lint · docs · tests · bench,
+**exit 0**. 17 suites / **770 assertions**.
+
+`tests/hardening.tcyr` (53 assertions, added 2.0.3) is the P(-1) sweep's
+regression suite — one group per repaired finding, each written so it FAILS on
+the 2.0.2 tree (the memory-safety groups crash the process there). Every group
+carries controls so it cannot pass vacuously. It also holds the two allocation
+budgets, measured with `alloc_used()` rather than asserted as wall-clock.
+
 One `tests/<module>.tcyr` per module, cross-checked against the Rust oracle
 serde roundtrip tests INCLUDED (serde restored in 2.0.1 via `#derive(Serialize)`
 +bayan, f64 fields as lossless i64 bit patterns); Display-string tests dropped.
@@ -97,12 +107,20 @@ svara-independent math asserted at exact f64 bit patterns; full synthesis paths
 
 ## In flight
 
-Nothing — the port is complete and current on toolchain + dependencies.
-Follow-ups:
+Nothing — the port is complete, current on toolchain and dependencies, and
+audited. Follow-ups, in the order they are worth doing:
+
+- **Unchecked allocation (audit F9).** `alloc()` returns 0 on exhaustion and
+  prani stores through it at 27 sites; `vec_push` returns -1 and no call site
+  checks. The fix is an error return on every constructor, which is an API
+  decision rather than a repair — deliberately not bundled into 2.0.3.
+- **Input-range validation (deferred by ADR-0002).** The deserializers now reject
+  input that does not PARSE; a document that parses with nonsense values is still
+  accepted. Same decision covers audit F10 (chorus length overflow at absurd
+  `timing_spread`) and F11 (NaN passing through `f64_clamp`).
+- **Two duplications waiting for a third instance**, per CLAUDE.md's rule:
+  `crtract_synthesize_stridulatory`'s bee branch is byte-identical to
+  `crtract_synthesize_vibratile`, and the `boundary_boost` block is duplicated
+  verbatim between `voice.cyr` and `stream.cyr`.
 - Broaden hot-path benchmarks + capture a Rust-vs-Cyrius comparison.
 - Consumer-green (kiran/joshua) once they port up the stack.
-- Pre-existing, unrelated to 2.0.2: 7 `cyrius lint` line-length warnings in
-  `src/vocalization.cyr` (lines 100-106, the aligned `prani_intent_modifiers`
-  dispatch table — `cyrius lint` itself still exits 0), and 10 undocumented
-  public fns on `cyrius audit`'s docs gate, which is the one thing making
-  `cyrius audit` exit 1. Both carried forward unchanged from 2.0.1.

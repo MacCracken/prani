@@ -115,17 +115,25 @@ fn prani_ffi_voice_set_effort(handle, effort) {
 
 # voice_set_size(handle, size) -- individual size scale. The oracle rebuilds the
 # voice (`*voice = CreatureVoice::new(species).with_size(size)`) because size
-# affects several params. Cyrius has no move/assign of a whole struct, so build a
-# FRESH voice with crvoice_with_size(crvoice_new(species), size) and copy its five
-# fields into the existing handle -- the handle stays valid (same ptr).
+# affects several params.
+#
+# ALLOCATION: this is an RTPC setter -- a host may call it every frame, per
+# creature. It used to build a FRESH CreatureVoice (and, through crvoice_new, a
+# fresh SpeciesParams) on every call just to copy five fields out of it and drop
+# the shell. Cyrius's allocator is a bump arena that never frees, so each call
+# permanently retained both. Rebuilding is also unnecessary: `crvoice_new`
+# restores species defaults and `crvoice_with_size` then sets size_scale, which
+# is exactly resetting the four individual fields in place. The observable
+# result is identical -- proven by tests/hardening.tcyr comparing this against a
+# genuinely rebuilt voice field for field -- with no allocation at all.
 fn prani_ffi_voice_set_size(handle, size) {
     if (handle != 0) {
-        var fresh = crvoice_with_size(crvoice_new(crvoice_species(handle)), size);
-        CreatureVoice_set_species(handle, CreatureVoice_species(fresh));
-        CreatureVoice_set_params(handle, CreatureVoice_params(fresh));
-        CreatureVoice_set_f0_offset(handle, CreatureVoice_f0_offset(fresh));
-        CreatureVoice_set_size_scale(handle, CreatureVoice_size_scale(fresh));
-        CreatureVoice_set_vocal_effort(handle, CreatureVoice_vocal_effort(fresh));
+        crvoice_reset_individual(handle);
+        # crvoice_with_size is #must_use because it is a chaining builder; here
+        # it mutates `handle` in place and hands the same pointer back, so the
+        # return is the input and binding it is the whole use.
+        var sized = crvoice_with_size(handle, size);
+        CreatureVoice_set_size_scale(handle, CreatureVoice_size_scale(sized));
     }
     return 0;
 }

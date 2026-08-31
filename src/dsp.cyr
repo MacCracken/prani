@@ -69,6 +69,40 @@ fn dcblocker_reset(b) {
     DcBlocker_set_y_prev(b, 0);
 }
 
+# ================================================================
+# Shared vec loop shapes. Both existed verbatim at three call sites each before
+# being extracted here, which is the bar CLAUDE.md sets ("wait for the third
+# instance"). Neither changes behaviour -- they are the same loops, named.
+# ================================================================
+
+# prani_vec_extend(dst, src) -- append every element of `src` to `dst`.
+# Was open-coded in sequence_call_bout_synthesize, sequence_call_phrase_synthesize
+# and crvoice_vocalize_with_intent's block accumulation.
+fn prani_vec_extend(dst, src) {
+    var n = vec_len(src);
+    var i = 0;
+    while (i < n) {
+        vec_push(dst, vec_get(src, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# prani_vec_push_zeros(v, n) -- append `n` zero samples (inter-call silence, or a
+# zeroed mix/render buffer). A non-positive `n` appends nothing, which is what
+# every call site wants: gap counts come from f64_to(seconds * rate), and
+# f64_to saturates a NaN or overflowing product to i64::MIN.
+# Was open-coded in the bout gap, the phrase gap, the chorus mix init and
+# stream_next_block.
+fn prani_vec_push_zeros(v, n) {
+    var i = 0;
+    while (i < n) {
+        vec_push(v, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
 # map_naad_error -- ports map_naad_error (naad-backend gated). Rust emitted a
 # `tracing::error!(... "naad backend error")` and returned
 # PraniError::SynthesisFailed; the Cyrius port wires the diagnostic to sakshi

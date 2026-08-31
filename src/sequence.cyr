@@ -36,6 +36,10 @@ struct CallElement {
     gap: i64;
 }
 
+# call_element_new(vocalization, duration, gap) -- one element of a CallPhrase:
+# which vocalization to utter, for how long, and how much silence follows it.
+# `duration` and `gap` are f64 SECONDS held in i64 slots as exact bit patterns
+# (see the struct comment). Returns the CallElement ptr.
 #must_use
 fn sequence_call_element_new(vocalization, duration, gap) {
     var e = alloc(sizeof(CallElement));
@@ -65,6 +69,11 @@ struct CallBout {
     intent: i64;
 }
 
+# call_bout_new(vocalization, count, call_duration, interval, intent) -- a bout
+# is the same vocalization repeated `count` times with `interval` seconds of
+# silence between calls (not after the last). `call_duration` and `interval` are
+# f64 seconds as exact bit patterns. Returns the CallBout ptr; render it with
+# sequence_call_bout_synthesize.
 #must_use
 fn sequence_call_bout_new(vocalization, count, call_duration, interval, intent) {
     var b = alloc(sizeof(CallBout));
@@ -88,13 +97,8 @@ fn sequence_call_bout_synthesize(self, voice, sample_rate) {
         var call = crvoice_vocalize_with_intent(voice, CallBout_vocalization(self),
           CallBout_intent(self), sample_rate, CallBout_call_duration(self));
         if (prani_is_err(call) == 1) { return call; }
-        var m = vec_len(call);
-        var k = 0;
-        while (k < m) { vec_push(output, vec_get(call, k)); k = k + 1; }
-        if (i < (count - 1)) {
-            var g = 0;
-            while (g < gap_samples) { vec_push(output, 0); g = g + 1; }
-        }
+        prani_vec_extend(output, call);
+        if (i < (count - 1)) { prani_vec_push_zeros(output, gap_samples); }
         i = i + 1;
     }
     return output;
@@ -108,6 +112,10 @@ fn sequence_call_bout_synthesize(self, voice, sample_rate) {
 #derive(accessors)
 struct CallPhrase { elements; intent; }
 
+# call_phrase_new(elements, intent) -- a phrase is an ordered sequence of
+# DIFFERENT vocalizations, each with its own duration and trailing gap.
+# `elements` is a vec of CallElement pointers; `intent` applies to all of them.
+# Returns the CallPhrase ptr; render it with sequence_call_phrase_synthesize.
 #must_use
 fn sequence_call_phrase_new(elements, intent) {
     var p = alloc(sizeof(CallPhrase));
@@ -138,8 +146,15 @@ fn sequence_call_phrase_to_json(self, sb) {
     return 0;
 }
 
+# call_phrase_from_json_str(json) -- rebuild a CallPhrase from
+# sequence_call_phrase_to_json output. `json` is a NUL-terminated cstring; each
+# array element is read field-by-field straight from the parsed node.
+# Returns the CallPhrase ptr, or a NEGATIVE PRANI_ERR_INVALID_VOCALIZATION if
+# `json` is 0 or does not parse.
 fn sequence_call_phrase_from_json_str(json) {
+    if (json == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
+    if (root == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var intent = bayan_json_v_int(bayan_json_v_obj_get(root, "intent"));
     var elems_val = bayan_json_v_obj_get(root, "elements");
     var n = bayan_json_v_arr_len(elems_val);
@@ -171,12 +186,8 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
         var call = crvoice_vocalize_with_intent(voice, CallElement_vocalization(element),
           CallPhrase_intent(self), sample_rate, CallElement_duration(element));
         if (prani_is_err(call) == 1) { return call; }
-        var m = vec_len(call);
-        var k = 0;
-        while (k < m) { vec_push(output, vec_get(call, k)); k = k + 1; }
-        var gap_samples = f64_to(f64_mul(CallElement_gap(element), sample_rate));
-        var g = 0;
-        while (g < gap_samples) { vec_push(output, 0); g = g + 1; }
+        prani_vec_extend(output, call);
+        prani_vec_push_zeros(output, f64_to(f64_mul(CallElement_gap(element), sample_rate)));
         i = i + 1;
     }
     return output;
@@ -198,8 +209,7 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
 
     # mix = vec of total_len zeros
     var mix = vec_new();
-    var z = 0;
-    while (z < total_len) { vec_push(mix, 0); z = z + 1; }
+    prani_vec_push_zeros(mix, total_len);
 
     var rng = prani_rng_new(voice_count * PRANI_CHORUS_PRIME);
 

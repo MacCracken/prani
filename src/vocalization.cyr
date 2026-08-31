@@ -82,6 +82,12 @@ struct IntentModifiers {
     urgency: i64;
 }
 
+# intent_modifiers_make(pitch_scale, urgency, duration_scale, amplitude_scale)
+# -- construct an IntentModifiers. Ports the Rust struct literal in
+# `CallIntent::modifiers`. Values are multiplicative against the base call
+# (urgency additionally drives jitter/shimmer perturbation in the tract), and a
+# neutral set is (1.0, 1.0, 1.0, 0.0). prani_intent_modifiers() is the mapping
+# from an intent; this is the constructor it and the tests build with.
 #must_use
 fn prani_intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urgency) {
     var m = alloc(sizeof(IntentModifiers));
@@ -97,12 +103,26 @@ fn prani_intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urg
 # like 1.0/1.0/1.0/0.0), preserving totality (the Rust enum is #[non_exhaustive]).
 #must_use
 fn prani_intent_modifiers(intent) {
-    if (intent == PRANI_INTENT_ALARM)       { return prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_7, PR_F_0_9); }
-    if (intent == PRANI_INTENT_TERRITORIAL) { return prani_intent_modifiers_make(PR_F_0_9, PR_F_1_3, PR_F_1_5, PR_F_0_5); }
-    if (intent == PRANI_INTENT_MATING)      { return prani_intent_modifiers_make(PR_F_1_1, PR_F_1_0, PR_F_2_0, PR_F_0_2); }
-    if (intent == PRANI_INTENT_DISTRESS)    { return prani_intent_modifiers_make(PR_F_1_5, PR_F_1_4, PR_F_0_8, PR_F_1_0); }
-    if (intent == PRANI_INTENT_IDLE)        { return prani_intent_modifiers_make(PR_F_1_0, PR_F_0_5, PR_F_1_0, PR_F_0_0); }
-    if (intent == PRANI_INTENT_THREAT)      { return prani_intent_modifiers_make(PR_F_0_7, PR_F_1_4, PR_F_1_2, PR_F_0_7); }
-    if (intent == PRANI_INTENT_SOCIAL)      { return prani_intent_modifiers_make(PR_F_1_0, PR_F_0_8, PR_F_1_0, PR_F_0_3); }
+    if (intent == PRANI_INTENT_ALARM) {
+        return prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_7, PR_F_0_9);
+    }
+    if (intent == PRANI_INTENT_TERRITORIAL) {
+        return prani_intent_modifiers_make(PR_F_0_9, PR_F_1_3, PR_F_1_5, PR_F_0_5);
+    }
+    if (intent == PRANI_INTENT_MATING) {
+        return prani_intent_modifiers_make(PR_F_1_1, PR_F_1_0, PR_F_2_0, PR_F_0_2);
+    }
+    if (intent == PRANI_INTENT_DISTRESS) {
+        return prani_intent_modifiers_make(PR_F_1_5, PR_F_1_4, PR_F_0_8, PR_F_1_0);
+    }
+    if (intent == PRANI_INTENT_IDLE) {
+        return prani_intent_modifiers_make(PR_F_1_0, PR_F_0_5, PR_F_1_0, PR_F_0_0);
+    }
+    if (intent == PRANI_INTENT_THREAT) {
+        return prani_intent_modifiers_make(PR_F_0_7, PR_F_1_4, PR_F_1_2, PR_F_0_7);
+    }
+    if (intent == PRANI_INTENT_SOCIAL) {
+        return prani_intent_modifiers_make(PR_F_1_0, PR_F_0_8, PR_F_1_0, PR_F_0_3);
+    }
     return prani_intent_modifiers_make(PR_F_1_0, PR_F_1_0, PR_F_1_0, PR_F_0_0);
 }

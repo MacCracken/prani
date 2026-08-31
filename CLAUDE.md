@@ -68,6 +68,7 @@ cyrius test                              # run tests/*.tcyr
 ## Documentation
 
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records (*why X over Y?*)
+- [`docs/audit/`](docs/audit/) — P(-1) sweep reports (`YYYY-MM-DD-audit.md`): findings with severity, file, line, and disposition
 - [`docs/architecture/`](docs/architecture/) — Non-obvious constraints
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples

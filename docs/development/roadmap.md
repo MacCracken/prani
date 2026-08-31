@@ -11,7 +11,7 @@
 - [x] `dist/prani.cyr` bundle assembled + smoke-linked (`src/main.cyr`)
 - [x] CHANGELOG complete for the 2.0.0 port
 - [ ] At least one downstream consumer green (kiran/joshua — pending their port)
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`) — deferred to a work-loop cycle
+- [x] Security audit pass — done in 2.0.3, [`../audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)
 
 ## Milestones
 
@@ -32,9 +32,14 @@
 ### M2 — Hardening & consumer-green (2.x)
 
 - Broaden hot-path benchmarks; capture a like-for-like Rust-vs-Cyrius comparison.
-- Security/deep-review work-loop pass (correctness / memory-safety / performance /
-  refactor, adversarially verified vs `rust-old/`) → `docs/audit/`.
-- Pin dep bundles for reproducible release builds; wire CI.
+- [x] Security/deep-review work-loop pass (correctness / memory-safety /
+  performance / refactor, cross-checked against `rust-old/`) →
+  [`../audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md). 11 findings,
+  8 repaired in 2.0.3, 3 accepted; three oracle divergences in `docs/adr/`.
+- Close the three accepted findings: unchecked `alloc()`/`vec_push` returns (F9),
+  input-range validation beyond parse success (F10/F11, deferred by ADR-0002).
+- Pin dep bundles for reproducible release builds; wire CI. (Pins current as
+  of 2.0.2; CI derives the toolchain from `cyrius.cyml`.)
 - Consumer-green: kiran (game engine) + joshua (game manager) once they port up
   the stack.
 

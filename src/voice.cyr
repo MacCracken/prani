@@ -107,6 +107,22 @@ fn crvoice_new(species) {
     return self;
 }
 
+# reset_individual(self) -- restore the species defaults for the four individual
+# fields, in place. Exactly what `crvoice_new(crvoice_species(self))` produces,
+# without allocating a replacement voice: species is unchanged, params are reset
+# to the species table, and f0_offset / size_scale / vocal_effort go back to
+# 0 / 1.0 / 0.5. Used by the FFI size RTPC (prani_ffi_voice_set_size), which the
+# host may call every frame and which must therefore not allocate.
+fn crvoice_reset_individual(self) {
+    # species_params_INTO, not species_params: the voice already owns a
+    # SpeciesParams, and this path allocates nothing (see species_params_into).
+    species_params_into(CreatureVoice_params(self), CreatureVoice_species(self));
+    CreatureVoice_set_f0_offset(self, 0);
+    CreatureVoice_set_size_scale(self, F64_ONE);
+    CreatureVoice_set_vocal_effort(self, PR_V_0_5);
+    return self;
+}
+
 # CreatureVoice serde -- restores the Rust `#[derive(Serialize, Deserialize)]`.
 # f64 scalars (f0_offset/size_scale/vocal_effort) emitted as exact i64 BIT
 # PATTERNS (lossless); `params` nested as a sub-object via the auto
@@ -127,8 +143,16 @@ fn crvoice_to_json(self, sb) {
     return 0;
 }
 
+# from_json_str(json) -- rebuild a CreatureVoice from crvoice_to_json output.
+# `json` is a NUL-terminated cstring. Scalars are read back as exact i64 bit
+# patterns and `params` is rebuilt via species_params_from_node, so individual
+# breathiness/jitter/shimmer overrides survive the roundtrip.
+# Returns the CreatureVoice ptr, or a NEGATIVE PRANI_ERR_INVALID_SPECIES if
+# `json` is 0 or does not parse. Check with prani_is_err before using it.
 fn crvoice_from_json_str(json) {
+    if (json == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
+    if (root == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var self = alloc(sizeof(CreatureVoice));
     CreatureVoice_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));
     CreatureVoice_set_f0_offset(self, bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset")));
@@ -711,9 +735,11 @@ fn crvoice_apply_vocalization_envelope(samples, voc, sample_rate) {
 # synthesize_cat_purr(self, sample_rate, num_samples, modifiers) -- special
 # 25-30 Hz laryngeal-muscle-cycling purr path. purr_f0 = clamp(27/size_scale,
 # 20, 35). Amplitude = amplitude_scale * effort_amp; then the purr envelope.
-# Returns a vec ptr (crtract_synthesize_purr never fails).
+# Returns a vec ptr on success, or a NEGATIVE PRANI_ERR_* if crtract_new rejects
+# the sample rate (crtract_synthesize_purr itself never fails).
 fn crvoice_synthesize_cat_purr(self, sample_rate, num_samples, modifiers) {
     var tract = crtract_new(CreatureVoice_params(self), sample_rate);
+    if (prani_is_err(tract) == 1) { return tract; }
     # purr f0 25-30 Hz, size-scaled; larger cat = slightly lower purr.
     var purr_f0 = f64_clamp(f64_div(f64_from(27), CreatureVoice_size_scale(self)),
       f64_from(20), f64_from(35));
@@ -784,14 +810,22 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
       f64_clamp(f64_add(SpeciesParams_breathiness(effort_params), effort_breathiness_delta), 0, F64_ONE));
 
     var tract = crtract_new(effort_params, sample_rate);
+    if (prani_is_err(tract) == 1) { return tract; }
 
     # formant transition contour (0 == None)
     var formant_contour = crvoice_formant_transition_contour(voc, species);
 
     # vocalization-specific pitch contour
     var contour = crvoice_pitch_contour(voc, f0);
-    # block_size = (sample_rate * 0.02) as usize -- 20ms blocks
+    # block_size = (sample_rate * 0.02) as usize -- 20ms blocks.
+    # DIVERGENCE (ADR-0001): floored at 1. The oracle (voice.rs:227-231) computes
+    # `(sample_rate * 0.02) as usize`, which is 0 for any sample_rate < 50, and
+    # then loops `rendered += block_size.min(num_samples - rendered)` -- an
+    # increment of 0, so the loop never terminates. Reproduced: sample_rate=10,
+    # duration=1.0 gives num_samples=10, block_size=0, and the call hangs while
+    # allocating a SynthesisOptions per iteration.
     var block_size = f64_to(f64_mul(sample_rate, PR_V_0_02));
+    if (block_size < 1) { block_size = 1; }
     var samples = vec_new();
 
     # syringeal source-filter coupling precomputes (species F1..F3 / B1..B3)
@@ -806,6 +840,9 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
     var num_samples_max = num_samples;
     if (num_samples_max < 1) { num_samples_max = 1; }   # num_samples.max(1)
+
+    # one reusable SynthesisOptions for the whole block loop (see below)
+    var options = crtract_options_default();
 
     var rendered = 0;
     while (rendered < num_samples) {
@@ -856,16 +893,16 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
         }
         var perturbation_scale = f64_add(boundary_boost, IntentModifiers_urgency(modifiers));
 
-        var options = crtract_options_new(0, perturbation_scale);
+        # `options` is allocated ONCE above the loop and re-armed per block.
+        # It used to be crtract_options_new(...) per iteration -- one permanently
+        # retained SynthesisOptions per 20 ms of audio under a bump allocator
+        # that never frees (50/second, 2,500 for a 50-second call). Nothing reads
+        # it after crtract_synthesize returns, so reuse is safe.
+        SynthesisOptions_set_subharmonic_amp(options, 0);
+        SynthesisOptions_set_perturbation_scale(options, perturbation_scale);
         var block = crtract_synthesize(tract, block_f0, block_len, options);
         if (prani_is_err(block) == 1) { return block; }
-        # samples.extend_from_slice(&block)
-        var bn = vec_len(block);
-        var bi = 0;
-        while (bi < bn) {
-            vec_push(samples, vec_get(block, bi));
-            bi = bi + 1;
-        }
+        prani_vec_extend(samples, block);   # samples.extend_from_slice(&block)
         rendered = rendered + block_len;
     }
 

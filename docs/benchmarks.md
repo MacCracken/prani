@@ -9,18 +9,38 @@ cyrius bench tests/prani.bcyr
 Scalar reference numbers (x86_64 Linux, cyrius 6.5.36, single core). These are
 the inner-loop / per-call functions consumers hit; hosts own any SIMD dispatch.
 
-| Benchmark | Time | vs 2.0.0 | Notes |
-|---|---|---|---|
-| `dcblocker_process` | **20 ns/sample** | 19 ns | Single-pole DC blocker applied to every synthesis buffer. |
-| `prani_rng_next_f32` | **14 ns/sample** | 15 ns | PCG32 draw (aspiration / jitter / shimmer noise). |
-| `emotion_evaluate` | **70 ns/frame** | 83 ns | 2D valence/arousal → vocalization + intent + effort + pitch + breathiness (per-frame game-AI call). |
-| `crvoice_vocalize` (Wolf howl, 0.05 s @ 8 kHz = 400 samples) | **214 µs/call** (~0.53 µs/sample) | 227 µs | Full synthesis through the whole svara/naad stack (glottal source → vocal tract → contour → post-processing). **≈ 234× realtime.** |
+| Benchmark | Time | 2.0.2 | 2.0.0 | Notes |
+|---|---|---|---|---|
+| `dcblocker_process` | **19 ns/sample** | 20 ns | 19 ns | Single-pole DC blocker applied to every synthesis buffer. |
+| `prani_rng_next_f32` | **14 ns/sample** | 14 ns | 15 ns | PCG32 draw (aspiration / jitter / shimmer noise). |
+| `emotion_evaluate` | **69 ns/frame** | 70 ns | 83 ns | 2D valence/arousal → vocalization + intent + effort + pitch + breathiness (per-frame game-AI call). |
+| `crvoice_vocalize` (Wolf howl, 0.05 s @ 8 kHz = 400 samples) | **211 µs/call** (~0.53 µs/sample) | 214 µs | 227 µs | Full synthesis through the whole svara/naad stack (glottal source → vocal tract → contour → post-processing). **≈ 236× realtime.** |
 
-The `vs 2.0.0` column is the same harness on the same host under cyrius 6.3.45.
-`emotion_evaluate` (~16%) and the full synthesis path (~6%) came out ahead on the
-124-release toolchain bump; the two per-sample figures moved by one nanosecond in
-opposite directions, which is the resolution of the measurement rather than a
-result.
+**2.0.3 makes no performance claim.** Every row is within noise of 2.0.2 (three
+back-to-back runs of the same binary spread 211.3–211.8 µs on the synthesis row);
+its optimization work is measured in bytes retained, not nanoseconds — see the
+allocation budget below. The 2.0.0 column is the same harness on the same host
+under cyrius 6.3.45: `emotion_evaluate` (~16%) and the full synthesis path (~6%)
+came out ahead on the 124-release toolchain bump, while the two per-sample
+figures have only ever moved by one nanosecond in either direction, which is the
+resolution of the measurement rather than a result.
+
+## Allocation budget
+
+Cyrius's allocator is a bump arena that never frees, so an allocation on a
+per-frame or per-block path is retained for the life of the process. These are
+measured with `alloc_used()` in `tests/hardening.tcyr`, not calculated, and are
+asserted on every run:
+
+| Path | 2.0.2 | 2.0.3 |
+|---|---|---|
+| `prani_ffi_voice_set_size` — a real-time parameter a host may call every frame, per creature | **168 B retained per call** (`sizeof(CreatureVoice)` 40 + `sizeof(SpeciesParams)` 128; 168,000 B over 1000 calls) | **0 B** |
+| `crvoice_vocalize` block loop | one `SynthesisOptions` per 20 ms of audio, i.e. 50 per second, each retained | one per call |
+
+At 60 fps across 100 creatures the first row was about 1 MB/second retained
+permanently. svara's `streaming.cyr` states the rule it broke: *an allocation
+inside an audio callback is not a leak that grows slowly, it is one that ends the
+process.*
 
 ## Method
 

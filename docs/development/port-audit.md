@@ -159,8 +159,19 @@ only Display-string tests dropped). `dist/prani.cyr` assembled (collision-audite
 to zero across all fns/structs/consts), `src/main.cyr` smoke links + runs the
 bundle, hot-path benchmarks captured. VERSION 1.1.0 → 2.0.0 (port) → 2.0.1
 (logging via sakshi + serde via `#derive(Serialize)`+bayan, lossless i64 bit
-patterns) → **2.0.2** (cyrius 6.5.36 + current dependency tags; two breaking
-upstream renames absorbed, all 717 assertions unchanged).
+patterns) → 2.0.2 (cyrius 6.5.36 + current dependency tags; two breaking
+upstream renames absorbed, all 717 assertions unchanged) → **2.0.3** (P(-1)
+sweep: 11 findings, 8 repaired — including a SIGSEGV on the primary synthesis
+API — 717 → 770 assertions, `cyrius audit` exit 0).
+
+**A third defect category the parity bar cannot see.** 2.0.3's CRITICAL was
+neither an inherited oracle defect nor a transcription error: svara 3.x replaced
+an infallible constructor with a checkable error code, and the port went on using
+the return value as a pointer. Parity against `rust-old/` cannot catch this,
+because the oracle has no such failure to compare against, and a symbol-level
+dependency review cannot either, because the name and arity did not change — only
+the MEANING of the return. When bumping a dependency, ask what each consumed
+return value now means, not just what it is called.
 
 ### Parity method
 

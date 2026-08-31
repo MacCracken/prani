@@ -180,7 +180,19 @@ struct SpeciesParams {
 fn species_params_make(apparatus, f0_min, f0_max, f0_default, tract_scale,
   formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
   breathiness, jitter, shimmer, spectral_tilt, resonance_seed) {
-    var p = alloc(sizeof(SpeciesParams));
+    return species_params_make_into(alloc(sizeof(SpeciesParams)),
+      apparatus, f0_min, f0_max, f0_default, tract_scale,
+      formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
+      breathiness, jitter, shimmer, spectral_tilt, resonance_seed);
+}
+
+# species_params_make_into(p, ...) -- the field writes, into a SpeciesParams the
+# caller already owns. Split out of species_params_make so the per-species table
+# below can serve both an allocating and a non-allocating entry point from ONE
+# copy of the table (see species_params / species_params_into). Returns `p`.
+fn species_params_make_into(p, apparatus, f0_min, f0_max, f0_default, tract_scale,
+  formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
+  breathiness, jitter, shimmer, spectral_tilt, resonance_seed) {
     SpeciesParams_set_apparatus(p, apparatus);
     SpeciesParams_set_f0_min(p, f0_min);
     SpeciesParams_set_f0_max(p, f0_max);
@@ -200,90 +212,103 @@ fn species_params_make(apparatus, f0_min, f0_max, f0_default, tract_scale,
     return p;
 }
 
-# species_params -- Species::params(). The big per-species lookup, transcribed
-# verbatim from the oracle match arms. Integer params via f64_from; non-integer
-# via the hex constants above; negative integer tilts via f64_neg(f64_from(n)).
+# species_params -- Species::params(). Allocates a SpeciesParams and fills it
+# from the per-species table. The table itself lives in species_params_into.
 #must_use
 fn species_params(species) {
+    return species_params_into(alloc(sizeof(SpeciesParams)), species);
+}
+
+# species_params_into(dst, species) -- the big per-species lookup, transcribed
+# verbatim from the oracle match arms, written into a SpeciesParams the caller
+# already owns. Integer params via f64_from; non-integer via the hex constants
+# above; negative integer tilts via f64_neg(f64_from(n)). Returns `dst`.
+#
+# This is the ONLY copy of the table; species_params is the allocating wrapper
+# over it. The non-allocating form exists for crvoice_reset_individual, which the
+# FFI size RTPC calls and which a host may call every frame -- under a bump
+# allocator that never frees, a 128-byte SpeciesParams per call is retained for
+# the life of the process.
+fn species_params_into(dst, species) {
     if (species == PRANI_SP_WOLF) {
-        return species_params_make(PRANI_APP_LARYNGEAL,
+        return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
           f64_from(150), f64_from(1200), f64_from(400), PR_TS_1_2,
           f64_from(420), f64_from(1250), f64_from(2100),
           f64_from(100), f64_from(120), f64_from(150),
           PR_BR_0_05, PR_JI_0_015, PR_SH_0_03, f64_neg(f64_from(3)), PR_SEED_WOLF);
     }
     if (species == PRANI_SP_DOG) {
-        return species_params_make(PRANI_APP_LARYNGEAL,
+        return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
           f64_from(100), f64_from(2000), f64_from(300), PR_TS_0_9,
           f64_from(550), f64_from(1650), f64_from(2750),
           f64_from(100), f64_from(130), f64_from(160),
           PR_BR_0_03, PR_JI_0_012, PR_SH_0_025, f64_neg(f64_from(2)), PR_SEED_DOG);
     }
     if (species == PRANI_SP_CAT) {
-        return species_params_make(PRANI_APP_LARYNGEAL,
+        return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
           f64_from(200), f64_from(1000), f64_from(500), PR_TS_0_5,
           f64_from(850), f64_from(2500), f64_from(4200),
           f64_from(120), f64_from(150), f64_from(200),
           PR_BR_0_08, PR_JI_0_02, PR_SH_0_04, f64_neg(f64_from(2)), PR_SEED_CAT);
     }
     if (species == PRANI_SP_LION) {
-        return species_params_make(PRANI_APP_LARYNGEAL,
+        return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
           f64_from(40), f64_from(200), f64_from(80), f64_from(2),
           f64_from(250), f64_from(750), f64_from(1250),
           f64_from(80), f64_from(100), f64_from(130),
           PR_BR_0_1, PR_JI_0_025, PR_SH_0_05, f64_neg(f64_from(6)), PR_SEED_LION);
     }
     if (species == PRANI_SP_SONGBIRD) {
-        return species_params_make(PRANI_APP_SYRINGEAL,
+        return species_params_make_into(dst, PRANI_APP_SYRINGEAL,
           f64_from(1000), f64_from(8000), f64_from(3000), PR_TS_0_15,
           f64_from(3500), f64_from(7000), f64_from(10500),
           f64_from(500), f64_from(800), f64_from(1100),
           PR_BR_0_02, PR_JI_0_005, PR_SH_0_01, f64_neg(f64_from(1)), PR_SEED_SONGBIRD);
     }
     if (species == PRANI_SP_CROW) {
-        return species_params_make(PRANI_APP_SYRINGEAL,
+        return species_params_make_into(dst, PRANI_APP_SYRINGEAL,
           f64_from(500), f64_from(2000), f64_from(800), PR_TS_0_3,
           f64_from(1400), f64_from(4200), f64_from(7000),
           f64_from(350), f64_from(500), f64_from(700),
           PR_BR_0_18, PR_JI_0_03, PR_SH_0_05, f64_neg(f64_from(2)), PR_SEED_CROW);
     }
     if (species == PRANI_SP_RAPTOR) {
-        return species_params_make(PRANI_APP_SYRINGEAL,
+        return species_params_make_into(dst, PRANI_APP_SYRINGEAL,
           f64_from(2000), f64_from(4000), f64_from(2500), PR_TS_0_2,
           f64_from(2100), f64_from(5500), f64_from(8500),
           f64_from(400), f64_from(600), f64_from(800),
           PR_BR_0_1, PR_JI_0_01, PR_SH_0_02, PR_TILT_NEG_1_5, PR_SEED_RAPTOR);
     }
     if (species == PRANI_SP_SNAKE) {
-        return species_params_make(PRANI_APP_NOISE_ONLY,
+        return species_params_make_into(dst, PRANI_APP_NOISE_ONLY,
           f64_from(0), f64_from(0), f64_from(0), PR_TS_0_4,
           f64_from(2500), f64_from(5000), f64_from(8000),
           f64_from(1500), f64_from(2000), f64_from(2500),
           f64_from(1), f64_from(0), f64_from(0), f64_from(0), PR_SEED_SNAKE);
     }
     if (species == PRANI_SP_CROCODILIAN) {
-        return species_params_make(PRANI_APP_LARYNGEAL,
+        return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
           f64_from(30), f64_from(200), f64_from(60), PR_TS_2_5,
           f64_from(200), f64_from(600), f64_from(1000),
           f64_from(70), f64_from(90), f64_from(120),
           PR_BR_0_15, PR_JI_0_03, PR_SH_0_06, f64_neg(f64_from(5)), PR_SEED_CROCODILIAN);
     }
     if (species == PRANI_SP_CRICKET) {
-        return species_params_make(PRANI_APP_STRIDULATORY,
+        return species_params_make_into(dst, PRANI_APP_STRIDULATORY,
           f64_from(3000), f64_from(8000), f64_from(4500), PR_TS_0_05,
           f64_from(4500), f64_from(9000), f64_from(13500),
           f64_from(500), f64_from(800), f64_from(1000),
           f64_from(0), PR_JI_0_002, PR_SH_0_005, f64_neg(f64_from(1)), PR_SEED_CRICKET);
     }
     if (species == PRANI_SP_BEE) {
-        return species_params_make(PRANI_APP_VIBRATILE,
+        return species_params_make_into(dst, PRANI_APP_VIBRATILE,
           f64_from(200), f64_from(500), f64_from(300), PR_TS_0_03,
           f64_from(300), f64_from(600), f64_from(900),
           f64_from(100), f64_from(200), f64_from(300),
           f64_from(0), PR_JI_0_001, PR_SH_0_003, f64_neg(f64_from(1)), PR_SEED_BEE);
     }
     if (species == PRANI_SP_DRAGON) {
-        return species_params_make(PRANI_APP_LARYNGEAL,
+        return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
           f64_from(30), f64_from(500), f64_from(70), f64_from(3),
           f64_from(170), f64_from(500), f64_from(850),
           f64_from(60), f64_from(80), f64_from(110),
@@ -291,7 +316,7 @@ fn species_params(species) {
     }
     # PRANI_SP_FANTASY (default / fallthrough -- preserves totality since the
     # Rust enum is #[non_exhaustive]; every valid species maps above).
-    return species_params_make(PRANI_APP_LARYNGEAL,
+    return species_params_make_into(dst, PRANI_APP_LARYNGEAL,
       f64_from(50), f64_from(2000), f64_from(200), f64_from(1),
       f64_from(500), f64_from(1500), f64_from(2500),
       f64_from(80), f64_from(100), f64_from(130),
