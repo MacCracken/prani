@@ -57,9 +57,18 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 |---|---|---|---|
 | `emotion_valence_zone` | `valence (read from the state)` | [-1.0, 1.0] inclusive, exact (PRE_NEG_1_0 .. PRE_1_0) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `emotion_arousal_zone` | `arousal (read from the state)` | [0.0, 1.0] inclusive, exact (PRE_0_0 .. PRE_1_0) | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `emotion_select_vocalization` | `valence + arousal (via the two zone calls)` | valence [-1.0, 1.0], arousal [0.0, 1.0] | `PRANI_ERR_INVALID_VOCALIZATION (propagated from the zone call)` |
-| `emotion_select_intent` | `valence + arousal (via the two zone calls)` | valence [-1.0, 1.0], arousal [0.0, 1.0] | `PRANI_ERR_INVALID_VOCALIZATION (propagated from the zone call)` |
-| `emotion_evaluate` | `smoothing (checked directly), plus valence + arousal (propagated from the selectors)` | smoothing [0.0, 0.95] inclusive exact (PRE_0_0 .. PRE_0_95); valence [-1.0, 1.0]; arousal [0.0, 1.0] | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `emotion_select_vocalization` | `valence + arousal` | valence [-1.0, 1.0], arousal [0.0, 1.0] | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `emotion_select_intent` | `valence + arousal` | valence [-1.0, 1.0], arousal [0.0, 1.0] | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `emotion_evaluate` | `smoothing, plus valence + arousal` | smoothing [0.0, 0.95] inclusive exact (PRE_0_0 .. PRE_0_95); valence [-1.0, 1.0]; arousal [0.0, 1.0] | `PRANI_ERR_INVALID_VOCALIZATION` |
+
+> **Where these fire changed in 2.0.10; what they accept did not.** 2.0.5 reached
+> the ranges by *propagation* — the selectors called the zone functions, and
+> `evaluate` called both selectors, so the same two fields were validated four
+> times per call and the path cost 82 ns more than it had. 2.0.10 split each
+> public function into a checked wrapper over an internal `*_unchecked` core and
+> validates once, at the entry point, via `emotion_state_in_range`. Every range
+> and every `PRANI_ERR_*` in this table is unchanged, and output is bit-identical
+> across a 6,451-state sweep — only the number of times the check runs moved.
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
@@ -226,6 +235,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 | Function | Parameter | Accepted range | Rejects with |
 |---|---|---|---|
 | `stream_new` | `voice` | > 0 (a live heap handle) | `PRANI_ERR_INVALID_TRACT_NOT_USED__PRANI_ERR_INVALID_SPECIES` |
+| `stream_new` | `the voice's species tag (ADDED 2.0.6)` | integer in [0, PRANI_SP_COUNT) | `PRANI_ERR_INVALID_SPECIES` |
 | `stream_new` | `sample_rate` | finite and > 0; NO upper bound and no lower bound of prani's own | `PRANI_ERR_INVALID_TRACT` |
 | `stream_new` | `duration` | finite and >= 0 seconds (ZERO IS VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `stream_new` | `duration * duration_scale * sample_rate (the derived sample count)` | [0, 2^53] == [0, 9007199254740992] | `PRANI_ERR_INVALID_VOCALIZATION` |
@@ -296,6 +306,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 |---|---|---|---|
 | `crvoice_vocalize_with_intent` | `voc` | integer in [0, PRANI_VOC_COUNT) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_vocalize_with_intent` | `intent` | integer in [0, PRANI_INTENT_COUNT) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crvoice_vocalize_with_intent` | `self's species tag (ADDED 2.0.6)` | integer in [0, PRANI_SP_COUNT) | `PRANI_ERR_INVALID_SPECIES` |
 | `crvoice_vocalize_with_intent` | `sample_rate` | finite and > 0 (NO upper or lower threshold) | `PRANI_ERR_INVALID_TRACT` |
 | `crvoice_vocalize_with_intent` | `duration` | finite and >= 0 (zero is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_vocalize_with_intent` | `num_samples (derived: effective_duration * sample_rate)` | >= 0 | `PRANI_ERR_INVALID_VOCALIZATION` |
@@ -324,7 +335,9 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 
 </details>
 
-**109 guards across 11 modules.**
+**111 guards across 11 modules** — 109 from the 2.0.5 sweep (the number ADR-0006
+records), plus the two species point-of-use guards 2.0.6 added to `voice.cyr` and
+`stream.cyr`, marked ADDED 2.0.6 in the tables above.
 
 ## Not guarded, and why
 
@@ -365,7 +378,7 @@ function that consumes it checks the voice's own derived values.
 **`src/ffi.cyr`**
 
 - FINITE out-of-range values on all three RTPC setters (effort 1.5, size 100, ambient 200 dB) — they still CLAMP, unchanged. This is the oracle's documented RTPC saturation, tests/ffi.tcyr already pins 'set_effort(1.5) clamps to 1.0' as an existing assertion, and hard rule 2 forbids changing valid-input behaviour. Rejecting a finite out-of-range builder argument is roadmap 2.1.0's builder/constructor-contract work.
-- A finite, positive sample_rate BELOW svara's ~1000 Hz floor (e.g. 999.0) — deliberately still accepted by prani_ffi_stream_start. ADR-0001 rejected duplicating svara's threshold in prani because the duplicate is what goes stale. The rejection surfaces at the first fill per ADR-0003 (0 written, stream retires), and a new test group asserts that whole path end-to-end so the range guard cannot swallow it.
+- A finite, positive sample_rate BELOW svara's floor (e.g. 999.0) — deliberately still accepted by prani_ffi_stream_start. (Since svara 3.5.4 that floor is **above 1200 Hz**, not the ~1000 Hz this section was written against: svara's fixed 600 Hz subglottal bandpass sits exactly at nyquist at 1200. 1201 Hz is the lowest rate that renders. Measured, and pinned by F12 in `tests/hardening.tcyr`.) ADR-0001 rejected duplicating svara's threshold in prani because the duplicate is what goes stale. The rejection surfaces at the first fill per ADR-0003 (0 written, stream retires), and a new test group asserts that whole path end-to-end so the range guard cannot swallow it.
 - A buffer_len that DISAGREES with vec_len(buffer) in either direction (e.g. buffer_len 64 against a 2205-element vec still writes and reports 2205; buffer_len 99999 against a 64-element vec writes and reports 64). This is not a range violation but a disagreement between two length sources, and the module header already documents the deviation that 'the vec's own length is the real bound' with buffer_len retained for C signature parity. Reconciling them would change that documented contract rather than validate a range — out of scope for 2.0.5. Worth noting for a future milestone: at a real C ABI the buffer_len < vec_len direction is the overrun case, and in the Cyrius port it is safe only because the vec is the allocation.
 - species_index / voc_index / intent_index on prani_ffi_voice_create and prani_ffi_stream_start — already fully range-checked by the three *_from_index helpers (including the negative indices the oracle's u32 could not represent), with existing assertions.
 - prani_ffi_stream_is_finished, prani_ffi_voice_destroy, prani_ffi_stream_destroy — no numeric parameters beyond the handle, which each already null-checks.
@@ -431,7 +444,7 @@ function that consumes it checks the voice's own derived values.
 - crvoice_pitch_contour, crvoice_pitch_contour_f0_at, crvoice_formant_transition_contour, crvoice_formant_transition_at, crvoice_make_cat_meow_howl, crvoice_make_wolf_howl, crvoice_nasal_phase_fraction, crvoice_vocalization_spectral_offset, crvoice_lerp_kf, crvoice_contour_push, crvoice_keyframe_push, crvoice_clone_params, crvoice_species_has_subharmonics, crvoice_species_is_canid, crvoice_voc_is_howl_or_whine -- pure table lookups and interpolation returning a pointer or an f64, with no error channel. Their only inputs are a tag and a normalized t that f64_clamp already bounds; the tag is validated by the caller.
 - crvoice_apply_vocalization_envelope -- its sample_rate parameter is UNUSED (kept for signature parity with the oracle), and attack_len/release_len are already min-clamped against len by the existing a_lim/r_lim logic, so it has neither a divisor nor an unbounded index. Nothing to guard.
 - crvoice_to_json -- serializing has no range hazard; it writes whatever the struct holds, and the deserializer is where the contract is enforced.
-- The species tag stored on a CreatureVoice, at vocalize time. species_params has a DOCUMENTED fallthrough to the Fantasy row for unknown tags ('preserves totality since the Rust enum is #[non_exhaustive]'), so an unknown species is a deliberate design choice of src/species.cyr, not an accident. Overriding it from voice.cyr would silently contradict another module's stated contract; it belongs to species.cyr's owner. The tag IS range-checked in crvoice_from_json_str, where the deserializer contract (decision 1) applies.
+- ~~The species tag stored on a CreatureVoice, at vocalize time.~~ **Reversed in 2.0.6, and the reasoning below was wrong.** 2.0.5 argued that species_params' DOCUMENTED fallthrough to the Fantasy row ('preserves totality since the Rust enum is #[non_exhaustive]') made an unknown species species.cyr's choice rather than voice.cyr's defect. `error_handling.cyr` then showed what that cost: `crvoice_new(99)` returned a voice and `crvoice_vocalize` rendered 2205 samples for it **as a success**. Totality in the table is not the same as accepting a tag the caller cannot have meant. The guard now sits at the point of use — `src/voice.cyr` and `src/stream.cyr` in the tables above — exactly where ADR-0006 puts a builder's range check, since crvoice_new returns a pointer with no error channel. Pinned as F13 in `tests/hardening.tcyr`. The tag is still separately range-checked in crvoice_from_json_str, where the deserializer contract (decision 1) applies.
 - SpeciesParams.resonance_seed -- an RNG seed. Every i64 bit pattern is a legal one, and pinned as accepted (a -1 seed round-trips) so a future tightening cannot creep in unnoticed.
 - Nyquist upper bounds on formant0..2 / bandwidth0..2 in the deserializer. The sample rate is not known at deserialize time, so any bound would be a guess; they are checked finite and > 0 only.
 - An upper bound on duration itself. A long call is a legitimate request; the only real failure mode is the num_samples overflow, which is guarded directly on the derived product rather than by inventing a maximum call length.

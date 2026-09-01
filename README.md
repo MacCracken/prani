@@ -17,7 +17,7 @@ Procedural synthesis of non-human voices: wolves, cats, lions, birds, snakes, in
 - **5 vocal apparatus types**: Laryngeal, Syringeal, Stridulatory, Vibratile, NoiseOnly
 - **14 vocalization types**: Howl, Bark, Growl, Roar, Hiss, Chirp, Trill, and more
 - **7 behavioral intents**: Alarm, Territorial, Mating, Distress, Idle, Threat, Social
-- **Bioacoustic realism**: cat purr (25 Hz cycling), formant transitions, cricket pulse-train chirps, biphonation, nasal resonance, spectral tilt
+- **Bioacoustic realism**: cat purr (25-30 Hz cycling), formant transitions, cricket pulse-train chirps, biphonation, nasal resonance, spectral tilt
 - **Subharmonics** with time-varying amplitude and deterministic chaos for lions, dragons, crocodilians
 - **Dual-source syrinx** for songbirds (two simultaneous pitches)
 - **Dragon fire-breath** noise component
@@ -55,6 +55,11 @@ vec_push(pack, crvoice_new(PRANI_SP_WOLF));
 var chorus = sequence_synthesize_chorus(pack, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_from(44100), f64_from(3), F64_HALF);
 ```
 
+Five worked programs live in [`docs/examples/`](docs/examples/) — start with
+`basic.cyr`. Each one includes the published `dist/prani.cyr` exactly as a
+consumer would, and CI builds and runs all five on every push, so they cannot
+rot against the API.
+
 ## Consuming prani
 
 Downstream Cyrius projects include the distlib bundle and resolve prani's
@@ -72,7 +77,7 @@ include "dist/prani.cyr"
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.0.3"
+tag = "2.0.11"
 modules = ["dist/prani.cyr"]
 ```
 

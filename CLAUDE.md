@@ -71,6 +71,12 @@ cyrius test                              # run tests/*.tcyr
 - **The oracle lives in git history, not on disk** — read it with `git show 2.0.3:rust-old/<path>` ([ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md)). Do not restore it to the working tree
 - **Cite the oracle by tag, not a bare path** — write `2.0.3:rust-old/src/tract.rs:104`, never `rust-old/src/tract.rs:104`. Since 2.0.8 a bare path resolves against nothing ([ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md))
 - Do not skip tests before claiming changes work
+- **A gate figure needs a re-run, not just a reproducible command.** Counts that
+  gate a release (citations, test blocks, benchmarks) drift as the tree grows —
+  the 2.0.x arc's citation figure moved 3.6x in four patch releases and was
+  wrong twice, once because it counted vendored `lib/`, once because
+  `git grep -c` counts matching *lines*, not occurrences. Re-measure before
+  acting on any number in a doc, and record the command beside it
 - Do not modify `lib/` files (vendored stdlib / dep symlinks)
 - Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
 
@@ -82,5 +88,5 @@ cyrius test                              # run tests/*.tcyr
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples
 - [`docs/development/state.md`](docs/development/state.md) — Live state
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — **Open work only**. **2.0.x** is the preserve-first arc ending in `rust-old/`'s removal (2.0.8); **2.x** is surface-changing or externally blocked work. Completed milestones live in `CHANGELOG.md`, not here
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — **Open work only**. The preserve-first **2.0.x** arc is finished — it ended by retiring `rust-old/` in 2.0.8, and 2.0.10/2.0.11 repaired what its own measurements found — so what remains there is **2.x**: surface-changing or externally blocked work. Completed milestones live in `CHANGELOG.md`, not here
 

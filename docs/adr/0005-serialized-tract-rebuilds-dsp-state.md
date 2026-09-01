@@ -32,15 +32,15 @@ it to write. This is the same root cause as
 [ADR-0001](0001-check-svara-tract-constructor.md) — prani sits on the far side of
 an interface that does not surface its own internals.
 
-So `crtract_to_json` (`src/tract.cyr:171-192`) emits eight things — `sample_rate`,
+So `crtract_to_json` (`src/tract.cyr:237-258`) emits eight things — `sample_rate`,
 `phase`, `rng_state`, `rng_inc`, `dcb_x_prev`, `dcb_y_prev`, `dcb_r`, `params` —
-and `crtract_from_json_str` (`src/tract.cyr:200-219`) calls `crtract_new(params,
+and `crtract_from_json_str` (`src/tract.cyr:301-333`) calls `crtract_new(params,
 sample_rate)` to **rebuild** the svara tract and the naad filter from the
 deserialized `SpeciesParams`, then writes the saved scalars over the rebuild.
 
 The 2.0.4 parity audit ([`rust-test-parity.md`](../development/rust-test-parity.md))
 is what promoted this from a source comment to an ADR. It was already described
-at `src/tract.cyr:87-88` and `:195-197` and in a test comment, but it was the one
+at `src/tract.cyr:152-153` and `:262-265` and in a test comment, but it was the one
 oracle divergence in the tree that no ADR covered — and it is the kind that a
 consumer discovers at runtime rather than at compile time.
 

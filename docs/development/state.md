@@ -5,20 +5,16 @@
 
 ## Version
 
-**2.0.11** — the benchmark suite compares something now. `cyrius audit` had
-always reported `1 passed, 0 failed` for the bench because **all it checked was
-that the harness ran**; three regressions reached a release through that gap
-(2.0.5's 2.2× slowdown, 2.0.6's 8,800 B/call, 2.0.10's stale-bundle reading), each
-caught by a human reading numbers.
-
-⭐ **Deliberate asymmetry: allocation is hard-gated, timing is recorded.**
-`alloc_used()` is deterministic, so `tests/allocbudget.tcyr` (new, 15 assertions,
-every budget with a control) fails the build. Wall-clock on a shared runner is
-not — a gate that cries wolf gets disabled, which is worse than none — so
-`scripts/bench-check.sh` prints a delta against the committed
-`benches/baseline.csv` and exits 0, with `BENCH_GATE=<factor>` opting in. The
-cost is stated: 2.0.5's regression would not have failed this gate.
-**1946 assertions / 18 suites**, `cyrius audit` exit 0.
+**2.0.12** — documentation sweep, 51 corrections, no code change. Eight releases
+landed in rapid succession and the docs were never checked against the tree they
+produced. ⭐ **`SECURITY.md` listed only `1.0.x` as supported** — the pre-port Rust
+crate — while 2.0.0–2.0.5 shipped a CRITICAL segfault and four more reachable
+defects; **`README.md`'s consuming snippet pinned `tag = "2.0.3"`**, eight
+releases stale. `port-audit.md`'s *"widening is forced"* justification corrected
+(ganita 1.1.4 ships the f32 tier; it is a choice, not a constraint). svara's
+sample-rate floor — `<=1000 Hz` until svara 3.5.4, **>1200 Hz** since — was stale
+in seven places including the watch item that exists to catch exactly that.
+Zero dangling links tree-wide. **1946 assertions / 18 suites**, audit exit 0.
 
 ## Toolchain
 
@@ -44,8 +40,8 @@ cost is stated: 2.0.5's regression would not have failed this gate.
   ([ADR-0004](../adr/0004-cite-the-oracle-by-tag.md)). `lib.rs`
   (organization/prelude) and `math.rs` (f32 transcendental wrappers, folded into
   `f64_*` builtins) carry no independent Cyrius module.
-- Cyrius port: `src/main.cyr` (smoke) + 15 per-module `src/*.cyr`, each validated
-  by `tests/*.tcyr`.
+- Cyrius port: `src/main.cyr` (smoke) + 15 per-module `src/*.cyr` (+
+  `logging.cyr`, which has no Rust counterpart), each validated by `tests/*.tcyr`.
 
 ## Dependencies
 
@@ -92,14 +88,15 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.11: fmt · lint · docs · tests · bench,
-**exit 0**. 17 suites / **1900 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
+`cyrius audit` is green end to end as of 2.0.12: fmt · lint · docs · tests · bench,
+**exit 0**. 18 suites / **1946 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
-the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4; before
-that it ran only build + test, so fmt · lint · docs · bench were local-only.
+the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
+`scripts/run-examples.sh` (2.0.6) and `scripts/bench-check.sh` (2.0.11); before
+2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
 
-`tests/hardening.tcyr` (53 assertions, added 2.0.3) is the P(-1) sweep's
-regression suite — one group per repaired finding, each written so it FAILS on
+`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **96** today) is the
+P(-1) sweep's regression suite — one group per repaired finding, each written so it FAILS on
 the 2.0.2 tree (the memory-safety groups crash the process there). Every group
 carries controls so it cannot pass vacuously. It also holds the two allocation
 budgets, measured with `alloc_used()` rather than asserted as wall-clock.
@@ -123,9 +120,10 @@ Nothing. The port is complete, current on toolchain and dependencies, audited
 (2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), and with a gate that would catch the next one (2.0.11).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
-only, and **2.0.x is one arc with one destination: retiring `rust-old/`**
-(2.0.8). The gate is preserve-first, the same one svara and goonj used — nothing
-the oracle still holds may be lost:
+only, and **2.0.x was one arc with one destination: retiring `rust-old/`** — it
+reached it in 2.0.8, and 2.0.9–2.0.11 then repaired what the arc's own
+measurements found. The gate was preserve-first, the same one svara and goonj
+used — nothing the oracle still held could be lost:
 
 | | |
 |---|---|
@@ -133,10 +131,9 @@ the oracle still holds may be lost:
 | ~~**2.0.5**~~ | ✅ **Done** — input-range validation (109 guards, [`input-ranges.md`](../architecture/input-ranges.md)), plus the svara 3.5.4 bump that fixed the (1000, 7500] abort. |
 | ~~**2.0.6**~~ | ✅ **Done** — five examples, run by CI; `streaming.cyr` drives the full FFI lifecycle, satisfying the consumer-green condition. |
 | ~~**2.0.7**~~ | ✅ **Done** — the Rust comparison, captured while the oracle still builds. **The arc's only hard ordering constraint.** |
-| ~~**2.0.8**~~ | ✅ **Done** — `rust-old/` retired. **The arc is complete.** |
+| ~~**2.0.8**~~ | ✅ **Done** — `rust-old/` retired, after a **297-citation** reference sweep across 53 maintained files (the gate's own estimate of 83 across 42 was stale), tags pushed to `origin`, and a green tree with the directory moved aside. **The arc is complete.** |
 | ~~**2.0.9 + 2.0.10**~~ | ✅ **Done** — stream allocation 8,800 → 512 B/call; `emotion_evaluate` 154 → 114 ns. |
 | ~~**2.0.11**~~ | ✅ **Done** — allocation hard-gated (`allocbudget.tcyr`), timing recorded against a committed baseline. |
-| **2.0.8** | Retire `rust-old/`. Gated on the above plus a **297-citation** reference sweep across 53 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
 
 **Decided 2026-08-31: consumer-green is not a hard gate on 2.0.8**, on the
 condition that 2.0.6's `streaming.cyr` drives the full FFI lifecycle. The arc now

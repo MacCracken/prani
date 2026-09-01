@@ -212,8 +212,10 @@ fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
 # exactly F11's signature, and null is the honest answer.
 #
 # This is NOT svara's sample-rate floor moved earlier, and ADR-0001's rejection
-# of "validate sample_rate in prani" still stands: the floor (~1000 Hz) is
-# svara's rule and stays there. A finite positive rate BELOW it -- 999.0 -- still
+# of "validate sample_rate in prani" still stands: the floor is svara's rule and
+# stays there. (It was ~1000 Hz until svara 3.5.4; it is >1200 Hz now -- which is
+# exactly why prani does not restate it. F12 in tests/hardening.tcyr pins it.)
+# A finite positive rate BELOW it -- 999.0 -- still
 # gets a handle from this function and is rejected by svara at the first fill,
 # which reports 0 written and retires the stream per ADR-0003. tests/ffi.tcyr
 # pins that path so this guard cannot quietly swallow it.

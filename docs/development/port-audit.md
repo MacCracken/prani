@@ -6,7 +6,11 @@ every Cyrius module must match it function-for-function. Update the relevant row
 whenever a module's status changes.
 
 **Status:** ✅ ported & tested · 🟡 partial · ⬜ pending
-**LOC** = Rust lines (incl. tests) at `2.0.3:rust-old/src/`.
+**LOC** = Rust lines (incl. tests) at `2.0.3:rust-old/src/` — fixed, the oracle
+is frozen. **Tests** = assertions in that module's `tests/<mod>.tcyr` **today**;
+it moves, and it has moved a long way since the port (2.0.4 closed the parity
+shortfalls, 2.0.5 added the range guards). Current totals live in
+[`state.md`](state.md).
 
 ## Conventions established (apply to every module)
 
@@ -14,9 +18,23 @@ Proven reference template: **`src/error.cyr`, `src/rng.cyr`, `src/dsp.cyr`**
 (+ their `tests/*.tcyr`). Read those first. Cross-repo analogs: `../svara/src/*.cyr`
 (prani's dep, same idioms), `../naad/src/*.cyr`, `../naad/docs/development/port-audit.md`.
 
-- **f32 → f64 everywhere** (svara/naad/hisab are f64-only; widening is forced and
-  improves precision). Test tolerances loosened vs the f32 oracle where
-  bit-exactness isn't meaningful (`PRANI_EPSILON` = f32::EPSILON promoted to f64).
+- **f32 → f64 everywhere** — still exactly what the code does, but **no longer
+  because it is forced**. The parenthetical this bullet carried since 2.0.0
+  (*"svara/naad/hisab are f64-only; widening is forced and improves precision"*)
+  is false as of ganita **1.1.4**, which ships a 23-function f32 scalar tier
+  (`abs atan atan2 cbrt ceil clamp cos exp exp2 floor hypot lerp ln log2 max min
+  neg pow round sign sin sqrt trunc`) and is **already vendored in
+  `lib/ganita.cyr`** — prani calls nothing outside that set. Nor does the width
+  buy precision that counts: the bar is parity with an **f32** oracle, so the
+  extra mantissa is what *forces* the loosened tolerances below, not a gain.
+  Widening is now a **choice nobody has revisited**, filed as
+  [roadmap 2.1.0 Lane A](roadmap.md) and as **P0 on naad and svara** — prani
+  cannot convert alone, because `svara_glottal_next_sample` and
+  `svara_tract_process_sample` are called per sample and are f64 on both sides.
+  Until those move, **keep new modules f64**: a half-converted prani would widen
+  at the boundary and buy neither parity nor speed. Test tolerances loosened vs
+  the f32 oracle where bit-exactness isn't meaningful (`PRANI_EPSILON` =
+  f32::EPSILON promoted to f64).
 - **Float literals**: integers via `f64_from(n)`; non-integers as module-top
   `var NAME = 0x...;` holding the IEEE-754 hex bit pattern, decimal in a comment.
   Generate: `python3 -c "import struct;print(hex(struct.unpack('<Q',struct.pack('<d',V))[0]))"`.
@@ -64,6 +82,7 @@ Proven reference template: **`src/error.cyr`, `src/rng.cyr`, `src/dsp.cyr`**
 Each module gets `tests/<mod>.tcyr`:
 ```
 include "src/error.cyr"        # deps first, in dependency order
+include "src/logging.cyr"      # any module that calls prani_log_* needs this
 include "src/<mod>.cyr"
 alloc_init();
 test_group("group name");
@@ -110,61 +129,68 @@ tolerance. stdlib (assert/vec/math/alloc) auto-resolves — do not include it.
 
 | Module       | LOC | Status | Tests | Notes |
 |--------------|----:|--------|------:|-------|
-| error        |  38 | ✅ | 21 | Integer codes (5 variants) + `prani_from_svara` (was `impl From<SvaraError>`) + `prani_is_finite` + `PRANI_EPSILON/POS_INF/NEG_INF`. Universal base — every entry includes it first. |
-| rng          |  39 | ✅ | 15 | PCG32 (`PrRng`), bit-identical to svara. Golden next_u32 parity (seed 42/7). next_f32 ∈ [0,1) per the Rust *code* (doc claims [-1,1]). |
-| dsp          |  65 | ✅ |  9 | `DcBlocker` single-pole (R=0.995) + `process`/`process_buffer`/`reset` + `prani_map_naad_error`→`PRANI_ERR_SYNTHESIS_FAILED`. |
-| spatial      |  71 | ✅ | 24 | `spatial_apply_distance_attenuation` (1-pole LPF) + `spatial_apply_doppler_shift` (linear-interp resample). Buffers → vec. |
-| vocalization | 129 | ✅ | 16 | `PRANI_VOC_*` (14) + `PRANI_INTENT_*` (7) consts; `IntentModifiers` + `prani_intent_modifiers` lookup. |
-| fatigue      | 159 | ✅ | 50 | `FatigueState`/`FatigueModifiers`; accumulation/recovery/habituation curves. |
+| error        |  38 | ✅ | 45 | Integer codes (5 variants) + `prani_from_svara` (was `impl From<SvaraError>`) + `prani_is_finite` + `PRANI_EPSILON/POS_INF/NEG_INF`. Universal base — every entry includes it first. |
+| rng          |  39 | ✅ | 19 | PCG32 (`PrRng`), bit-identical to svara. Golden next_u32 parity (seed 42/7). next_f32 ∈ [0,1) per the Rust *code* (doc claims [-1,1]). |
+| dsp          |  65 | ✅ | 47 | `DcBlocker` single-pole (R=0.995) + `process`/`process_buffer`/`reset` + `prani_map_naad_error`→`PRANI_ERR_SYNTHESIS_FAILED`. |
+| spatial      |  71 | ✅ | 81 | `spatial_apply_distance_attenuation` (1-pole LPF) + `spatial_apply_doppler_shift` (linear-interp resample). Buffers → vec. |
+| vocalization | 129 | ✅ | 76 | `PRANI_VOC_*` (14) + `PRANI_INTENT_*` (7) consts; `IntentModifiers` + `prani_intent_modifiers` lookup. |
+| fatigue      | 159 | ✅ | 135 | `FatigueState`/`FatigueModifiers`; accumulation/recovery/habituation curves. |
 
 ### L1 — depend on L0
 
 | Module  | LOC | Status | Deps | Notes |
 |---------|----:|--------|------|-------|
-| emotion | 245 | ✅ 62 | vocalization | `PrEmotion`/`PrEmotionOut`; valence/arousal zones → vocalization+intent+output. |
-| species | 426 | ✅ 60 | vocalization, sequence(CallBout struct) | `PRANI_SP_*` (13) + `PRANI_APP_*` (5); 13-species param table; `resonance_seed` stored as precomputed f32-bit-hash consts (all 13 independently verified vs oracle). `bout_template` constructs `CallBout`. |
-| sequence| 138 | ✅ 33 | error, rng, dsp, vocalization, voice | `CallElement`/`CallBout`/`CallPhrase` structs + constructors + `synthesize*` + chorus. The synthesize parity tests were deferred until voice landed and **did land with it** — `tests/sequence.tcyr` now covers `CallBout::synthesize` (structure + finiteness), its error propagation (Snake cannot howl), `CallPhrase::synthesize`, and `synthesize_chorus`. |
+| emotion | 245 | ✅ 150 | vocalization | `PrEmotion`/`PrEmotionOut`; valence/arousal zones → vocalization+intent+output. |
+| species | 426 | ✅ 186 | vocalization, sequence(CallBout struct) | `PRANI_SP_*` (13) + `PRANI_APP_*` (5); 13-species param table; `resonance_seed` stored as precomputed f32-bit-hash consts (all 13 independently verified vs oracle). `bout_template` constructs `CallBout`. |
+| sequence| 138 | ✅ 133 | error, rng, dsp, vocalization, voice | `CallElement`/`CallBout`/`CallPhrase` structs + constructors + `synthesize*` + chorus. The synthesize parity tests were deferred until voice landed and **did land with it** — `tests/sequence.tcyr` now covers `CallBout::synthesize` (structure + finiteness), its error propagation (Snake cannot howl), `CallPhrase::synthesize`, and `synthesize_chorus`. |
 
 ### L2 — svara vocal-tract bridge
 
 | Module | LOC | Status | Deps | Notes |
 |--------|----:|--------|------|-------|
-| tract  | 436 | ✅ 43 | dsp, error, rng, species, **svara**, **naad** | `CreatureTract`/`SynthesisOptions`, `crtract_*`. All 5 apparatus paths + purr + formant-blend + spectral-tilt. svara glottal/tract/formant + naad `filter_biquad_new(NAAD_FILTER_BANDPASS,…)` (renamed from `FILTER_BANDPASS` by naad 2.2.0, absorbed in 2.0.2). Structural+determinism parity (f32→f64 diverges through svara internals). Dropped the svara FormantFilter fallback (naad bandpass always present for NoiseOnly under default features). |
-| bridge | 213 | ✅ 75 | species, vocalization | 13 pure value-conversion fns, `bridge_*`. `PrPerturbation` struct for the `(f32,f32)` tuple return; cbrt via `f64_pow(x,1/3)`. NOT a voice dep (its `crate::voice::` refs are doc-links). |
+| tract  | 436 | ✅ 147 | dsp, error, rng, species, **svara**, **naad** | `CreatureTract`/`SynthesisOptions`, `crtract_*`. All 5 apparatus paths + purr + formant-blend + spectral-tilt. svara glottal/tract/formant + naad `filter_biquad_new(NAAD_FILTER_BANDPASS,…)` (renamed from `FILTER_BANDPASS` by naad 2.2.0, absorbed in 2.0.2). Structural+determinism parity (f32→f64 diverges through svara internals). Dropped the svara FormantFilter fallback (naad bandpass always present for NoiseOnly under default features). |
+| bridge | 213 | ✅ 81 | species, vocalization | 13 pure value-conversion fns, `bridge_*`. `PrPerturbation` struct for the `(f32,f32)` tuple return; cbrt via `f64_pow(x,1/3)`. NOT a voice dep (its `crate::voice::` refs are doc-links). |
 
 ### L3 — voice/bridge (mutually referential, one flat-namespace unit)
 
 | Module | LOC | Status | Deps | Notes |
 |--------|----:|--------|------|-------|
-| voice  | 705 | ✅ 66 | error, rng, dsp, species, tract, vocalization, bridge, hisab | `CreatureVoice`, `crvoice_*` (helpers prefixed too — stream reuses `crvoice_vocalization_spectral_offset`). Full orchestration: pitch/formant contour tables (flat vecs), 20ms block loop, species effects (chaos `+0xCA05`, fire `+0xF12E`, biphonation, nasal notch, AM, tilt, envelope via hisab `ease_in_out_smooth`). Structural+determinism parity through svara; exact where svara-independent. |
+| voice  | 705 | ✅ 323 | error, rng, dsp, species, tract, vocalization, bridge, hisab | `CreatureVoice`, `crvoice_*` (helpers prefixed too — stream reuses `crvoice_vocalization_spectral_offset`). Full orchestration: pitch/formant contour tables (flat vecs), 20ms block loop, species effects (chaos `+0xCA05`, fire `+0xF12E`, biphonation, nasal notch, AM, tilt, envelope via hisab `ease_in_out_smooth`). Structural+determinism parity through svara; exact where svara-independent. |
 
 ### L4 — composites
 
 | Module   | LOC | Status | Deps | Notes |
 |----------|----:|--------|------|-------|
-| preset   | 160 | ✅ 93 | species, voice | `VoicePreset` + 11 named preset constructors + `preset_all`. `preset_build` chains crvoice builders. |
-| stream   | 271 | ✅ 35 | error, species, tract, vocalization, voice | `SynthStream` pull-based synth; lazy tract init; reuses `crvoice_vocalization_spectral_offset`; `stream_pitch_contour_at` (f0-returning). fill_buffer applies tilt+amp to block then copies (equivalent to oracle). |
+| preset   | 160 | ✅ 167 | species, voice | `VoicePreset` + 11 named preset constructors + `preset_all`. `preset_build` chains crvoice builders. |
+| stream   | 271 | ✅ 142 | error, species, tract, vocalization, voice | `SynthStream` pull-based synth; lazy tract init; reuses `crvoice_vocalization_spectral_offset`; `stream_pitch_contour_at` (f0-returning). fill_buffer applies tilt+amp to block then copies (equivalent to oracle). |
 | (sequence full synth methods now covered via voice/stream) | | | | |
 
 ### L5 — FFI surface
 
 | Module | LOC | Status | Deps | Notes |
 |--------|----:|--------|------|-------|
-| ffi    | 265 | ✅ 37 | species, stream, vocalization, voice | `prani_ffi_*` C buffer-callback API. Handles=pointers, buffers=vecs, destroy=no-op (arena), index mappers=range checks. `voice_set_size` rebuilds+copies fields; `stream_start` shares the voice handle (read-only). ABI machinery (`extern "C"`/Box) doesn't translate — logic ported. |
+| ffi    | 265 | ✅ 74 | species, stream, vocalization, voice | `prani_ffi_*` C buffer-callback API. Handles=pointers, buffers=vecs, destroy=no-op (arena), index mappers=range checks. `voice_set_size` rebuilds+copies fields; `stream_start` shares the voice handle (read-only). ABI machinery (`extern "C"`/Box) doesn't translate — logic ported. |
 
 **Totals:** 17 Rust files → 16 `.cyr` modules (15 ported + `logging.cyr`;
 `math.rs` folded into `f64_*` builtins, `lib.rs` carries only organization/
-prelude) · 3,527 Rust lines → ~4,090-line `dist/prani.cyr` bundle. **✅ PORT
-COMPLETE — 16/16 modules, zero deferrals. 717 parity assertions green across 16
-suites** (all oracle behaviour ported — including serde roundtrips + logging;
-only Display-string tests dropped). `dist/prani.cyr` assembled (collision-audited
-to zero across all fns/structs/consts), `src/main.cyr` smoke links + runs the
-bundle, hot-path benchmarks captured. VERSION 1.1.0 → 2.0.0 (port) → 2.0.1
-(logging via sakshi + serde via `#derive(Serialize)`+bayan, lossless i64 bit
-patterns) → 2.0.2 (cyrius 6.5.36 + current dependency tags; two breaking
-upstream renames absorbed, all 717 assertions unchanged) → **2.0.3** (P(-1)
-sweep: 11 findings, 8 repaired — including a SIGSEGV on the primary synthesis
-API — 717 → 770 assertions, `cyrius audit` exit 0).
+prelude) · 3,527 Rust lines → a `dist/prani.cyr` bundle that shipped at ~3,800
+lines and stands at **5,997**. **✅ PORT COMPLETE — 16/16 modules, zero
+deferrals**, closed out at **717 parity assertions across 16 suites** (all oracle
+behaviour ported — including serde roundtrips + logging; only Display-string
+tests dropped). `dist/prani.cyr` assembled (collision-audited to zero across all
+fns/structs/consts), `src/main.cyr` smoke links + runs the bundle, hot-path
+benchmarks captured. VERSION 1.1.0 → 2.0.0 (port) → 2.0.1 (logging via sakshi +
+serde via `#derive(Serialize)`+bayan, lossless i64 bit patterns) → 2.0.2 (cyrius
+6.5.36 + current dependency tags; two breaking upstream renames absorbed, all 717
+assertions unchanged) → **2.0.3** (P(-1) sweep: 11 findings, 8 repaired —
+including a SIGSEGV on the primary synthesis API — 717 → 770 assertions, `cyrius
+audit` exit 0).
+
+**The ledger above did not stop at 2.0.3.** 2.0.4 → 2.0.11 carried the suites
+from 770 to **1,946 assertions across 18 suites** and retired `rust-old/`
+(2.0.8) — that history is in [`CHANGELOG.md`](../../CHANGELOG.md) and the current
+figures in [`state.md`](state.md); this file tracks per-module parity, not
+releases.
 
 **A third defect category the parity bar cannot see.** 2.0.3's CRITICAL was
 neither an inherited oracle defect nor a transcription error: svara 3.x replaced
@@ -183,8 +209,12 @@ effective_f0, builder clamps, bridge conversions, species params + all 13
 **exact f64 bit patterns**. Full synthesis paths (which route through svara's
 own DSP, where f32→f64 widening diverges bit-for-bit) are asserted
 **structurally**: non-error return, exact buffer length, all-finite samples, and
-bit-identical determinism across identical runs. This is the only meaningful
-parity bar once the port widens f32→f64 through a dependency compiled in f64.
+bit-identical determinism across identical runs — and, **since 2.0.4, by
+magnitude** as well: peak / energy against the oracle's own bars. The structural
+bar alone was not enough, and 2.0.4 proved it: an all-zero buffer satisfied every
+synthesis assertion in the project. Structural + magnitude is the meaningful bar
+once the port widens f32→f64 through a dependency compiled in f64; bit-exactness
+becomes available only if [2.1.0 Lane A](roadmap.md) converts the stack to f32.
 
 ## Deferred / follow-up work
 

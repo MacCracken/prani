@@ -143,14 +143,20 @@ per-sample svara calls are f64 on both sides. It is no longer *forced*: ganita
 Tracked since 2.0.0 on the same host and harness. Kept unchanged so the series
 stays comparable; **do not renumber or reparameterise these.**
 
-| Benchmark | 2.0.7 | 2.0.3 | 2.0.2 | 2.0.0 | Notes |
-|---|---|---|---|---|---|
-| `dcblocker_process` | **19 ns/sample** | 19 ns | 20 ns | 19 ns | Single-pole DC blocker on every synthesis buffer. |
-| `prani_rng_next_f32` | **14 ns/sample** | 14 ns | 14 ns | 15 ns | PCG32 draw (aspiration / jitter / shimmer). |
-| `emotion_evaluate` (per-frame) | **118 ns** | 69 ns | 70 ns | 83 ns | 2.0.10 recovered 37 of the 82 ns 2.0.5's guards cost; the rest is guarded evaluation. |
-| `crvoice_vocalize` wolf howl 0.05 s @ 8 kHz | **~213 µs** | 211 µs | 214 µs | 227 µs | Cold call: builds a fresh voice each iteration. |
+| Benchmark | 2.0.11 | 2.0.7 | 2.0.3 | 2.0.2 | 2.0.0 | Notes |
+|---|---|---|---|---|---|---|
+| `dcblocker_process` | **19 ns/sample** | 19 ns | 19 ns | 20 ns | 19 ns | Single-pole DC blocker on every synthesis buffer. |
+| `prani_rng_next_f32` | **14 ns/sample** | 14 ns | 14 ns | 14 ns | 15 ns | PCG32 draw (aspiration / jitter / shimmer). |
+| `emotion_evaluate` (per-frame) | **114 ns** | 151 ns | 69 ns | 70 ns | 83 ns | 2.0.10 recovered 37 of the 82 ns 2.0.5's guards cost; the rest is guarded evaluation. |
+| `crvoice_vocalize` wolf howl 0.05 s @ 8 kHz | **~216 µs** | ~213 µs | 211 µs | 214 µs | 227 µs | Cold call: builds a fresh voice each iteration. |
 
-**`emotion_evaluate`: 69 → 155 → 118 ns.** 2.0.5's input-range guards cost 82 ns
+The 2.0.11 column is re-measured, three consecutive runs on the host in Method
+below: 19–20, 14–15, 111–113 ns and 215.6–222.1 µs. Treat a single-digit-percent
+move between columns as host noise, not as a result —
+[`benches/baseline.csv`](../benches/baseline.csv) is what
+`scripts/bench-check.sh` actually diffs against.
+
+**`emotion_evaluate`: 69 → 151 → 114 ns.** 2.0.5's input-range guards cost 82 ns
 on a per-frame path by validating the same two fields **four times** per call —
 `evaluate` reaches both zone functions twice, through `select_vocalization` and
 `select_intent`. 2.0.10 split each into a public checked wrapper over an internal
@@ -165,18 +171,49 @@ is what consumers get — so a stale bundle reports the last bundled code. While
 fixing this, `cyrius audit` read **155 ns** from a stale `dist/` for a change that
 actually measured **114 ns**. CI now runs bundle coherence *before* the audit;
 locally, run `cyrius distlib` before believing a bench number after editing
-`src/`. Roadmap 2.0.11.
+`src/`. Shipped in 2.0.11, along with the allocation gate below.
 
 ## Allocation budget
 
 Cyrius's allocator is a bump arena that never frees, so an allocation on a
 per-frame or per-block path is retained for the life of the process. These are
-measured with `alloc_used()` in `tests/hardening.tcyr`, not calculated, and are
-asserted on every run:
+measured with `alloc_used()`, not calculated.
+
+Since **2.0.11** they are a **hard gate**, not a note: `tests/allocbudget.tcyr`
+budgets every benchmarked path and `cyrius audit` runs it. That is the deliberate
+half of the split — `alloc_used()` is deterministic (same tree, same byte count,
+any host, any load), so it can fail a build with no false-positive risk, whereas
+wall-clock on a shared runner cannot. Timing is *recorded* instead, by
+`scripts/bench-check.sh` against `benches/baseline.csv`. The cost is stated rather
+than hidden: **2.0.5's `emotion_evaluate` regression would not have failed this
+gate.** What it buys is a gate nobody will be tempted to switch off.
+
+| Path | Budget | Why |
+|---|---|---|
+| `dcblocker_process`, `prani_rng_next_f32` | **0 B** | per-sample; one byte here is 44 KB/s retained |
+| `prani_ffi_voice_set_size` | **0 B** | an RTPC a host calls per frame, per creature (pins 2.0.3's F7) |
+| `emotion_evaluate` | ≤ **40 B/call** | one `PrEmotionOut`, which the caller receives — it is the result, not waste |
+| `stream_fill_buffer` | ≤ **512 B/call** | the audio-callback path; **was 8,800 B at 2.0.6** |
+| `crvoice_vocalize` | **sub-linear in duration** | allocation may scale with the audio produced, never with the number of calls |
+
+Every budget carries a **control** — a `<= N` assertion passes trivially if the
+path never runs — and the `crvoice_vocalize` budget is expressed as the marginal
+cost of doubling the duration rather than an absolute byte count, so it cancels
+fixed setup and survives any buffer-growth change while still catching per-block
+overhead being retained.
+
+⚠ **`stream_fill_buffer`'s residual 512 B is a behaviour question, not a perf
+one.** It is one `svara_glottal_new` per block. Caching the source looks free, but
+a fresh source resets its phase and jitter/shimmer state where a cached one
+carries them forward — the audio changes. The oracle rebuilt per block too, so
+rebuilding is parity-correct; closing it needs a decision that the continuity
+change is wanted.
+
+The two rows that started this, still asserted in `tests/hardening.tcyr` as O1/O2:
 
 | Path | 2.0.2 | 2.0.3 |
 |---|---|---|
-| `prani_ffi_voice_set_size` — a real-time parameter a host may call every frame, per creature | **168 B retained per call** (`sizeof(CreatureVoice)` 40 + `sizeof(SpeciesParams)` 128; 168,000 B over 1000 calls) | **0 B** |
+| `prani_ffi_voice_set_size` | **168 B retained per call** (`sizeof(CreatureVoice)` 40 + `sizeof(SpeciesParams)` 128; 168,000 B over 1000 calls) | **0 B** |
 | `crvoice_vocalize` block loop | one `SynthesisOptions` per 20 ms of audio, i.e. 50 per second, each retained | one per call |
 
 At 60 fps across 100 creatures the first row was about 1 MB/second retained

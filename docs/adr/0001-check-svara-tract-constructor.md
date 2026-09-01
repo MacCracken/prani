@@ -23,6 +23,19 @@ at or below 1000 Hz along with negative and non-finite ones (measured:
 `0, 1, 10, 49, 50, 100, 999, 1000` all return `-1`; `4000` and above return a
 pointer).
 
+> **Note, 2.0.5 / svara 3.5.4 (2026-08-31) — the measured constant moved; the
+> decision did not.** The measurement above was taken against svara **3.5.3**,
+> and it was only half the rule: for every rate in `(1000, 7500]`
+> `svara_tract_new` returned a *valid pointer* and the tract then **aborted** on
+> its first render — below 1200 Hz because two naad error codes were stored
+> unchecked as filter pointers, and up to 7500 Hz because svara fell back to a
+> one-element formant record and then wrote five formants into it. svara 3.5.4
+> repaired both (found from here), and the floor
+> `svara_tract_new` now reports is **above 1200 Hz** — its fixed 600 Hz
+> subglottal bandpass needs nyquist above 600, so `1200` returns an error and
+> `1201` upward builds. This is exactly the drift the "Neutral" note below
+> anticipates, which is why prani still restates no threshold of its own.
+
 The port kept the oracle's shape and used the return value as a pointer
 unconditionally. `svara_tract_set_formants_from_target(-1, target)` then
 dereferenced `-1`. **This is reachable from the primary public API** —
@@ -72,8 +85,9 @@ choice once the above is made:
 - **Neutral** — prani now depends on svara's rejection threshold without
   restating it. That is deliberate: hardcoding "1000 Hz" here would be a
   constant derived from a dependency, which goes stale silently. The threshold is
-  recorded in `tests/hardening.tcyr` as a *measurement*, with controls at 8000
-  and 44100 that fail if svara ever widens or narrows the range.
+  recorded in `tests/hardening.tcyr` as a *measurement*: the **F12** group pins
+  the boundaries either side of it — 1200/1201 and 7500/7501 — with controls at
+  8000 and 44100, and those pins fail if svara ever widens or narrows the range.
 
 ## Alternatives considered
 

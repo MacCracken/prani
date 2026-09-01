@@ -2,15 +2,23 @@
 
 > **The artifact of milestone 2.0.4** (complete — see
 > [`CHANGELOG.md`](../../CHANGELOG.md); the roadmap carries open work only).
-> One row per Rust `#[test]` block, against the 17 Cyrius suites. Companion to
+> One row per Rust `#[test]` block. Companion to
 > [`port-audit.md`](port-audit.md), which is per-*module*; this is per-*test*.
+>
+> ⚠ **A dated record, not a live document.** Every count below is **as of 2.0.4**
+> — 17 suites, 1200 assertions — and is left that way on purpose: it is what was
+> measured when the audit ran, and rewriting it would destroy the evidence the
+> conclusions rest on. The suite has grown since (**18 suites / 1946 assertions**
+> at 2.0.11); `state.md` carries the current figures.
 
 The port was verified module-by-module against the oracle's **source**. It had
 never been verified against the oracle's **tests** — a different question, and
-the one that decides whether [2.0.8](roadmap.md#208--retire-rust-old) can
-safely drop the oracle from the working tree. Parity after the removal is
-asserted by these suites alone, so anything the Rust asserts that the Cyrius
-does not is lost the day the directory goes.
+the one that decided whether `rust-old/` could safely leave the working tree.
+**It did leave, in 2.0.8**, so parity is now asserted by these suites alone:
+anything the Rust asserted that the Cyrius does not was lost that day, which is
+why every gap below had to be closed first. The oracle is still readable —
+`git show 2.0.3:rust-old/tests/integration.rs`
+([ADR-0004](../adr/0004-cite-the-oracle-by-tag.md)).
 
 **Method**: 73 Rust tests mapped in 13 parallel passes; every claimed gap then
 handed to an independent pass instructed to *refute* it by finding the covering

@@ -26,8 +26,10 @@ oracle kept in git history, not the build — nothing in CI or the release runs
   ```
 
 - A Rust toolchain is needed **only** to build the oracle — checked out from
-  `2.0.3` — for the roadmap 2.0.7 benchmark comparison. It is not needed to
-  build, test, or release prani.
+  `2.0.3` — and to re-run the benchmark comparison against it. That comparison
+  was made once, in 2.0.7; the numbers and the method are in
+  [`docs/benchmarks.md`](docs/benchmarks.md). It is not needed to build, test,
+  or release prani.
 
 ```sh
 cyrius deps                              # resolve dependencies
@@ -54,6 +56,19 @@ things to know about it:
   the audit, not the per-file check.
 - Every `cyrius …` call re-resolves dependencies and races on `cyrius.lock`. If
   you run more than one at a time, serialize them: `flock /tmp/prani-build.lock cyrius …`.
+
+CI runs three gates **around** the audit that the audit itself does not — added
+across 2.0.4, 2.0.6 and 2.0.11. Run them before you push, or the PR fails on
+something green locally:
+
+```sh
+cyrius distlib && git diff --exit-code -- dist/  # bundle coherence: dist/ must match src/
+sh scripts/run-examples.sh                       # build + run all five docs/examples/
+sh scripts/bench-check.sh                        # timing delta vs benches/baseline.csv
+```
+
+Bundle coherence runs **before** the audit in CI, deliberately — see the
+benchmark warning below.
 
 ## Code Standards
 
@@ -97,6 +112,8 @@ things to know about it:
 6. Add a benchmark to `tests/prani.bcyr`.
 7. If the species reaches the FFI index tables, extend `tests/ffi.tcyr`'s
    out-of-range cases.
+8. Extend `ex_species_name()` in `docs/examples/species_tour.cyr` — it sweeps to
+   `PRANI_SP_COUNT` over a hand-written name table, and CI builds and runs it.
 
 ## Benchmarks
 
@@ -136,7 +153,7 @@ read the oracle with `git show` rather than off disk. The rule is
 ```sh
 git show 2.0.3:rust-old/src/voice.rs           # port era (2.0.0+) — the oracle at rust-old/
 git show 1.1.0:src/voice.rs                    # Rust era (1.1.0 and earlier) — the Rust WAS src/
-git show 2.0.3:rust-old/tests/integration.rs   # the 73 #[test] blocks
+git show 2.0.3:rust-old/tests/integration.rs   # 72 of the oracle's 73 #[test] blocks
 git grep 'fn vocalize' 2.0.3 -- rust-old/src   # grep across the whole oracle
 ```
 

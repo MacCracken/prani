@@ -170,8 +170,11 @@ struct CreatureTract {
 # because the svara it was written against had an INFALLIBLE `VocalTract::new`.
 # svara 3.x hardened that constructor to return a checkable negative code
 # instead of panicking (svara's own ADR: "`svara_tract_new` errors where Rust
-# panics"), and it rejects every sample_rate <= 1000 Hz as well as negative and
-# non-finite ones. The port kept the oracle's shape and used the return AS A
+# panics"), and it rejected every sample_rate <= 1000 Hz as well as negative and
+# non-finite ones. (That floor moved to >1200 Hz in svara 3.5.4, which repaired
+# two defects prani found -- see F12 in tests/hardening.tcyr. The <=1000 figure
+# is the measurement ADR-0001 was written against, kept for that reason.)
+# The port kept the oracle's shape and used the return AS A
 # POINTER regardless -- so `svara_tract_set_formants_from_target(-1, target)`
 # dereferenced -1 and the process took SIGSEGV. Checking it is mandatory, and
 # the check cannot be hidden inside this function because there is no valid

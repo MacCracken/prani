@@ -8,12 +8,13 @@
 
 ## Module Map
 
-15 `.cyr` library modules under `src/` (dependency-ordered; bundled into
+16 `.cyr` library modules under `src/` (dependency-ordered; bundled into
 `dist/prani.cyr`). `math.rs` folded into `f64_*` builtins; `lib.rs` had no logic.
 
 ```text
 prani/ src/
   L0  error.cyr        — PRANI_ERR_* codes, prani_from_svara, tolerances, is_finite
+      logging.cyr      — prani_log_* wrappers over sakshi (the `tracing` replacement)
       rng.cyr          — PrRng: PCG32 PRNG (stochastic synthesis)
       dsp.cyr          — DcBlocker (applied to every synthesis buffer)
       spatial.cyr      — Doppler shift, distance attenuation (+ HF absorption)
@@ -76,9 +77,9 @@ vec of f64 output samples   (or a negative PRANI_ERR_* on failure)
 
 > Tags are volatile; `cyrius.cyml` is the source of truth and
 > [`development/state.md`](../development/state.md) carries the live set. Listed
-> here for the shape of the stack, current as of 2.0.2.
+> here for the shape of the stack, current as of 2.0.11.
 
-- **svara** 3.5.3 — glottal source, formant filter, vocal tract, vowel target
+- **svara** 3.5.4 — glottal source, formant filter, vocal tract, vowel target
 - **naad** 2.2.2 — biquad filters (NoiseOnly bandpass shaping;
   `NAAD_FILTER_BANDPASS`)
 - **hisab** 2.11.2 — `ease_in_out_smooth` (envelope curves)

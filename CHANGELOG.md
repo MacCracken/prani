@@ -20,6 +20,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.0.12] - Documentation sweep: 51 corrections after eight releases
+
+Docs only — no code change; the `src/` diff is **0 non-comment lines**. Eight
+releases (2.0.4 → 2.0.11) landed in rapid succession and the documentation was
+never checked as a whole against the tree they produced.
+
+### Fixed — the two that would have cost a user directly
+
+⭐ **`SECURITY.md`'s supported-versions table had exactly one row: `1.0.x | Yes`.**
+That is the **pre-port Rust crate**, frozen in git history and unmaintained — so
+the file told a reporter that the only supported prani was one that no longer
+exists, while 2.0.0–2.0.5 shipped a CRITICAL segfault, a process abort across the
+whole (1000, 7500] sample-rate band, a NaN-buffer-returned-as-success, two null
+derefs and a buffer overrun. Now a four-row table naming the repaired classes.
+This is the same defect svara found in its own `SECURITY.md` at 3.5.3.
+
+⭐ **`README.md`'s "Consuming prani" snippet pinned `tag = "2.0.3"`** — eight
+releases stale. Anyone who copied it got a version predating every repair above.
+
+### Fixed — the convention that governs future work
+
+`port-audit.md`'s standing rule, applied to every module since 2.0.0:
+
+> **f32 → f64 everywhere** (svara/naad/hisab are f64-only; widening is **forced**)
+
+The first half still describes the code. **The justification was false**: ganita
+1.1.4 ships a 23-function f32 scalar tier, already vendored in `lib/ganita.cyr`,
+and prani calls nothing outside it. It is a *choice nobody had revisited* — now
+recorded as such, and filed as roadmap 2.1.0 Lane A plus P0 on naad and svara.
+
+### Fixed — a threshold that had moved, in seven places
+
+svara's sample-rate floor was `<= 1000 Hz` until **svara 3.5.4** repaired two
+defects prani found; it is **>1200 Hz** now. Stale in `ADR-0001`,
+`input-ranges.md`, `svara-bridge-api.md`, the roadmap watch item that exists
+*specifically to catch a moved threshold*, and three `src/` comments. Corrected
+or dated everywhere; ADR-0001's measurement is kept with a dated note, because it
+is what the decision was made against.
+
+### Fixed — counts, links and tense
+
+Assertion and suite counts (770/17 → 1946/18), benchmark counts (4 → 18),
+`svara 3.5.3` → `3.5.4`, module counts, bundle line counts, and 15 per-module
+test figures in `port-audit.md`'s ledger. **Zero dangling links tree-wide**,
+verified by extracting every relative link and anchor and resolving it —
+including two backticked paths to `dist/svara.cyr` / `dist/naad.cyr`, which have
+never existed (the bundles are in `lib/`).
+
+`rust-test-parity.md` now carries a dated header: its counts are **as of 2.0.4**
+and stay that way, because rewriting them would destroy the evidence its
+conclusions rest on. Its future-tense framing of `rust-old/`'s removal — an event
+completed in 2.0.8 — is now past tense.
+
+### Verification
+
+Four sweep agents, then an independent pass that re-measured every corrected
+number and hunted what they missed. It caught the sweep making
+`docs/benchmarks.md`'s table and prose disagree (151 vs 155, 113 vs 118) —
+reconciled to one measured figure, **114 ns**, taken from three runs.
+
+⚠ **Left for a human**: `SECURITY.md` gives `security@agnos.org` while
+`CODE_OF_CONDUCT.md` gives `conduct@agnos.dev` — two TLDs for one organisation.
+A security contact is not something to guess at.
+
 ## [2.0.11] - The benchmark suite compares something now
 
 `cyrius audit` has always run `tests/prani.bcyr` and reported

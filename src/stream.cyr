@@ -32,7 +32,8 @@
 #                               (crvoice_from_json_str returns -3), which would
 #                               otherwise be dereferenced.  -> INVALID_SPECIES
 #   stream_new sample_rate      finite and > 0. NO floor of prani's own: svara
-#                               owns the real threshold (~1000 Hz) and ADR-0001
+#                               owns the real threshold (~1000 Hz until svara
+#                               3.5.4, >1200 Hz since) and ADR-0001
 #                               forbids restating it, so a 10 Hz stream still
 #                               CONSTRUCTS and fails at the first fill under
 #                               ADR-0003.                    -> INVALID_TRACT

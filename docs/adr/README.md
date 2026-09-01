@@ -35,10 +35,14 @@ because the oracle's own assumption stopped holding, 0002 because the port had
 dropped half of a contract the oracle did have.
 
 0004 is different in kind: it is not a behavioural divergence but the rule for
-reading the oracle after roadmap 2.0.8 removes it from the working tree.
+reading the oracle — in force since 2.0.8 removed it from the working tree.
 
 0005 comes out of the 2.0.4 parity audit
 ([`docs/development/rust-test-parity.md`](../development/rust-test-parity.md)),
 which found it as the one oracle divergence in the tree that no ADR covered — it
 had been recorded only in source comments. Like 0001, its cause is that svara
 exposes a handle whose internals prani cannot reach.
+
+0006 comes out of 2.0.5's input-range validation, which is where ADR-0002's
+deferred field-level checks and the audit's F10/F11 were finally settled. It is
+the first divergence from the oracle that a dependency did not force.
