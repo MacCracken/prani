@@ -2,12 +2,30 @@
 # Ports rust-old/src/dsp.rs: a single-pole DC blocker (applied to all
 # synthesis output) + naad error mapping. Was `pub(crate)`.
 #
-# Requires (from the build/test unit): error.cyr (PRANI_ERR_SYNTHESIS_FAILED)
-# + stdlib alloc/vec. The module file itself has no `include` lines.
+# Requires (from the build/test unit): error.cyr (PRANI_ERR_*, prani_is_finite)
+# + logging.cyr (prani_log_error) + stdlib alloc/vec. The module file itself has
+# no `include` lines.
 #
 # serde: DcBlocker was Serialize/Deserialize in Rust; RESTORED via
 # #derive(Serialize) (f64 fields typed i64 so their exact bit patterns
 # serialize losslessly). Roundtrip tested in tests/dsp.tcyr.
+#
+# ================================================================
+# INPUT RANGES (2.0.5). dsp is a CRATE-PRIVATE module -- the oracle's
+# `pub(crate) struct DcBlocker` -- so nothing here is a public entry point and
+# no argument here is ever host-supplied. The ranges are still written down,
+# with the guard decision for each:
+#
+#   dcblocker_process(b, x)        x: any f64, INCLUDING non-finite. NOT guarded
+#                                  -- see the note on the function (hot path,
+#                                  and x is prani's own synthesis output).
+#   dcblocker_process_buffer(b, s) same. Not guarded; detects the latch instead.
+#   prani_vec_extend(dst, src)     no numeric range -- copies opaque f64 bit
+#                                  patterns without interpreting them.
+#   prani_vec_push_zeros(v, n)     n: [0, i64::MAX]. 0 is VALID (nothing to
+#                                  append); NEGATIVE is rejected -- guarded.
+#   prani_map_naad_error(code)     any i64 -- it is a foreign code, not a range.
+# ================================================================
 
 # 0.995 pole radius: R in H(z) = (1 - z^-1) / (1 - R z^-1). Standard DC-block
 # corner (~35 Hz @ 44.1 kHz). Non-integer literal -> module-top hex constant.
@@ -44,6 +62,27 @@ fn dcblocker_new() {
 }
 
 # process(x) -- one sample. y = x - x_prev + r*y_prev; then shift state.
+#
+# DELIBERATELY UNGUARDED (2.0.5). This is a RECURSIVE filter, so one non-finite
+# input latches non-finite state permanently: a NaN x gives a NaN y, and y_prev
+# stays NaN for every later sample even after the input recovers. A +inf x is no
+# better -- y0 = +inf, then y1 = 1 - inf + r*inf = NaN (measured, pinned in
+# tests/dsp.tcyr). The blocker lives inside CreatureTract and is reused across
+# every synthesize call, so the poisoning outlives the buffer that caused it and
+# only crtract_reset/dcblocker_reset clears it.
+#
+# A per-sample finite test is still the wrong fix, for two reasons:
+#   1. COST -- this is the module's hot path, benchmarked at 19 ns/sample
+#      (docs/benchmarks.md). prani_is_finite is an f64_abs + f64_lt, so the
+#      guard would be a large fraction of the work it protects, on every sample
+#      of every synthesis.
+#   2. PLACE -- x is never host data. It is prani's own tract output, so a
+#      non-finite x means a host number (sample_rate, f0, velocity) already got
+#      through an entry point upstream. THAT is where the range guard belongs;
+#      catching it here would report the symptom at the wrong layer, and this
+#      function has no error channel to report it through anyway (returning a
+#      negative code is impossible -- every f64 bit pattern is a legal sample).
+# What this module does instead is detect the latch once, in process_buffer.
 #inline
 fn dcblocker_process(b, x) {
     # y = x - x_prev + r * y_prev
@@ -54,12 +93,32 @@ fn dcblocker_process(b, x) {
 }
 
 # process_buffer(samples) -- filter a vec of f64 samples in place.
+#
+# LATCH DETECTOR (2.0.5), not a range guard. The signature is unchanged and so
+# is the return: this function never had an error channel, and inventing one
+# here would be the signature change 2.0.5 forbids -- the callers that DO have
+# one (crtract_synthesize*, which take the host's sample_rate and f0) carry the
+# range guards. What is added is O(1) per BUFFER, not per sample: read the
+# filter state before and after the loop and report the finite -> non-finite
+# transition. That is the only place the latch is visible at all, since y_prev
+# is private to the blocker and a poisoned filter is otherwise silent forever.
+#
+# Gating on `was_finite` means one line per latch EVENT rather than one per
+# block for the rest of the process's life. The state is deliberately NOT
+# repaired -- ADR-0001's rule is report, do not fabricate; the filter really is
+# poisoned and dcblocker_reset is the named cure.
 fn dcblocker_process_buffer(b, samples) {
+    var was_finite = prani_is_finite(DcBlocker_y_prev(b));
     var n = vec_len(samples);
     var i = 0;
     while (i < n) {
         vec_set(samples, i, dcblocker_process(b, vec_get(samples, i)));
         i = i + 1;
+    }
+    if (was_finite == 1) {
+        if (prani_is_finite(DcBlocker_y_prev(b)) == 0) {
+            prani_log_error("prani: dc blocker state went non-finite -- filter latched until reset");
+        }
     }
 }
 
@@ -78,6 +137,15 @@ fn dcblocker_reset(b) {
 # prani_vec_extend(dst, src) -- append every element of `src` to `dst`.
 # Was open-coded in sequence_call_bout_synthesize, sequence_call_phrase_synthesize
 # and crvoice_vocalize_with_intent's block accumulation.
+#
+# UNGUARDED (2.0.5), and there is nothing here to guard: this copies opaque f64
+# bit patterns and never interprets one as a number, so no element has a range.
+# Scanning `src` for non-finite values would add an O(n) pass to the block
+# accumulation path to reject a value that the entry point should have refused
+# before any of it was synthesized -- the wrong layer, at a cost proportional to
+# the audio. (The one hazard that IS real here, `src` being a negative error
+# code rather than a vec, is F1's class, not an input range: all three call
+# sites check prani_is_err before extending.)
 fn prani_vec_extend(dst, src) {
     var n = vec_len(src);
     var i = 0;
@@ -89,12 +157,34 @@ fn prani_vec_extend(dst, src) {
 }
 
 # prani_vec_push_zeros(v, n) -- append `n` zero samples (inter-call silence, or a
-# zeroed mix/render buffer). A non-positive `n` appends nothing, which is what
-# every call site wants: gap counts come from f64_to(seconds * rate), and
-# f64_to saturates a NaN or overflowing product to i64::MIN.
+# zeroed mix/render buffer). Range: n in [0, i64::MAX]; returns 0, or
+# PRANI_ERR_INVALID_VOCALIZATION for a negative `n`.
 # Was open-coded in the bout gap, the phrase gap, the chorus mix init and
 # stream_next_block.
+#
+# 2.0.5 SPLITS the old "non-positive appends nothing" rule in two, because the
+# two halves mean opposite things:
+#
+#   n == 0  is VALID and stays valid. Every call site legitimately reaches it --
+#           a zero gap between calls, a zero-duration chorus (the oracle's
+#           test_zero_duration_synthesis asserts an EMPTY BUFFER, not an error),
+#           an exhausted stream block. Nothing to append is an answer, not a
+#           failure, so this still appends nothing and still returns 0.
+#   n < 0   is IMPOSSIBLE as a request and is now REPORTED. A negative count
+#           cannot be asked for; it can only be arithmetic that already failed.
+#           Both ways it fails are audit findings: f64_to saturates a NaN or
+#           out-of-range product to i64::MIN (F11), and `base + max_off * 2` in
+#           synthesize_chorus wraps past i64::MAX to a negative (F10, reproduced
+#           in tests/dsp.tcyr at timing_spread 1e14). Appending nothing in that
+#           case is F11's exact complaint -- "a silent empty result where an
+#           error would be better."
+#
+# The buffer is untouched either way, so no valid input changes behaviour and no
+# caller's output changes for ANY input: only the returned code moves, from 0 to
+# a negative, on counts that were already broken. The four call sites discard
+# the return today; this is the channel that lets them stop.
 fn prani_vec_push_zeros(v, n) {
+    if (n < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var i = 0;
     while (i < n) {
         vec_push(v, 0);

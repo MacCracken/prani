@@ -20,8 +20,60 @@
 # the module-top IEEE-754 hex constants below (decimals in comments).
 #
 # RESULT convention: stream_new returns a SynthStream heap ptr (large positive)
-# on success, or a NEGATIVE PRANI_ERR_INVALID_VOCALIZATION when the species
-# cannot produce the requested vocalization.
+# on success, or a NEGATIVE PRANI_ERR_* -- INVALID_VOCALIZATION when the species
+# cannot produce the requested vocalization, plus the input-range codes below.
+#
+# INPUT RANGES (2.0.5; audit findings F10/F11). Every range is stated as
+# "accepted", and anything outside it is REPORTED, never clamped -- clamping a
+# value the caller did not ask for hides the caller's bug (ADR-0001).
+#
+#   stream_new(voice, ...)      voice must be a live handle (> 0). A negative
+#                               argument is an UNCHECKED deserializer code
+#                               (crvoice_from_json_str returns -3), which would
+#                               otherwise be dereferenced.  -> INVALID_SPECIES
+#   stream_new sample_rate      finite and > 0. NO floor of prani's own: svara
+#                               owns the real threshold (~1000 Hz) and ADR-0001
+#                               forbids restating it, so a 10 Hz stream still
+#                               CONSTRUCTS and fails at the first fill under
+#                               ADR-0003.                    -> INVALID_TRACT
+#   stream_new duration         finite and >= 0 seconds. Zero is VALID -- the
+#                               oracle's test_zero_duration_synthesis asserts an
+#                               empty buffer, not an error. Negative is rejected
+#                               (DIVERGENCE: Rust's `as usize` saturated it to 0
+#                               and returned a silent empty stream).
+#                                                            -> INVALID_VOCALIZATION
+#   stream_new total samples    duration * duration_scale * sample_rate must land
+#                               in [0, 2^53]. 2^53 is the largest count an f64
+#                               holds exactly; past i64's range f64_to saturates
+#                               to i64::MIN (measured), so an unguarded huge or
+#                               non-finite product yielded a NEGATIVE
+#                               total_samples and a stream that reported
+#                               is_finished == 1 with no error. At 44.1 kHz the
+#                               bound is ~6470 years of audio.
+#                                                            -> INVALID_VOCALIZATION
+#   stream_new voice snapshot   f0, effort_amp and spectral_tilt must be finite.
+#                               f64_clamp passes NaN through (measured), so
+#                               crvoice_with_size(v, NaN) / with_vocal_effort
+#                               smuggle a NaN into the voice; the builders return
+#                               `self` and have no error channel (roadmap 2.1.0),
+#                               so the guard lands here, where the stream
+#                               SNAPSHOTS them -- upstream of every svara call
+#                               this module makes.            -> INVALID_SPECIES
+#   stream_next_block block_size >= 0; no upper bound (it is clamped to the
+#                               remaining samples, itself bounded above).
+#                                                            -> INVALID_VOCALIZATION
+#   stream_fill_buffer          takes no numeric parameter. A null/negative
+#                               stream or buffer handle returns 0 written and
+#                               does NOT retire the stream: it is a caller
+#                               mistake, not a property of the stream (ADR-0003
+#                               settles the same question for a zero-length
+#                               buffer).
+#   stream_pitch_contour_at     returns an f64, NOT a "value or negative code"
+#                               (PRANI_ERR_INVALID_TRACT is -1, which is itself a
+#                               NaN bit pattern), so it has no error channel. A
+#                               NaN t propagates as NaN instead of fabricating an
+#                               f0; the stream's own call site is guarded in
+#                               stream_fill_buffer.
 #
 # tract field: lazily initialized. Starts as 0 (== None sentinel); the first
 # stream_fill_buffer builds it via crtract_new (Option::get_or_insert_with).
@@ -71,6 +123,9 @@ var PR_ST_1_5   = 0x3ff8000000000000;   # 1.5
 var PR_ST_0_25  = 0x3fd0000000000000;   # 0.25
 var PR_ST_1_1   = 0x3ff199999999999a;   # 1.1
 var PR_ST_0_75  = 0x3fe8000000000000;   # 0.75
+# 2^53 == 9007199254740992: the largest sample count an f64 represents exactly,
+# and the ceiling stream_new accepts for duration * duration_scale * sample_rate.
+var PR_ST_MAX_SAMPLES = 0x4340000000000000;   # 9007199254740992.0 == 2^53
 
 # ================================================================
 # SynthStream -- a pull-based streaming synthesizer. Produces audio block-by-
@@ -100,20 +155,39 @@ struct SynthStream {
 # allocate the full output; audio is produced incrementally via
 # stream_fill_buffer / stream_next_block.
 #
-# Returns a SynthStream ptr on success, or a NEGATIVE
-# PRANI_ERR_INVALID_VOCALIZATION if the species cannot produce the vocalization.
+# Returns a SynthStream ptr on success, or a NEGATIVE PRANI_ERR_* -- see the
+# module header's INPUT RANGES table for every rejection and its code.
 #must_use
 fn stream_new(voice, voc, intent, sample_rate, duration) {
+    # A live voice handle is a heap pointer. 0 is null and a NEGATIVE argument is
+    # an unchecked crvoice_from_json_str failure code (-3): both would be
+    # dereferenced by crvoice_species below, which is F1's crash class.
+    if (voice <= 0) { return PRANI_ERR_INVALID_SPECIES; }
     var species = crvoice_species(voice);
     if (species_supports_vocalization(species, voc) == 0) {
         return PRANI_ERR_INVALID_VOCALIZATION;
     }
+    # sample_rate: finite and > 0. Deliberately NO lower bound of prani's own --
+    # svara owns the real threshold and ADR-0001 forbids duplicating it, so
+    # 10 Hz still constructs here and is rejected at the first fill (ADR-0003).
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    # duration: finite and >= 0. Zero is VALID (the oracle's
+    # test_zero_duration_synthesis asserts an empty buffer, not an error).
+    if (prani_is_non_negative(duration) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     var modifiers = prani_intent_modifiers(intent);
     var f0 = f64_mul(crvoice_effective_f0(voice), IntentModifiers_pitch_scale(modifiers));
     var effective_duration = f64_mul(duration, IntentModifiers_duration_scale(modifiers));
-    # total_samples = (effective_duration * sample_rate) as usize
-    var total_samples = f64_to(f64_mul(effective_duration, sample_rate));
+    # total_samples = (effective_duration * sample_rate) as usize -- but f64_to
+    # saturates to i64::MIN for every value outside i64's range, non-finite or
+    # merely huge (measured 2026-08-31), so the product is ranged BEFORE the
+    # conversion. The intent's duration_scale is inside the check because it is
+    # what can push an accepted duration over the edge (Mating doubles it).
+    var raw_samples = f64_mul(effective_duration, sample_rate);
+    if (prani_in_range(raw_samples, 0, PR_ST_MAX_SAMPLES) == 0) {
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
+    var total_samples = f64_to(raw_samples);
 
     var effort = crvoice_vocal_effort(voice);
     var effort_amp = f64_add(PR_ST_0_3, f64_mul(effort, PR_ST_1_2));
@@ -123,6 +197,17 @@ fn stream_new(voice, voc, intent, sample_rate, duration) {
     var spectral_tilt = f64_add(
       f64_add(SpeciesParams_spectral_tilt(species_params), vocalization_tilt),
       effort_tilt_offset);
+
+    # F11, at the point of use: these three are SNAPSHOTS of the voice, and
+    # f64_clamp(NaN, lo, hi) is NaN (measured), so every builder that clamps --
+    # crvoice_with_size, crvoice_with_vocal_effort, crvoice_with_f0_offset --
+    # will hand a NaN straight through. The builders return `self` and cannot
+    # report it (roadmap 2.1.0's constructor contract), so it is caught here,
+    # before the snapshot is stored and long before it reaches svara as a
+    # contour f0, a tilt coefficient or an output gain.
+    if (prani_finite3(f0, effort_amp, spectral_tilt) == 0) {
+        return PRANI_ERR_INVALID_SPECIES;
+    }
 
     var is_cat_purr = 0;
     if (voc == PRANI_VOC_PURR) {
@@ -172,6 +257,13 @@ fn stream_samples_rendered(self) {
 # synthesized BLOCK vec, then block[0..to_render] is copied into
 # buffer[0..to_render] -- bit-identical to Rust's copy-then-process-buffer.
 fn stream_fill_buffer(self, buffer) {
+    # Handle guards. The function's only failure channel is "0 samples written",
+    # so neither can be reported as a code -- but both are dereferences today (a
+    # negative argument is an unchecked stream_new / crvoice_vocalize code). Per
+    # ADR-0003 these do NOT retire the stream: a bad handle is a caller mistake,
+    # not a property of the stream, exactly like the zero-length buffer below.
+    if (self <= 0) { return 0; }
+    if (buffer <= 0) { return 0; }
     if (stream_is_finished(self) == 1) { return 0; }
 
     var total = SynthStream_total_samples(self);
@@ -209,13 +301,25 @@ fn stream_fill_buffer(self, buffer) {
         # cat purr special path. purr_f0 = clamp(27/1.0, 20, 35) (size baked in).
         var purr_f0 = f64_clamp(PR_ST_27_0, PR_ST_20_0, PR_ST_35_0);
         block = crtract_synthesize_purr(tract, to_render, purr_f0);
-        have_block = 1;   # synthesize_purr never fails
+        # 2.0.5 made this fallible (it now guards purr_f0 and num_samples), so
+        # it takes the same arm as the standard path below rather than being
+        # assumed to succeed -- ADR-0003 then reports 0 written and retires.
+        if (prani_is_err(block) == 0) { have_block = 1; }
     } else {
         # standard synthesis with pitch contour
         var total_max = total;
         if (total_max < 1) { total_max = 1; }   # total_samples.max(1)
         var t = f64_div(f64_from(rendered), f64_from(total_max));
         var contour = stream_pitch_contour_at(SynthStream_vocalization(self), SynthStream_f0(self), t);
+        # POINT OF USE: stream_new proved f0 finite, but the contour MULTIPLIES
+        # it (BARK opens at 1.2x, WHINE closes at 1.6x), so an f0 near f64::MAX
+        # can still overflow to +inf on the way to svara. Treat it as a synthesis
+        # failure and take ADR-0003's arm verbatim -- 0 written, stream retired --
+        # rather than handing svara a frequency that is not a number.
+        if (prani_is_finite(contour) == 0) {
+            SynthStream_set_samples_rendered(self, total);
+            return 0;
+        }
 
         var modifiers = prani_intent_modifiers(SynthStream_intent(self));
         var boundary_boost = F64_ONE;
@@ -251,8 +355,11 @@ fn stream_fill_buffer(self, buffer) {
 
     if (have_block == 1) {
         # apply spectral tilt to the block (in place over the full block vec).
-        crtract_apply_spectral_tilt(block, SynthStream_spectral_tilt(self),
+        # 2.0.5 made this fallible; a rejected tilt must take ADR-0003's arm
+        # rather than silently returning an untilted block as a good fill.
+        var e_tilt = crtract_apply_spectral_tilt(block, SynthStream_spectral_tilt(self),
           SynthStream_sample_rate(self));
+        if (prani_is_err(e_tilt) == 1) { have_block = 0; }
         # apply amplitude: amp = amplitude_scale * effort_amp.
         var amp = f64_mul(SynthStream_amplitude_scale(self), SynthStream_effort_amp(self));
         var bi = 0;
@@ -271,8 +378,20 @@ fn stream_fill_buffer(self, buffer) {
 
 # next_block(self, block_size) -- produce the next block of audio as an owned
 # vec. block_size is clamped to the remaining samples; returns an empty vec when
-# nothing remains.
+# nothing remains, or a NEGATIVE PRANI_ERR_INVALID_VOCALIZATION on a bad handle
+# or a negative block_size (the "vec handle or negative code" convention
+# crvoice_vocalize already uses). Check with prani_is_err before vec_len.
 fn stream_next_block(self, block_size) {
+    # Same handle class as stream_fill_buffer, but this one CAN report it: a
+    # negative return is distinguishable from the empty vec that means "done".
+    if (self <= 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # block_size >= 0. A negative one used to fall through `remaining < actual`
+    # (remaining is never negative), skip the `actual == 0` early return, push
+    # zero samples, and hand fill_buffer an empty vec -- so it returned an EMPTY
+    # VEC, indistinguishable from a finished stream. That silent-empty result is
+    # exactly what 2.0.5 exists to replace. No upper bound: block_size is
+    # clamped to `remaining`, which stream_new already bounded at 2^53.
+    if (block_size < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var total = SynthStream_total_samples(self);
     var rendered = SynthStream_samples_rendered(self);
     # remaining = total.saturating_sub(rendered)
@@ -337,6 +456,15 @@ fn stream_pitch_contour_at(voc, base_f0, t) {
 
     var n = vec_len(points);           # total slots (2 per point)
     var tc = f64_clamp(t, 0, F64_ONE);
+    # A NaN t survives the clamp (measured: f64_clamp(NaN, lo, hi) -> NaN), every
+    # comparison in the walk below is then false, and the fallthrough returned
+    # base_f0 * <last multiplier> -- 240 Hz for HOWL at base 400. That is a
+    # fabricated plausible f0 for an input that means nothing (F11). This
+    # function returns an f64, not a "value or negative code" (-1 IS a NaN bit
+    # pattern), so there is no code to return: propagate the NaN, which every
+    # finiteness check downstream already catches. Only NaN escapes the clamp --
+    # +/-inf are bounded to 1/0 and keep the oracle's behaviour untouched.
+    if (prani_in_range(tc, 0, F64_ONE) == 0) { return f64_mul(base_f0, tc); }
     if (n == 0) { return base_f0; }
     var num_points = n / 2;
     var i = 0;

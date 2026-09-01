@@ -1,4 +1,4 @@
-commit	1c8ad9fd018d26e51ce2f6bf96edc91df97fb283	svara	https://github.com/MacCracken/svara.git	3.5.3
+commit	614405d048ffaeaecc30f656425f734c6dad1c0a	svara	https://github.com/MacCracken/svara.git	3.5.4
 commit	e9111becf7370c256af017e33fae4ba294881c7d	naad	https://github.com/MacCracken/naad.git	2.2.2
 commit	1bc71e3caf5d97b6e6a5902cc377afd02640631c	hisab	https://github.com/MacCracken/hisab.git	2.11.2
 commit	8c5537be621d319ec5b7fdcbe58a53e41f856ba9	goonj	https://github.com/MacCracken/goonj.git	2.0.4
@@ -25,7 +25,7 @@ df8622429b79c3d4386f282b4e4c060737f894b7f50ee09f49b4e3f00ac37373  lib/syscalls_x
 c88c2ab7f87fdbf63d8e8cb12d43471e7863315f8053341f295b2237788e6d78  lib/args.cyr
 942c760a65fc50f61dfedac20eb5f4f2032b8a955e13450835acff775824b811  lib/syscalls.cyr
 299c2c7e203b339a6b97d3ab88d15f3465d72bda018c61e6951819eabd7cc018  lib/alloc_windows.cyr
-93e3b1ab3a22937cf18de0831577a38933c4b5c4671e23964ec78d8154a8aa8e  lib/svara.cyr
+9325af4463a77efd3e69dde8a29fae5536df3e1ab271f2e98701b24a0e75197c  lib/svara.cyr
 f7b9d52f29de6d3d633962ccc765a76637091a7256eebc1da5547530eed2c44b  lib/args_win.cyr
 3adc5cad2dfa0048d24bc393c4d1a13e0e77dd4983f78e895fdedd19c584203c  lib/syscalls_aarch64_linux.cyr
 0236ac247d6b1bd862988661c6eadbc8b56476b473c2aa6fc28740767b9244f1  lib/bench.cyr

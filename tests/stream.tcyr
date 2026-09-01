@@ -322,5 +322,201 @@ while (cq < 256) {
 }
 assert_gt(cdiff, 0, "purr stream advances state -- block 2 differs from block 1");
 
+# ================================================================
+# 2.0.5 -- input-range validation. Every group below asserts a REJECTION plus a
+# control proving the accepted range is untouched. The ranges themselves are
+# written down in src/stream.cyr's INPUT RANGES header block.
+# ================================================================
+
+# ---- 2.0.5 test constants ---------------------------------------------------
+var T_1E300    = 0x7e37e43c8800759c;   # 1e300   finite, but 1e300 samples is not
+var T_2P53     = 0x4340000000000000;   # 2^53    9007199254740992, the ceiling
+var T_2P54     = 0x4350000000000000;   # 2^54    one binade past the ceiling
+var T_1_7E308  = 0x7fee42d130773b76;   # 1.7e308 finite f0; x1.2 (BARK) is +inf
+var T_0_8      = 0x3fe999999999999a;   # 0.8     a real vocal-effort setting
+var T_2_0      = 0x4000000000000000;   # 2.0     a real size scale
+var T_NAN = f64_div(0, 0);
+
+# ================================================================
+test_group("2.0.5 stream_new -- sample_rate must be finite and > 0");
+# RANGE: (0, +inf) finite. No floor of prani's own -- svara owns the real
+# threshold (~1000 Hz) and ADR-0001 forbids restating it here.
+var g_v = crvoice_new(PRANI_SP_WOLF);
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_NAN, T_DUR_005),
+  PRANI_ERR_INVALID_TRACT, "NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, PRANI_POS_INF, T_DUR_005),
+  PRANI_ERR_INVALID_TRACT, "+inf sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, 0, T_DUR_005),
+  PRANI_ERR_INVALID_TRACT, "zero sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_neg(T_SR), T_DUR_005),
+  PRANI_ERR_INVALID_TRACT, "negative sample_rate -> PRANI_ERR_INVALID_TRACT");
+# CONTROL: the ADR-0001/ADR-0003 split is preserved exactly. 10 Hz is a rate
+# svara will refuse, and stream_new must STILL construct -- the refusal belongs
+# to the first fill, which reports 0 written and retires (tests/hardening.tcyr
+# pins that contract, and this guard must not move it forward to construction).
+var g_lo = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), T_1_0);
+assert_eq(prani_is_err(g_lo), 0, "10 Hz still CONSTRUCTS -- svara's floor stays a fill-time failure");
+var g_lobuf = vec_new();
+prani_vec_push_zeros(g_lobuf, 8);
+assert_eq(stream_fill_buffer(g_lo, g_lobuf), 0, "and the 10 Hz stream fails at the fill (ADR-0003)");
+assert_eq(stream_is_finished(g_lo), 1, "and retires so a drain loop terminates (ADR-0003)");
+
+# ================================================================
+test_group("2.0.5 stream_new -- duration must be finite and >= 0 (zero is VALID)");
+# RANGE: [0, +inf) finite. Zero is accepted because the oracle's
+# test_zero_duration_synthesis asserts an empty buffer, NOT an error.
+var g_z = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, 0);
+assert_eq(prani_is_err(g_z), 0, "zero duration constructs (oracle: empty, not an error)");
+assert_eq(stream_total_samples(g_z), 0, "zero duration -> total_samples 0");
+assert_eq(stream_is_finished(g_z), 1, "zero-duration stream is finished on arrival");
+var g_zbuf = vec_new();
+prani_vec_push_zeros(g_zbuf, 32);
+assert_eq(stream_fill_buffer(g_z, g_zbuf), 0, "and it writes 0 samples");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_NAN),
+  PRANI_ERR_INVALID_VOCALIZATION, "NaN duration -> PRANI_ERR_INVALID_VOCALIZATION");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, PRANI_POS_INF),
+  PRANI_ERR_INVALID_VOCALIZATION, "+inf duration -> PRANI_ERR_INVALID_VOCALIZATION");
+# DIVERGENCE from the oracle: Rust's `(effective_duration * sample_rate) as usize`
+# saturates a negative product to 0, so a negative duration produced a silent
+# empty stream there. f64 -> i64 in Cyrius does not saturate to 0 (it keeps the
+# sign), so the port would hand the host total_samples == -44100. Report it.
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, f64_neg(T_1_0)),
+  PRANI_ERR_INVALID_VOCALIZATION, "negative duration -> error (oracle silently returned empty)");
+
+# ================================================================
+test_group("2.0.5 stream_new -- total_samples must be exactly representable");
+# RANGE: duration * duration_scale * sample_rate in [0, 2^53]. The bound is
+# f64's exact-integer ceiling, not a taste call: past i64's range f64_to
+# saturates to i64::MIN for finite AND non-finite inputs alike (measured
+# 2026-08-31 and pinned here), which is what made an unguarded huge duration a
+# NEGATIVE total_samples and a stream that claimed to be finished.
+assert_lt(f64_to(T_1E300), 0, "measured: f64_to(1e300) saturates NEGATIVE (i64::MIN)");
+assert_eq(f64_to(T_NAN), f64_to(PRANI_POS_INF), "measured: NaN and +inf both saturate to the same i64::MIN");
+assert_eq(f64_to(T_2P53), 9007199254740992, "measured: 2^53 converts exactly");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "1e300 s at 44.1 kHz -> rejected (product overflows to +inf)");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "finite-but-unrepresentable product (1e300 samples) also rejected");
+# the ceiling itself, from both sides, at 1 Hz so the product is the duration.
+var g_max = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_2P53);
+assert_eq(prani_is_err(g_max), 0, "exactly 2^53 samples is accepted (the boundary is inclusive)");
+assert_eq(stream_total_samples(g_max), 9007199254740992, "and total_samples is that count exactly");
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_2P54),
+  PRANI_ERR_INVALID_VOCALIZATION, "2^54 samples -> rejected");
+# the intent scale is INSIDE the check: Mating doubles an accepted duration.
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_MATING, T_1_0, T_2P53),
+  PRANI_ERR_INVALID_VOCALIZATION, "Mating (x2 duration) pushes an accepted 2^53 over the ceiling");
+# CONTROL: an hour of audio at 44.1 kHz is 158,760,000 samples and still builds.
+var g_hr = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, f64_from(3600));
+assert_eq(prani_is_err(g_hr), 0, "an hour-long stream still constructs");
+assert_eq(stream_total_samples(g_hr), 158760000, "3600 s * 44100 == 158760000 samples");
+
+# ================================================================
+test_group("2.0.5 stream_new -- a NaN voice config is rejected at the snapshot (F11)");
+# The builders clamp, and f64_clamp(NaN, lo, hi) is NaN (measured), so a NaN
+# reaches the voice intact. crvoice_with_* return `self` and have no error
+# channel (roadmap 2.1.0), so the guard lands where the stream SNAPSHOTS them.
+var g_vn = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_NAN);
+assert_eq(prani_is_finite(crvoice_effective_f0(g_vn)), 0,
+  "measured: a NaN size_scale survives every clamp into effective_f0");
+assert_eq(stream_new(g_vn, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005),
+  PRANI_ERR_INVALID_SPECIES, "NaN f0 snapshot -> PRANI_ERR_INVALID_SPECIES");
+var g_ve = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), T_NAN);
+assert_eq(prani_is_finite(crvoice_vocal_effort(g_ve)), 0,
+  "measured: a NaN vocal_effort survives its clamp too");
+assert_eq(stream_new(g_ve, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005),
+  PRANI_ERR_INVALID_SPECIES, "NaN effort_amp/spectral_tilt snapshot -> PRANI_ERR_INVALID_SPECIES");
+# CONTROL: a real builder chain is untouched and still streams finite audio.
+var g_vok = crvoice_with_vocal_effort(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_2_0), T_0_8);
+var g_sok = stream_new(g_vok, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(g_sok), 0, "size 2.0 + effort 0.8 still constructs");
+var g_okbuf = vec_new();
+prani_vec_push_zeros(g_okbuf, 256);
+assert_eq(stream_fill_buffer(g_sok, g_okbuf), 256, "and still fills 256 samples");
+assert_eq(t_all_finite(g_okbuf), 1, "and what it writes is finite");
+
+# ================================================================
+test_group("2.0.5 stream handles -- null and unchecked error codes");
+# A negative handle is an unchecked deserializer/constructor code, which is F1's
+# crash class (dereferencing a small negative integer), not a numeric range --
+# but it arrives through the same door and costs one comparison.
+assert_eq(stream_new(0, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005),
+  PRANI_ERR_INVALID_SPECIES, "null voice -> PRANI_ERR_INVALID_SPECIES, not a deref");
+assert_eq(stream_new(PRANI_ERR_INVALID_SPECIES, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005),
+  PRANI_ERR_INVALID_SPECIES, "an unchecked crvoice_from_json_str code -> rejected, not dereferenced");
+var g_h = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+var g_hbuf = vec_new();
+prani_vec_push_zeros(g_hbuf, 64);
+assert_eq(stream_fill_buffer(0, g_hbuf), 0, "fill on a null stream -> 0 written");
+assert_eq(stream_fill_buffer(PRANI_ERR_INVALID_VOCALIZATION, g_hbuf), 0,
+  "fill on an unchecked stream_new code -> 0 written");
+assert_eq(stream_fill_buffer(g_h, 0), 0, "fill with a null buffer -> 0 written");
+assert_eq(stream_samples_rendered(g_h), 0,
+  "a bad-handle fill does NOT retire the stream -- caller mistake, not a stream property (ADR-0003)");
+assert_eq(stream_is_finished(g_h), 0, "so the stream is still live");
+assert_eq(stream_fill_buffer(g_h, g_hbuf), 64, "and a real buffer still fills it");
+assert_eq(stream_next_block(0, 256), PRANI_ERR_INVALID_VOCALIZATION,
+  "next_block on a null stream -> PRANI_ERR_INVALID_VOCALIZATION");
+
+# ================================================================
+test_group("2.0.5 stream_next_block -- block_size must be >= 0");
+# RANGE: [0, +inf). No upper bound -- block_size is clamped to `remaining`,
+# which stream_new already bounded. A NEGATIVE block_size used to walk straight
+# through the sizing arithmetic and return an EMPTY VEC, indistinguishable from
+# a finished stream: the silent-empty result 2.0.5 exists to replace.
+var g_nb = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+var g_neg = stream_next_block(g_nb, 0 - 5);
+assert_eq(prani_is_err(g_neg), 1, "negative block_size -> an error code, not an empty vec");
+assert_eq(g_neg, PRANI_ERR_INVALID_VOCALIZATION, "negative block_size -> PRANI_ERR_INVALID_VOCALIZATION");
+assert_eq(stream_samples_rendered(g_nb), 0, "a rejected block_size consumed nothing");
+# CONTROL: 0 is a legal block_size (the oracle's min() reaches it naturally) and
+# a huge one is clamped, not rejected.
+assert_eq(vec_len(stream_next_block(g_nb, 0)), 0, "block_size 0 -> empty vec (unchanged)");
+assert_eq(stream_samples_rendered(g_nb), 0, "and block_size 0 consumed nothing either");
+var g_big = stream_next_block(g_nb, 100000);
+assert_eq(vec_len(g_big), 2205, "block_size 100000 clamps to the remaining 2205 (no upper bound)");
+assert_eq(t_all_finite(g_big), 1, "and the clamped block is finite");
+
+# ================================================================
+test_group("2.0.5 stream_pitch_contour_at -- a NaN t propagates, it does not fabricate");
+# MEASURED before the guard: f64_clamp(NaN, 0, 1) is NaN, so every comparison in
+# the table walk is false and the fallthrough returned base_f0 * <last
+# multiplier> == 400 * 0.6 == 240 Hz -- a perfectly plausible howl f0 for an
+# input that means nothing. The function returns an f64, not a "value or
+# negative code" (PRANI_ERR_INVALID_TRACT is -1, which is itself a NaN bit
+# pattern), so there is no code to return: propagate the NaN.
+assert_eq(prani_is_finite(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, T_NAN)), 0,
+  "NaN t -> NaN, not a fabricated f0");
+assert_neq(f64_to(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, T_NAN)), 240,
+  "specifically NOT the 240 Hz the fallthrough used to invent");
+# CONTROL: infinities are NOT NaN -- the clamp bounds them, which is the oracle's
+# own behaviour (f32 clamp(inf, 0, 1) == 1), so they must still return an f0.
+assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, PRANI_POS_INF),
+  stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, T_1_0), "+inf t clamps to 1 -> same f0 as t=1");
+assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, PRANI_NEG_INF), T_320,
+  "-inf t clamps to 0 -> 320, exactly as t=0 does");
+assert_eq(prani_is_finite(stream_pitch_contour_at(PRANI_VOC_HOWL, T_NAN, 0)), 0,
+  "a NaN base_f0 propagates as it always did");
+
+# ================================================================
+test_group("2.0.5 fill_buffer -- a non-finite contour retires the stream (ADR-0003)");
+# stream_new proves f0 finite, but the contour MULTIPLIES it -- BARK opens at
+# 1.2x -- so an f0 near f64::MAX overflows to +inf on the way to svara. This is
+# the point-of-use guard for the one non-finite value stream_new cannot catch.
+# The state is built the way a crafted JSON document builds it: a params block
+# whose f0 range is absurd but finite.
+var g_vbig = crvoice_new(PRANI_SP_WOLF);
+SpeciesParams_set_f0_max(CreatureVoice_params(g_vbig), T_1_7E308);
+SpeciesParams_set_f0_default(CreatureVoice_params(g_vbig), T_1_7E308);
+assert_eq(prani_is_finite(crvoice_effective_f0(g_vbig)), 1, "1.7e308 is a FINITE f0 -- stream_new accepts it");
+var g_sbig = stream_new(g_vbig, PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
+assert_eq(prani_is_err(g_sbig), 0, "so the stream constructs");
+assert_eq(stream_total_samples(g_sbig), 2205, "with a normal 2205-sample length");
+var g_bbuf = vec_new();
+prani_vec_push_zeros(g_bbuf, 64);
+assert_eq(stream_fill_buffer(g_sbig, g_bbuf), 0,
+  "but the fill reports 0 written -- 1.7e308 * 1.2 is +inf, never handed to svara");
+assert_eq(stream_is_finished(g_sbig), 1, "and the stream retires (ADR-0003), so a drain loop terminates");
+
 var rc = assert_summary();
 syscall(60, rc);

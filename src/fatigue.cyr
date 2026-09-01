@@ -6,8 +6,8 @@
 #   - Alarm habituation rises with unreinforced alarms ("cried wolf"), decays
 #     slowly during rest, and is reset on reinforcement.
 #
-# Requires (from the build/test unit): error.cyr + stdlib alloc/math. The
-# module file itself has no `include` lines.
+# Requires (from the build/test unit): error.cyr + logging.cyr + stdlib
+# alloc/math. The module file itself has no `include` lines.
 #
 # FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
 # widening is forced and improves precision). Non-integer literals -> module-top
@@ -32,6 +32,40 @@ var PR_FAT_BREATH_MAX       = 0x3fc999999999999a;   # 0.2    max breathiness del
 var PR_FAT_AMP_FATIGUE_MAX  = 0x3fd999999999999a;   # 0.4    fatigue amplitude reduction span
 var PR_FAT_AMP_HAB_MAX      = 0x3fe0000000000000;   # 0.5    habituation amplitude reduction span
 var PR_FAT_JITTER_SPAN      = 0x3ff8000000000000;   # 1.5    fatigue jitter increase span
+
+# ================================================================
+# 2.0.5 input-range validation (audit F11). The accepted duration range for
+# BOTH record_call() and rest() is [0.0, 1e9] seconds, inclusive.
+#
+# Measured on this module 2026-08-31 (pinned in tests/fatigue.tcyr):
+#   record_call(NaN, _)  -> fatigue = NaN AND bout_calling_time = NaN. Every
+#                           later modifiers() then returns four NaNs, and a
+#                           later VALID call cannot heal it (NaN + x = NaN).
+#   record_call(+inf, _) -> fatigue clamps to 1.0 (f64_clamp DOES bound the
+#                           infinities), but bout_calling_time = +inf.
+#   record_call(-1000)   -> fatigue floors at 0, bout_calling_time = -1000.0.
+#   rest(NaN)            -> f64_max(NaN, 0) is 0, NOT NaN (f64_max is
+#                           asymmetric -- f64_max(0, NaN) IS NaN), so fatigue
+#                           and alarm_habituation are silently ZEROED: a
+#                           creature mid-bout reported fully rested, exactly
+#                           the fabricated-plausible-answer ADR-0001 rejects.
+#   rest(-inf)           -> fatigue = +inf, outside its documented [0,1].
+#   rest(-1000)          -> fatigue = 70.15, also outside [0,1]. rest() has a
+#                           f64_max(_, 0) floor and no ceiling, so a negative
+#                           duration is an unbounded ANTI-rest.
+#
+# Zero is VALID -- an exact no-op on both, and the oracle's
+# test_zero_duration_synthesis establishes that a zero duration is not an error.
+#
+# The UPPER bound exists because bout_calling_time is the one field here with
+# no clamp: a finiteness check alone still lets two calls of 1e308 push the
+# accumulator to +inf. 1e9 s is ~31.7 years -- seven orders past any creature
+# lifespan and eight past anything this model resolves (its own constants
+# saturate fatigue in ~67 s, clear it in ~14 s, decay habituation in ~44 s and
+# reset a bout after 5 s) -- and it takes ~1.8e299 accepted calls at the bound
+# to drive the accumulator to +inf.
+# ================================================================
+var PR_FAT_MAX_DURATION_S   = 0x41cdcd6500000000;   # 1.0e9  seconds (~31.7 years)
 
 # ================================================================
 # FatigueState -- tracks vocal fatigue and call habituation.
@@ -86,7 +120,21 @@ fn fatigue_alarm_habituation(self) {
 #   is_alarm : 1 if this was an alarm/threat call, 0 otherwise
 # Fatigue accumulates by duration*rate (clamped to [0,1]). Alarm calls bump the
 # unreinforced-alarm count and, when not reinforced, raise habituation by 0.1.
+# 2.0.5: `duration` must be in [0, 1e9] seconds (see PR_FAT_MAX_DURATION_S).
+# record_call has NO error channel -- it returns nothing and adding one would
+# be a signature change (roadmap 2.1.0's constructor/mutator-contract work) --
+# so a bad duration is REPORTED through prani_log_error and the whole call
+# event is dropped, leaving the accumulators exactly as they were. Refusing one
+# call is strictly less lossy than admitting a NaN that makes every field, and
+# every later modifiers(), permanently meaningless; and it is not a fabricated
+# answer in ADR-0001's sense, because no substitute value is invented.
+# DIVERGENCE: the f32 oracle accepted all of these and poisoned itself.
 fn fatigue_record_call(self, duration, is_alarm) {
+    if (prani_in_range(duration, 0, PR_FAT_MAX_DURATION_S) == 0) {
+        prani_log_error("prani: fatigue record_call duration out of range, call not recorded");
+        return 0;
+    }
+
     # bout_calling_time += duration
     FatigueState_set_bout_calling_time(self, f64_add(FatigueState_bout_calling_time(self), duration));
 
@@ -109,7 +157,18 @@ fn fatigue_record_call(self, duration, is_alarm) {
 #   duration : rest duration in seconds (f64)
 # Fatigue recovers at 0.07/s (floored at 0), habituation decays at 0.023/s
 # (floored at 0), and rest longer than 5s resets bout tracking.
+# 2.0.5: `duration` must be in [0, 1e9] seconds, same range and same reporting
+# path as record_call. rest() is the more dangerous of the two: f64_max(NaN, 0)
+# returns 0, so a NaN duration does not visibly poison anything -- it quietly
+# reports a mid-bout creature as fully rested and fully de-habituated, and a
+# negative duration runs the recovery backwards with no ceiling to stop it.
+# DIVERGENCE: the f32 oracle accepted all of these.
 fn fatigue_rest(self, duration) {
+    if (prani_in_range(duration, 0, PR_FAT_MAX_DURATION_S) == 0) {
+        prani_log_error("prani: fatigue rest duration out of range, rest not recorded");
+        return 0;
+    }
+
     # fatigue = (fatigue - duration * recovery_rate).max(0.0)
     var f = f64_sub(FatigueState_fatigue(self), f64_mul(duration, PR_FAT_RECOVERY_RATE));
     FatigueState_set_fatigue(self, f64_max(f, 0));
@@ -172,8 +231,23 @@ struct FatigueModifiers {
 # an unfatigued creature is (1.0, 1.0, 0.0, 0.0). Callers normally get one from
 # fatigue_modifiers(), not from here -- this is the explicit constructor the
 # table and the tests build with.
+#
+# 2.0.5: this is the single choke point through which every FatigueModifiers
+# prani builds passes, including the one modifiers() derives -- so a non-finite
+# field here is the F11 symptom wherever it originated. It CANNOT reject: it
+# returns a pointer with no error channel, and giving it one would change the
+# return contract (roadmap 2.1.0). It therefore reports and returns the values
+# it was given, unaltered: substituting the identity modifiers (0, 0, 1, 1)
+# would be precisely the plausible fabrication ADR-0001 rules out. The one
+# reachable producer of a non-finite field left in this module is a FatigueState
+# rebuilt by the derive-generated FatigueState_from_json_str from a document
+# prani did not write -- record_call and rest now refuse to create one.
 #must_use
 fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) {
+    var ok = prani_finite2(pitch_offset, breathiness_delta);
+    if (ok == 1) { ok = prani_finite2(amplitude_scale, jitter_scale); }
+    if (ok == 0) { prani_log_error("prani: fatigue modifiers built from a non-finite value"); }
+
     var m = alloc(sizeof(FatigueModifiers));
     FatigueModifiers_set_pitch_offset(m, pitch_offset);
     FatigueModifiers_set_breathiness_delta(m, breathiness_delta);

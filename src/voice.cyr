@@ -40,6 +40,42 @@
 # parity-meaningful properties (effective_f0 / contour interp / clamps / lombard
 # exact; finiteness / length / determinism for the full synthesis paths). serde
 # and tracing::trace! dropped.
+#
+# ================================================================
+# INPUT RANGES (2.0.5). Every fallible entry point here rejects out-of-range
+# numeric input with a negative PRANI_ERR_* rather than returning an empty or
+# all-NaN buffer as a success. The ranges, and where each one comes from:
+#
+#   sample_rate    finite, > 0        divisor in this module's OWN post-processing
+#                                     (t_sec = i/sample_rate, the nasal notch's
+#                                     r/theta, the trill AM clock). NOT a
+#                                     threshold: svara stays the sole authority
+#                                     on "too low to build a tract" (ADR-0001),
+#                                     so nothing here goes stale when it moves.
+#   duration       finite, >= 0       0 is VALID -- the oracle's
+#                                     test_zero_duration_synthesis asserts an
+#                                     EMPTY buffer, not an error.
+#   num_samples    >= 0               f64_to of a non-finite or overflowing
+#                                     (duration * sample_rate) is i64::MIN, and a
+#                                     negative bound renders a silently EMPTY
+#                                     buffer (audit F11).
+#   voc            [0, PRANI_VOC_COUNT)      the Rust enum could not hold anything
+#   intent         [0, PRANI_INTENT_COUNT)   else; the int tags can.
+#   size_scale     finite, > 0        divides f0_default (effective_f0) and 27.0
+#                                     (purr_f0). with_size clamps to [0.1, 10].
+#   breathiness    [0, 1]             exactly what with_breathiness clamps to.
+#   jitter         [0, 0.05]          exactly what with_jitter clamps to.
+#   shimmer        [0, 0.1]           exactly what with_shimmer clamps to.
+#   nasal_fraction finite, >= 0       fraction of the call that is nasal.
+#
+# The builders (crvoice_with_*) return `self` with no error channel, so a NaN
+# handed to one is stored (f64_clamp(NaN, lo, hi) == NaN -- NaN passes every
+# clamp) and only reported at the POINT OF USE, at the top of
+# crvoice_vocalize_with_intent. Giving the builders an error channel is 2.1.0's
+# constructor-contract work; guarding the consumer catches every path to svara
+# with zero API change. Measured before the guard: a NaN through with_size or
+# with_breathiness produced a full-length ALL-NaN buffer returned as SUCCESS.
+# ================================================================
 
 # ================================================================
 # Non-integer literal constants (IEEE-754 hex; decimals in comments).
@@ -143,22 +179,91 @@ fn crvoice_to_json(self, sb) {
     return 0;
 }
 
+# ---- SpeciesParams range check (2.0.5) --------------------------------------
+
+# formants_in_range(p) -- 1 iff the six resonator frequencies/bandwidths are
+# finite and > 0. Split out of crvoice_params_in_range purely to keep that
+# function readable; every species row in the table satisfies it (measured).
+#must_use
+fn crvoice_formants_in_range(p) {
+    if (prani_is_positive(SpeciesParams_formant0(p)) == 0) { return 0; }
+    if (prani_is_positive(SpeciesParams_formant1(p)) == 0) { return 0; }
+    if (prani_is_positive(SpeciesParams_formant2(p)) == 0) { return 0; }
+    if (prani_is_positive(SpeciesParams_bandwidth0(p)) == 0) { return 0; }
+    if (prani_is_positive(SpeciesParams_bandwidth1(p)) == 0) { return 0; }
+    return prani_is_positive(SpeciesParams_bandwidth2(p));
+}
+
+# params_in_range(p) -- 1 iff every SpeciesParams field is a value prani itself
+# would write, 0 otherwise (including a null p or a negative error code in p's
+# place). Used BOTH as the deserializer's field gate and as the point-of-use
+# guard at the top of crvoice_vocalize_with_intent, so the two cannot drift.
+#
+# The f0 fields are NON-NEGATIVE rather than positive: Snake is noise-only and
+# its row is f0_min == f0_max == f0_default == 0.0 (measured). f0_min <= f0_max
+# and f0_default within [f0_min, f0_max] hold for all 13 rows, Snake's degenerate
+# 0/0/0 included. resonance_seed is NOT range-checked -- it is an RNG seed, and
+# every i64 bit pattern is a legal one.
+#must_use
+fn crvoice_params_in_range(p) {
+    if (p == 0) { return 0; }
+    if (prani_is_err(p) == 1) { return 0; }
+    var app = SpeciesParams_apparatus(p);
+    if (app < PRANI_APP_LARYNGEAL) { return 0; }
+    if (app > PRANI_APP_NOISE_ONLY) { return 0; }
+    var f0_min = SpeciesParams_f0_min(p);
+    var f0_max = SpeciesParams_f0_max(p);
+    if (prani_is_non_negative(f0_min) == 0) { return 0; }
+    if (prani_is_non_negative(f0_max) == 0) { return 0; }
+    if (f64_le(f0_min, f0_max) == 0) { return 0; }
+    if (prani_in_range(SpeciesParams_f0_default(p), f0_min, f0_max) == 0) { return 0; }
+    if (prani_is_positive(SpeciesParams_tract_scale(p)) == 0) { return 0; }
+    if (crvoice_formants_in_range(p) == 0) { return 0; }
+    if (prani_in_range(SpeciesParams_breathiness(p), 0, F64_ONE) == 0) { return 0; }
+    if (prani_in_range(SpeciesParams_jitter(p), 0, PR_V_0_05) == 0) { return 0; }
+    if (prani_in_range(SpeciesParams_shimmer(p), 0, PR_V_0_1) == 0) { return 0; }
+    return prani_is_finite(SpeciesParams_spectral_tilt(p));
+}
+
 # from_json_str(json) -- rebuild a CreatureVoice from crvoice_to_json output.
 # `json` is a NUL-terminated cstring. Scalars are read back as exact i64 bit
 # patterns and `params` is rebuilt via species_params_from_node, so individual
 # breathiness/jitter/shimmer overrides survive the roundtrip.
 # Returns the CreatureVoice ptr, or a NEGATIVE PRANI_ERR_INVALID_SPECIES if
-# `json` is 0 or does not parse. Check with prani_is_err before using it.
+# `json` is 0, does not parse, or carries an OUT-OF-RANGE field. Check with
+# prani_is_err before using it.
+#
+# 2.0.5: every field is range-checked (ADR-0002 deferred exactly this). The
+# scalars arrive as raw i64 bit patterns, so nothing about the document's syntax
+# constrains them -- "size_scale": 0 deserializes to +0.0 and makes
+# crvoice_effective_f0 divide by zero. crvoice_to_json's own output always
+# satisfies these ranges because the builders clamp to them, so this can only
+# ever reject a document prani did not write. The ranges are with_size's
+# [0.1, 10.0], with_vocal_effort's [0, 1], with_f0_offset's +/-(f0_max - f0_min)
+# and the species table's own field ranges (crvoice_params_in_range).
 fn crvoice_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var species = bayan_json_v_int(bayan_json_v_obj_get(root, "species"));
+    if (species < 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (species >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
+    var params = species_params_from_node(bayan_json_v_obj_get(root, "params"));
+    if (crvoice_params_in_range(params) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    # with_f0_offset's own clamp range, read off the params just validated.
+    var range = f64_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
+    var f0_offset = bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset"));
+    if (prani_in_range(f0_offset, f64_neg(range), range) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var size_scale = bayan_json_v_int(bayan_json_v_obj_get(root, "size_scale"));
+    if (prani_in_range(size_scale, PR_V_0_1, f64_from(10)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var vocal_effort = bayan_json_v_int(bayan_json_v_obj_get(root, "vocal_effort"));
+    if (prani_in_range(vocal_effort, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var self = alloc(sizeof(CreatureVoice));
-    CreatureVoice_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));
-    CreatureVoice_set_f0_offset(self, bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset")));
-    CreatureVoice_set_size_scale(self, bayan_json_v_int(bayan_json_v_obj_get(root, "size_scale")));
-    CreatureVoice_set_vocal_effort(self, bayan_json_v_int(bayan_json_v_obj_get(root, "vocal_effort")));
-    CreatureVoice_set_params(self, species_params_from_node(bayan_json_v_obj_get(root, "params")));
+    CreatureVoice_set_species(self, species);
+    CreatureVoice_set_f0_offset(self, f0_offset);
+    CreatureVoice_set_size_scale(self, size_scale);
+    CreatureVoice_set_vocal_effort(self, vocal_effort);
+    CreatureVoice_set_params(self, params);
     return self;
 }
 
@@ -575,11 +680,39 @@ fn crvoice_nasal_phase_fraction(voc, species) {
 # IIR notch at ~250 Hz applied to the first nasal_fraction of the buffer, faded
 # from full at the start to 0 by the end of the nasal phase. Mutates in place.
 # cos(theta) computed via sin(pi/2 - theta) -- the oracle's cos-via-sin trick.
+# Returns 0, or a NEGATIVE PRANI_ERR_* for an unusable sample rate / fraction.
+#
+# 2.0.5 -- two separate repairs here:
+#
+#  1. CRASH (parity repair, not a divergence). The oracle iterates
+#     `samples.iter_mut().enumerate().take(nasal_len)` (2.0.3:
+#     rust-old/src/voice.rs:613), and `.take(n)` STOPS AT THE BUFFER END for any
+#     n. The port transcribed it as `while (i < nasal_len)` with no such stop, so
+#     a nasal_fraction above 1.0 indexed past the end and terminated the process
+#     ("vec: index out of bounds", measured at fraction 2.0 on a 100-sample
+#     buffer). The iteration bound is now clamped to len -- in f64, BEFORE the
+#     f64_to, so an overflowing product lands on len the way the oracle's
+#     saturating `as usize` does. The FADE DENOMINATOR stays the unclamped
+#     nasal_len, which is what the oracle divides by; clamping it too would
+#     change the fade curve for fractions above 1.0.
+#  2. sample_rate is a divisor of both notch coefficients: at 0 it makes
+#     theta = inf, cos_theta = sin(inf) = NaN, and every filtered sample NaN.
+#     Reported instead. The internal call site (the post-processing chain in
+#     crvoice_vocalize_with_intent) has already validated both arguments, so
+#     neither guard can fire from there -- it passes 0.1 or 0.2 and a sample rate
+#     that survived the guard at the top of vocalize.
 fn crvoice_apply_nasal_antiformant(samples, sample_rate, nasal_fraction) {
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_is_non_negative(nasal_fraction) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var len = vec_len(samples);
-    # nasal_len = (len as f32 * nasal_fraction) as usize
-    var nasal_len = f64_to(f64_mul(f64_from(len), nasal_fraction));
+    # nasal_len = (len as f32 * nasal_fraction) as usize -- the fade denominator.
+    var scaled = f64_mul(f64_from(len), nasal_fraction);
+    var nasal_len = f64_to(scaled);
     if (nasal_len == 0) { return 0; }
+    # take_len = min(nasal_len, len) -- the oracle's `.take(nasal_len)` bound.
+    var take_scaled = scaled;
+    if (f64_gt(take_scaled, f64_from(len)) == 1) { take_scaled = f64_from(len); }
+    var take_len = f64_to(take_scaled);
 
     var notch_freq = PR_V_250_0;
     var notch_bw = PR_V_80_0;
@@ -601,7 +734,7 @@ fn crvoice_apply_nasal_antiformant(samples, sample_rate, nasal_fraction) {
     var y2 = 0;
 
     var i = 0;
-    while (i < nasal_len) {
+    while (i < take_len) {
         var x0 = vec_get(samples, i);
         # y0 = x0 + b1*x1 + x2 - a1*y1 - a2*y2
         var y0 = f64_sub(
@@ -641,8 +774,13 @@ fn crvoice_vocalization_spectral_offset(voc) {
 # apply_am_pattern(samples, voc, sample_rate) -- vocalization-specific AM.
 # Bird trills get 20 Hz sinusoidal AM modulating between 0.3 and 1.0
 # (0.65 + 0.35*sin). No-op for other vocalizations. Mutates in place.
+# Returns 0, or PRANI_ERR_INVALID_TRACT for an unusable sample rate: the AM
+# clock is t = i/sample_rate, so a 0 or non-finite rate makes every modulator
+# sin(inf) = NaN and NaNs the whole buffer. Unreachable from the internal call
+# site, which validates sample_rate at the top of vocalize (2.0.5).
 fn crvoice_apply_am_pattern(samples, voc, sample_rate) {
     if (voc != PRANI_VOC_TRILL) { return 0; }
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var am_rate = PR_V_20_0;
     var n = vec_len(samples);
     var i = 0;
@@ -735,15 +873,33 @@ fn crvoice_apply_vocalization_envelope(samples, voc, sample_rate) {
 # synthesize_cat_purr(self, sample_rate, num_samples, modifiers) -- special
 # 25-30 Hz laryngeal-muscle-cycling purr path. purr_f0 = clamp(27/size_scale,
 # 20, 35). Amplitude = amplitude_scale * effort_amp; then the purr envelope.
-# Returns a vec ptr on success, or a NEGATIVE PRANI_ERR_* if crtract_new rejects
-# the sample rate (crtract_synthesize_purr itself never fails).
+# Returns a vec ptr on success, or a NEGATIVE PRANI_ERR_*: crtract_new may
+# reject the sample rate, and since 2.0.5 crtract_synthesize_purr is fallible
+# too (it guards purr_f0 and num_samples). Both returns are checked below.
+#
+# 2.0.5 guards. This is a public entry point in its own right, not only the
+# PURR arm of vocalize_with_intent, so it re-checks what that path checks:
+#   sample_rate  finite, > 0   the purr envelope and crtract_new both need it.
+#   num_samples  >= 0          a count, and 0 is VALID (empty buffer); a negative
+#                              one is the f64_to-overflow sentinel, not a length.
+#   size_scale   finite, > 0   it DIVIDES 27.0 to get purr_f0, and
+#                              f64_clamp(NaN, 20, 35) is NaN -- NaN passes every
+#                              clamp, so the rails below do not catch it.
 fn crvoice_synthesize_cat_purr(self, sample_rate, num_samples, modifiers) {
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_is_positive(CreatureVoice_size_scale(self)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var tract = crtract_new(CreatureVoice_params(self), sample_rate);
     if (prani_is_err(tract) == 1) { return tract; }
     # purr f0 25-30 Hz, size-scaled; larger cat = slightly lower purr.
     var purr_f0 = f64_clamp(f64_div(f64_from(27), CreatureVoice_size_scale(self)),
       f64_from(20), f64_from(35));
     var samples = crtract_synthesize_purr(tract, num_samples, purr_f0);
+    # 2.0.5 made this fallible. The guards above make its arguments valid TODAY,
+    # but "the caller already proved it" is precisely the assumption ADR-0001
+    # was written about -- vec_len() on a negative code dereferences garbage.
+    # Propagate instead of trusting a proof that lives in another function.
+    if (prani_is_err(samples) == 1) { return samples; }
     # amplitude scaling from intent x vocal effort
     var effort_amp = f64_add(PR_V_0_3, f64_mul(CreatureVoice_vocal_effort(self), PR_V_1_2));
     var amp = f64_mul(IntentModifiers_amplitude_scale(modifiers), effort_amp);
@@ -754,14 +910,17 @@ fn crvoice_synthesize_cat_purr(self, sample_rate, num_samples, modifiers) {
         i = i + 1;
     }
     # purr envelope: gentle fade-in/fade-out
-    crvoice_apply_vocalization_envelope(samples, PRANI_VOC_PURR, sample_rate);
+    var e_penv = crvoice_apply_vocalization_envelope(samples, PRANI_VOC_PURR, sample_rate);
+    if (prani_is_err(e_penv) == 1) { return e_penv; }
     return samples;
 }
 
 # ---- vocalize / vocalize_with_intent ----------------------------------------
 
 # vocalize(self, voc, sample_rate, duration) -- synthesize with Idle intent.
-# Returns a vec ptr on success or a negative PRANI_ERR_* on failure.
+# Returns a vec ptr on success or a negative PRANI_ERR_* on failure -- including
+# the 2.0.5 input-range rejections, which live in vocalize_with_intent so this
+# forwarding entry point inherits exactly one copy of them.
 fn crvoice_vocalize(self, voc, sample_rate, duration) {
     return crvoice_vocalize_with_intent(self, voc, PRANI_INTENT_IDLE, sample_rate, duration);
 }
@@ -772,9 +931,39 @@ fn crvoice_vocalize(self, voc, sample_rate, duration) {
 # then the post-processing effect chain (subharmonics/chaos, fire-breath,
 # biphonation, nasal anti-formant, AM, spectral tilt, amplitude, envelope).
 # Returns a vec ptr on success or a negative PRANI_ERR_* on failure.
+#
+# 2.0.5 -- this is where the module's input ranges are enforced (see the RANGES
+# block at the top of the file). crvoice_vocalize forwards here, so both public
+# synthesis entry points are covered by one copy of the guards.
 fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     var species = CreatureVoice_species(self);
     var params = CreatureVoice_params(self);
+
+    # ---- input-range guards ------------------------------------------------
+    # Tags first: the oracle's Vocalization / CallIntent were enums, so an
+    # out-of-range value was UNREPRESENTABLE. The port carries them as i64, and
+    # the tables below all end in a fallthrough arm -- voc = 99 rendered a FLAT
+    # contour and a default envelope and returned it as a success (measured).
+    # Rejecting is a DELIBERATE DIVERGENCE forced by the enum -> int erasure.
+    if (voc < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (voc >= PRANI_VOC_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (intent < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (intent >= PRANI_INTENT_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # sample_rate: finite and > 0 only -- NOT a threshold. svara owns the
+    # "too low to build a tract" rule and prani must not restate it (ADR-0001).
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    # duration: 0 is VALID (the oracle's test_zero_duration_synthesis wants an
+    # empty buffer, not an error); negative and non-finite are not.
+    if (prani_is_non_negative(duration) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # POINT-OF-USE guard for the builders (see the RANGES block): with_size /
+    # with_f0_offset / with_breathiness / with_jitter / with_shimmer clamp, and
+    # a clamp passes NaN straight through. params_in_range catches a smuggled
+    # breathiness/jitter/shimmer; the two derived values catch a smuggled
+    # size_scale or f0_offset, which is where they reach svara.
+    if (crvoice_params_in_range(params) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var eff_f0 = crvoice_effective_f0(self);
+    var eff_tract_scale = crvoice_effective_tract_scale(self);
+    if (prani_finite2(eff_f0, eff_tract_scale) == 0) { return PRANI_ERR_INVALID_TRACT; }
 
     # validate the species can produce this vocalization
     if (species_supports_vocalization(species, voc) == 0) {
@@ -782,10 +971,15 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     }
 
     var modifiers = prani_intent_modifiers(intent);
-    var f0 = f64_mul(crvoice_effective_f0(self), IntentModifiers_pitch_scale(modifiers));
+    var f0 = f64_mul(eff_f0, IntentModifiers_pitch_scale(modifiers));
     var effective_duration = f64_mul(duration, IntentModifiers_duration_scale(modifiers));
     # num_samples = (effective_duration * sample_rate) as usize
     var num_samples = f64_to(f64_mul(effective_duration, sample_rate));
+    # A finite duration can still overflow the product (1e300 s at 44100 Hz), and
+    # f64_to of anything outside i64 is i64::MIN. A negative bound does not crash
+    # -- the render loop simply never runs and an EMPTY buffer comes back as a
+    # success, which is audit finding F11's whole shape. Report it instead.
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     # vocal effort modulations
     var effort = CreatureVoice_vocal_effort(self);
@@ -988,19 +1182,28 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
         }
     }
 
+    # 2.0.5: steps 4-8 became fallible. Their returns used to be DISCARDED, so a
+    # rejected argument left the buffer silently un-post-processed and returned it
+    # as a success -- the "silently wrong audio" this milestone exists to remove.
+    # Their arguments are derived from already-validated voice params, so none can
+    # fail today; propagate anyway rather than depending on a proof that lives
+    # somewhere else (ADR-0001's lesson).
     # 4. nasal anti-formant (spectral notch) during nasal phases (>= 0 sentinel).
     var nasal_phase = crvoice_nasal_phase_fraction(voc, species);
     if (f64_ge(nasal_phase, 0) == 1) {
-        crvoice_apply_nasal_antiformant(samples, sample_rate, nasal_phase);
+        var e_nasal = crvoice_apply_nasal_antiformant(samples, sample_rate, nasal_phase);
+        if (prani_is_err(e_nasal) == 1) { return e_nasal; }
     }
 
     # 5. vocalization-specific AM patterns (bird trills).
-    crvoice_apply_am_pattern(samples, voc, sample_rate);
+    var e_am = crvoice_apply_am_pattern(samples, voc, sample_rate);
+    if (prani_is_err(e_am) == 1) { return e_am; }
 
     # 6. spectral tilt: species base + vocalization + vocal effort.
     var vocalization_tilt = crvoice_vocalization_spectral_offset(voc);
     var total_tilt = f64_add(f64_add(SpeciesParams_spectral_tilt(params), vocalization_tilt), effort_tilt_offset);
-    crtract_apply_spectral_tilt(samples, total_tilt, sample_rate);
+    var e_tilt = crtract_apply_spectral_tilt(samples, total_tilt, sample_rate);
+    if (prani_is_err(e_tilt) == 1) { return e_tilt; }
 
     # 7. amplitude scaling from intent x vocal effort.
     var amp = f64_mul(IntentModifiers_amplitude_scale(modifiers), effort_amp);
@@ -1011,7 +1214,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     }
 
     # 8. amplitude envelope based on vocalization shape.
-    crvoice_apply_vocalization_envelope(samples, voc, sample_rate);
+    var e_env = crvoice_apply_vocalization_envelope(samples, voc, sample_rate);
+    if (prani_is_err(e_env) == 1) { return e_env; }
 
     return samples;
 }

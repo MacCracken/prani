@@ -269,5 +269,166 @@ var mstr_2 = str_data(str_builder_build(sbm2));
 assert_eq(strlen(mstr_2), strlen(mstr), "FatigueModifiers json idempotent -- same length");
 assert_eq(memeq(mstr, mstr_2, strlen(mstr)), 1, "FatigueModifiers json idempotent");
 
+# ================================================================
+# 2.0.5 -- input-range validation (roadmap 2.0.5, audit finding F11).
+# The accepted duration range for record_call() and rest() is [0, 1e9] seconds
+# inclusive; see the PR_FAT_MAX_DURATION_S block in src/fatigue.cyr for why.
+# Everything below is a NEW group: no assertion above this line changed, because
+# the guards only ever fire on input the oracle had no business accepting.
+# ================================================================
+var G_NAN     = 0x7ff8000000000000;   # canonical quiet NaN
+var G_NEG_ONE = 0xbff0000000000000;   # -1.0
+var G_1E300   = 0x7e37e43c8800759c;   # 1e300 -- finite, far past the 1e9 bound
+var G_TWENTY  = 0x4034000000000000;   # 20.0
+var G_TEN     = 0x4024000000000000;   # 10.0
+var G_015     = 0x3fc3333333333333;   # 0.15  -- fatigue after one 10 s call
+var G_01      = 0x3fb999999999999a;   # 0.1   -- habituation after one alarm
+
+# The measured behaviour the two guards exist to prevent. These pin facts about
+# the stdlib, not about prani: if any of them changes, the guard rationale in
+# src/fatigue.cyr is stale and must be re-derived rather than trusted.
+test_group("2.0.5 -- measured facts the duration guards rest on");
+assert_eq(f64_clamp(G_NAN, 0, F64_ONE), G_NAN, "f64_clamp passes NaN straight through (F11)");
+assert_eq(f64_clamp(PRANI_POS_INF, 0, F64_ONE), F64_ONE, "f64_clamp DOES bound +inf to hi");
+assert_eq(f64_clamp(PRANI_NEG_INF, 0, F64_ONE), 0, "f64_clamp DOES bound -inf to lo");
+assert_eq(f64_max(G_NAN, 0), 0, "f64_max(NaN, 0) == 0 -- NaN is dropped, not propagated");
+assert_eq(f64_max(0, G_NAN), G_NAN, "f64_max(0, NaN) == NaN -- f64_max is ASYMMETRIC");
+assert_eq(f64_gt(G_NAN, PR_FAT_BOUT_RESET_SECS), 0, "f64_gt(NaN, 5.0) == 0 -- a NaN rest never resets the bout");
+assert_eq(prani_in_range(G_NAN, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects NaN");
+assert_eq(prani_in_range(PRANI_POS_INF, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects +inf");
+assert_eq(prani_in_range(PRANI_NEG_INF, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects -inf");
+assert_eq(prani_in_range(G_NEG_ONE, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects -1.0");
+assert_eq(prani_in_range(G_1E300, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects 1e300");
+assert_eq(prani_in_range(0, 0, PR_FAT_MAX_DURATION_S), 1, "duration guard ACCEPTS 0 (zero duration is valid)");
+assert_eq(prani_in_range(PR_FAT_MAX_DURATION_S, 0, PR_FAT_MAX_DURATION_S), 1, "duration guard accepts the bound itself");
+
+# ================================================================
+# record_call has no error channel, so a bad duration is logged (prani_log_error)
+# and the whole call event is dropped. Before the guard, each of the five
+# durations below poisoned the state: NaN made every field NaN forever, +/-inf
+# made bout_calling_time infinite, -1.0 and 1e300 made it nonsense.
+test_group("2.0.5 -- record_call rejects out-of-range duration");
+var g = fatigue_new();
+fatigue_record_call(g, f64_from(10), 1);        # valid: fatigue 0.15, bout 10.0, hab 0.1, count 1
+fatigue_record_call(g, G_NAN, 1);
+assert_eq(fatigue_fatigue(g), G_015, "NaN duration leaves fatigue at 0.15");
+assert_eq(FatigueState_bout_calling_time(g), G_TEN, "NaN duration leaves bout time at 10.0");
+assert_eq(fatigue_alarm_habituation(g), G_01, "NaN duration leaves habituation at 0.1");
+assert_eq(FatigueState_alarm_count(g), 1, "a rejected alarm call is not counted");
+fatigue_record_call(g, PRANI_POS_INF, 0);
+assert_eq(FatigueState_bout_calling_time(g), G_TEN, "+inf duration leaves bout time at 10.0");
+fatigue_record_call(g, PRANI_NEG_INF, 0);
+assert_eq(FatigueState_bout_calling_time(g), G_TEN, "-inf duration leaves bout time at 10.0");
+fatigue_record_call(g, G_NEG_ONE, 0);
+assert_eq(FatigueState_bout_calling_time(g), G_TEN, "negative duration leaves bout time at 10.0");
+assert_eq(fatigue_fatigue(g), G_015, "negative duration leaves fatigue at 0.15");
+fatigue_record_call(g, G_1E300, 0);
+assert_eq(FatigueState_bout_calling_time(g), G_TEN, "1e300 (past the 1e9 bound) leaves bout time at 10.0");
+# The state is still USABLE afterwards -- a rejection is not a retirement.
+fatigue_record_call(g, f64_from(10), 0);
+assert_eq(FatigueState_bout_calling_time(g), G_TWENTY, "bout == 20.0 after a valid call follows five rejections");
+# ...and bit-identical to a run that never made the five bad calls at all.
+var gc = fatigue_new();
+fatigue_record_call(gc, f64_from(10), 1);
+fatigue_record_call(gc, f64_from(10), 0);
+assert_eq(fatigue_fatigue(g), fatigue_fatigue(gc), "fatigue bit-identical to a clean run");
+assert_eq(FatigueState_bout_calling_time(g), FatigueState_bout_calling_time(gc), "bout time bit-identical to a clean run");
+assert_eq(fatigue_alarm_habituation(g), fatigue_alarm_habituation(gc), "habituation bit-identical to a clean run");
+assert_eq(FatigueState_alarm_count(g), FatigueState_alarm_count(gc), "alarm count bit-identical to a clean run");
+
+# ================================================================
+# Zero is VALID, not rejected -- the oracle's test_zero_duration_synthesis
+# settles that a zero duration is an empty result, never an error. So is the
+# upper bound itself: prani_in_range is inclusive at both ends.
+test_group("2.0.5 -- record_call still accepts 0 and the bound");
+var z = fatigue_new();
+fatigue_record_call(z, f64_from(10), 0);
+fatigue_record_call(z, 0, 1);
+assert_eq(fatigue_fatigue(z), G_015, "zero duration is a no-op on fatigue, not a rejection");
+assert_eq(FatigueState_bout_calling_time(z), G_TEN, "zero duration is a no-op on bout time");
+assert_eq(FatigueState_alarm_count(z), 1, "zero duration STILL counts as an alarm call");
+assert_eq(fatigue_alarm_habituation(z), G_01, "zero duration STILL raises habituation");
+var bnd = fatigue_new();
+fatigue_record_call(bnd, PR_FAT_MAX_DURATION_S, 0);
+assert_eq(fatigue_fatigue(bnd), F64_ONE, "1e9 s accepted at the inclusive bound -- fatigue clamps to 1.0");
+assert_eq(FatigueState_bout_calling_time(bnd), PR_FAT_MAX_DURATION_S, "1e9 s accepted -- bout time == 1e9");
+
+# ================================================================
+# rest() is the more dangerous of the two, because f64_max(NaN, 0) is 0: a NaN
+# rest did not poison anything visibly, it quietly reported a mid-bout creature
+# as fully rested and fully de-habituated. A negative rest ran the recovery
+# backwards with no ceiling (rest(-1000) gave fatigue 70.15, well outside [0,1]).
+test_group("2.0.5 -- rest rejects out-of-range duration");
+var rq = fatigue_new();
+fatigue_record_call(rq, f64_from(10), 1);       # fatigue 0.15, hab 0.1, bout 10.0
+fatigue_rest(rq, G_NAN);
+assert_eq(fatigue_fatigue(rq), G_015, "NaN rest no longer zeroes fatigue");
+assert_eq(fatigue_alarm_habituation(rq), G_01, "NaN rest no longer zeroes habituation");
+fatigue_rest(rq, PRANI_NEG_INF);
+assert_eq(fatigue_fatigue(rq), G_015, "-inf rest no longer drives fatigue to +inf");
+assert_eq(prani_is_finite(fatigue_fatigue(rq)), 1, "fatigue stays finite through a -inf rest");
+fatigue_rest(rq, PRANI_POS_INF);
+assert_eq(fatigue_fatigue(rq), G_015, "+inf rest no longer zeroes fatigue");
+assert_eq(FatigueState_bout_calling_time(rq), G_TEN, "+inf rest no longer resets the bout");
+fatigue_rest(rq, G_NEG_ONE);
+assert_eq(fatigue_fatigue(rq), G_015, "negative rest no longer runs recovery backwards");
+assert_eq(f64_le(fatigue_fatigue(rq), F64_ONE), 1, "fatigue stays inside its documented [0,1]");
+fatigue_rest(rq, G_1E300);
+assert_eq(fatigue_fatigue(rq), G_015, "1e300 rest (past the 1e9 bound) rejected");
+assert_eq(fatigue_alarm_habituation(rq), G_01, "habituation survives all four rejected rests");
+
+# ================================================================
+test_group("2.0.5 -- rest still accepts 0 and the bound");
+var rz = fatigue_new();
+fatigue_record_call(rz, f64_from(10), 1);
+fatigue_rest(rz, 0);
+assert_eq(fatigue_fatigue(rz), G_015, "zero rest is a no-op, not a rejection");
+assert_eq(FatigueState_bout_calling_time(rz), G_TEN, "zero rest does not reset the bout (0 is not > 5)");
+fatigue_rest(rz, PR_FAT_MAX_DURATION_S);
+assert_eq(fatigue_fatigue(rz), 0, "1e9 s rest accepted at the bound -- fatigue floors at 0");
+assert_eq(fatigue_alarm_habituation(rz), 0, "1e9 s rest accepted -- habituation floors at 0");
+assert_eq(FatigueState_bout_calling_time(rz), 0, "1e9 s rest accepted -- bout reset (> 5 s)");
+
+# ================================================================
+# The point of the two mutator guards: modifiers() is no longer reachable in a
+# NaN state through ANY sequence of public calls on a state prani built.
+test_group("2.0.5 -- modifiers() unpoisonable through the mutators");
+var pm = fatigue_new();
+fatigue_record_call(pm, f64_from(10), 1);
+fatigue_record_call(pm, G_NAN, 1);
+fatigue_rest(pm, G_NAN);
+fatigue_record_call(pm, PRANI_POS_INF, 0);
+var mpm = fatigue_modifiers(pm);
+assert_eq(prani_is_finite(FatigueModifiers_pitch_offset(mpm)), 1, "pitch_offset finite after rejected calls");
+assert_eq(prani_is_finite(FatigueModifiers_breathiness_delta(mpm)), 1, "breathiness_delta finite after rejected calls");
+assert_eq(prani_is_finite(FatigueModifiers_amplitude_scale(mpm)), 1, "amplitude_scale finite after rejected calls");
+assert_eq(prani_is_finite(FatigueModifiers_jitter_scale(mpm)), 1, "jitter_scale finite after rejected calls");
+assert_eq(FatigueModifiers_pitch_offset(mpm), 0xc008000000000000, "pitch == -3.0, exactly the clean-state value");
+
+# ================================================================
+# What 2.0.5 could NOT close in this module, pinned so it is not believed fixed.
+# modifiers_make returns a POINTER and has no error channel; giving it one is a
+# return-contract change (roadmap 2.1.0). It therefore REPORTS a non-finite
+# field through prani_log_error and hands back what it was given, unaltered --
+# substituting the identity modifiers (0, 0, 1, 1) would be exactly the
+# plausible fabrication ADR-0001 rules out.
+test_group("2.0.5 -- modifiers_make reports but cannot reject");
+var mk = fatigue_modifiers_make(G_NAN, 0, F64_ONE, F64_ONE);
+assert_gt(mk, 0, "modifiers_make still returns a pointer, never a PRANI_ERR_* code");
+assert_eq(FatigueModifiers_pitch_offset(mk), G_NAN, "the non-finite field is returned unaltered, not substituted");
+assert_eq(FatigueModifiers_amplitude_scale(mk), F64_ONE, "the finite fields are untouched");
+
+# The one remaining producer of a poisoned state: FatigueState_from_json_str is
+# derive-generated and takes any i64 per field, so a document prani did not
+# write can still carry a NaN bit pattern. That is the deserializer-field-range
+# half of 2.0.5 and it belongs with the derive, not with this module -- the log
+# line from modifiers_make is the only report available here.
+var jbad = "{\"fatigue\":9221120237041090560,\"alarm_habituation\":0,\"bout_calling_time\":0,\"alarm_count\":0,\"alarm_reinforced\":0}";
+var sbad = FatigueState_from_json_str(jbad);
+assert_gt(sbad, 0, "the hand-written document still parses (it is well-formed)");
+assert_eq(FatigueState_fatigue(sbad), G_NAN, "and still carries a NaN fatigue -- known gap");
+var mbad = fatigue_modifiers(sbad);
+assert_eq(prani_is_finite(FatigueModifiers_pitch_offset(mbad)), 0, "so modifiers() off it is still NaN -- known gap");
+
 var rc = assert_summary();
 syscall(60, rc);

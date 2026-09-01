@@ -102,14 +102,42 @@ fn prani_ffi_voice_destroy(handle) {
 # ================================================================
 # Voice RTPC setters (port prani_voice_set_effort / set_size / apply_lombard).
 # Each null-checks the handle (Rust `if let Some(voice) = handle.as_mut()`).
+#
+# INPUT-RANGE VALIDATION (2.0.5, audit finding F11). These three take an f64
+# straight from an untrusted C host and have no error channel -- Rust returned
+# `()`, the port returns a constant 0 -- so the only reportable outcome is
+# WHETHER THE VOICE CHANGED. Each rejects a non-finite argument the same way it
+# already rejects a null handle: by doing nothing at all, leaving every field of
+# the voice exactly as the last accepted call left it. That is checkable through
+# the getters (crvoice_vocal_effort / CreatureVoice_size_scale), so "rejected"
+# is observable without a signature change.
+#
+# Non-finite, not out-of-range, is the line, and the two halves have different
+# reasons:
+#   * NaN is a LIVE defect. Measured: f64_clamp(NaN, lo, hi) -> NaN, so NaN
+#     walks straight through crvoice_set_vocal_effort's [0,1] clamp,
+#     crvoice_with_size's [0.1,10] clamp and bridge_lombard_effort_boost's
+#     [0,0.5] clamp and poisons the voice. A NaN size_scale is the worst of the
+#     three: crvoice_effective_f0 DIVIDES by it, so every later synthesis on
+#     that voice yields NaN samples with nothing anywhere reporting an error.
+#   * +/-inf is NOT a clamp hazard -- measured, f64_clamp bounds both -- and it
+#     is rejected for a different reason: an infinite RTPC value is a host bug,
+#     and clamping it lands on exactly the range endpoint, a result the host
+#     cannot tell apart from a deliberate 1.0. Fabricating a plausible answer
+#     that hides the caller's bug is the defect class ADR-0001 named.
+# A FINITE out-of-range value still clamps, unchanged: that is the oracle's
+# documented RTPC saturation (`voice.set_vocal_effort(effort)` clamps), it is
+# pinned by tests/ffi.tcyr's "finite 1.5 still clamps to 1.0". Rejecting it
+# instead is the builder-contract question in roadmap 2.1.0, not this milestone.
 # ================================================================
 
 # voice_set_effort(handle, effort) -- real-time vocal-effort update
-# (0.0 whisper .. 0.5 normal .. 1.0 shout). crvoice_set_vocal_effort clamps.
+# (0.0 whisper .. 0.5 normal .. 1.0 shout). crvoice_set_vocal_effort clamps a
+# finite value into [0,1]; a non-finite one is rejected (no-op, voice unchanged).
 fn prani_ffi_voice_set_effort(handle, effort) {
-    if (handle != 0) {
-        crvoice_set_vocal_effort(handle, effort);
-    }
+    if (handle == 0) { return 0; }
+    if (prani_is_finite(effort) == 0) { return 0; }
+    crvoice_set_vocal_effort(handle, effort);
     return 0;
 }
 
@@ -126,24 +154,34 @@ fn prani_ffi_voice_set_effort(handle, effort) {
 # is exactly resetting the four individual fields in place. The observable
 # result is identical -- proven by tests/hardening.tcyr comparing this against a
 # genuinely rebuilt voice field for field -- with no allocation at all.
+#
+# The finite check comes BEFORE crvoice_reset_individual, not after: this
+# function's first act is to wipe the voice's four individual fields back to the
+# species defaults, so validating late would still have destroyed the caller's
+# f0_offset, size_scale and vocal_effort on the way to rejecting the size.
+# Rejecting first makes the call a true no-op.
 fn prani_ffi_voice_set_size(handle, size) {
-    if (handle != 0) {
-        crvoice_reset_individual(handle);
-        # crvoice_with_size is #must_use because it is a chaining builder; here
-        # it mutates `handle` in place and hands the same pointer back, so the
-        # return is the input and binding it is the whole use.
-        var sized = crvoice_with_size(handle, size);
-        CreatureVoice_set_size_scale(handle, CreatureVoice_size_scale(sized));
-    }
+    if (handle == 0) { return 0; }
+    if (prani_is_finite(size) == 0) { return 0; }
+    crvoice_reset_individual(handle);
+    # crvoice_with_size is #must_use because it is a chaining builder; here
+    # it mutates `handle` in place and hands the same pointer back, so the
+    # return is the input and binding it is the whole use.
+    var sized = crvoice_with_size(handle, size);
+    CreatureVoice_set_size_scale(handle, CreatureVoice_size_scale(sized));
     return 0;
 }
 
 # voice_apply_lombard(handle, ambient_spl_db) -- involuntary effort boost in
 # ambient noise (Lombard effect). crvoice_apply_lombard_effect clamps to [0,1].
+# A finite dB SPL of any magnitude is accepted: bridge_lombard_effort_boost is
+# already total over the finite reals (<= 40 dB -> 0 boost, above -> excess *
+# 0.005 clamped to [0, 0.5]), so there is no out-of-range dB value to reject and
+# no threshold to restate here. Only a non-finite reading is rejected.
 fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
-    if (handle != 0) {
-        crvoice_apply_lombard_effect(handle, ambient_spl_db);
-    }
+    if (handle == 0) { return 0; }
+    if (prani_is_finite(ambient_spl_db) == 0) { return 0; }
+    crvoice_apply_lombard_effect(handle, ambient_spl_db);
     return 0;
 }
 
@@ -154,9 +192,41 @@ fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
 
 # stream_start(voice_handle, voc_index, intent_index, sample_rate, duration) --
 # start a synthesis stream. Returns the SynthStream handle, or 0 (null) on any
-# error: null voice, out-of-range voc/intent index, or an unsupported
-# vocalization for the species (stream_new -> negative error). Ports
-# prani_stream_start (shares the voice ptr instead of cloning -- see ABI note).
+# error: null voice, out-of-range voc/intent index, sample_rate/duration outside
+# their ranges, or an unsupported vocalization for the species (stream_new ->
+# negative error). Ports prani_stream_start (shares the voice ptr instead of
+# cloning -- see ABI note). 0 (null) IS this function's error channel already
+# ("Returns a null pointer on error (invalid voice, unsupported vocalization,
+# etc.)"), so the range rejections need no new convention.
+#
+# RANGES (2.0.5):
+#   sample_rate  (0, +inf)   finite and strictly positive
+#   duration     [0, +inf)   finite and non-negative; ZERO IS VALID
+#
+# sample_rate must be positive because `total_samples = f64_to(effective_duration
+# * sample_rate)` is only a sample COUNT when it is. Measured on the unguarded
+# code: NaN gives total_samples = i64::MIN and 0.0 gives 0, and in both cases
+# `stream_is_finished` (samples_rendered >= total_samples) is true on the first
+# call -- the host receives a NON-NULL handle to a stream that is born retired,
+# drains nothing, and reports no error anywhere. A silently empty buffer is
+# exactly F11's signature, and null is the honest answer.
+#
+# This is NOT svara's sample-rate floor moved earlier, and ADR-0001's rejection
+# of "validate sample_rate in prani" still stands: the floor (~1000 Hz) is
+# svara's rule and stays there. A finite positive rate BELOW it -- 999.0 -- still
+# gets a handle from this function and is rejected by svara at the first fill,
+# which reports 0 written and retires the stream per ADR-0003. tests/ffi.tcyr
+# pins that path so this guard cannot quietly swallow it.
+#
+# duration = 0 is accepted deliberately: the oracle's test_zero_duration_synthesis
+# asserts an EMPTY BUFFER, NOT AN ERROR, so a zero-length stream is a legal thing
+# to ask for and still returns a handle. A NEGATIVE duration is rejected, and
+# that is a DELIBERATE DIVERGENCE -- Rust's `as usize` cast saturates, so the
+# oracle folded every negative duration into 0 and handed back a stream. It could
+# not represent the state; i64 can, and `f64_to` wraps rather than saturates, so
+# the port would build a stream whose total_samples is large and negative and
+# whose finished-ness is an accident of a signed compare rather than a real zero.
+# A host that asks for -1 seconds has a bug (ADR-0001).
 #must_use
 fn prani_ffi_stream_start(voice_handle, voc_index, intent_index, sample_rate, duration) {
     if (voice_handle == 0) { return 0; }
@@ -164,20 +234,33 @@ fn prani_ffi_stream_start(voice_handle, voc_index, intent_index, sample_rate, du
     if (voc < 0) { return 0; }
     var intent = prani_ffi_intent_from_index(intent_index);
     if (intent < 0) { return 0; }
+    if (prani_is_positive(sample_rate) == 0) { return 0; }
+    if (prani_is_non_negative(duration) == 0) { return 0; }
     var stream = stream_new(voice_handle, voc, intent, sample_rate, duration);
     if (prani_is_err(stream) == 1) { return 0; }
     return stream;
 }
 
 # stream_fill(stream_handle, buffer, buffer_len) -- fill the caller's vec with the
-# next audio samples; returns the count written (0 when finished or on null args).
-# `buffer` is a vec handle; `buffer_len` is retained for C signature parity but the
-# vec's own length is the bound (stream_fill_buffer uses vec_len internally).
-# Ports prani_stream_fill.
+# next audio samples; returns the count written (0 when finished, on null args, or
+# on an out-of-range buffer_len). `buffer` is a vec handle; `buffer_len` is
+# retained for C signature parity but the vec's own length is the bound
+# (stream_fill_buffer uses vec_len internally). Ports prani_stream_fill.
+#
+# RANGE (2.0.5): buffer_len >= 0 -- a sample count cannot be negative. The
+# oracle's `buffer_len: u32` made that unrepresentable; the port widened it to
+# i64, so a host that computes a length by subtraction and underflows can now
+# hand one over. The old `buffer_len == 0` test let a negative straight through
+# and the fill then ran to the vec's full length: measured, buffer_len = -1 with
+# a 2205-element vec wrote and reported 2205 samples, the exact inverse of what
+# "I have -1 elements of room" meant. Rejecting with 0 written matches the
+# existing zero-length arm, which ADR-0003 already establishes as a caller
+# mistake that returns 0 WITHOUT retiring the stream -- the stream itself is fine
+# and a corrected call still drains it.
 fn prani_ffi_stream_fill(stream_handle, buffer, buffer_len) {
     if (stream_handle == 0) { return 0; }
     if (buffer == 0) { return 0; }
-    if (buffer_len == 0) { return 0; }
+    if (buffer_len <= 0) { return 0; }
     return stream_fill_buffer(stream_handle, buffer);
 }
 

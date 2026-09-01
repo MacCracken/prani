@@ -308,5 +308,192 @@ var pojstr_2 = str_data(str_builder_build(posb2));
 assert_eq(strlen(pojstr_2), strlen(pojstr), "json idempotent -- same length");
 assert_eq(memeq(pojstr, pojstr_2, strlen(pojstr)), 1, "json idempotent");
 
+
+# ================================================================
+# Input-range guards (2.0.5, audit finding F11). src/emotion.cyr clamps every
+# setter, and f64_clamp(NaN, lo, hi) -> NaN (measured, pinned in
+# tests/error.tcyr), so a NaN valence/arousal/smoothing is STORED -- and then
+# reads as Neutral/Mid while evaluate() hands out NaN synthesis params. The
+# builders and mutators (with_values / with_smoothing / set / update) return
+# the struct or nothing, so the guard lives at the point of USE: the two zone
+# classifiers, the two selectors and evaluate each return
+# PRANI_ERR_INVALID_VOCALIZATION instead of a fabricated answer.
+#
+# DIVERGENCE from the oracle: rust-old's EmotionState::evaluate() returns
+# EmotionOutput (infallible), Rust's f32::clamp propagates NaN identically, and
+# serde's derived Deserialize accepts any float for any field -- so the oracle
+# accepts every state rejected below. It has no NaN or out-of-range emotion
+# test to break: all six emotion tests in
+# `git show 2.0.3:rust-old/tests/integration.rs` (lines 723-773) use in-range
+# values, and every assertion above this block still passes unchanged.
+# ================================================================
+
+var T_POS_INF   = 0x7ff0000000000000;   #  +inf
+var T_NEG_INF   = 0xfff0000000000000;   #  -inf
+var T_5_0       = 0x4014000000000000;   #  5.0   (out of range for valence)
+var T_3_0       = 0x4008000000000000;   #  3.0   (out of range for smoothing)
+var T_0_95      = 0x3fee666666666666;   #  0.95  (smoothing clamp hi)
+var T_PAST_1_0  = 0x3ff0000000000001;   #  1.0000000000000002 (one ulp past 1.0)
+var T_PAST_0_95 = 0x3fee666666666667;   #  0.9500000000000001 (one ulp past 0.95)
+
+# ================================================================
+# Why the guards test the range EXACTLY rather than with a tolerance:
+# update() is a convex blend of two in-range values, so it cannot leave
+# [-1,1] x [0,1] by even one ulp. Swept 2026-08-31: smoothing k/64 for
+# k = 0..64 (with_smoothing clamps the top four to 0.95), a 9x5 grid of start
+# states, all four target corners, 64 steps each = 748800 update steps. The
+# extremes land exactly on the bounds, so an exact test rejects nothing this
+# module can produce.
+test_group("input-range guards -- the range update() can actually produce");
+var g_over = 0;
+var g_v_hi = T_NEG_1_0;
+var g_v_lo = T_1_0;
+var g_a_hi = T_0_0;
+var g_a_lo = T_1_0;
+var g_k = 0;
+while (g_k < 65) {
+    var g_s = f64_div(f64_from(g_k), f64_from(64));
+    var g_i = 0;
+    while (g_i < 9) {
+        var g_v0 = f64_sub(f64_div(f64_from(g_i), f64_from(4)), T_1_0);
+        var g_j = 0;
+        while (g_j < 5) {
+            var g_a0 = f64_div(f64_from(g_j), f64_from(4));
+            var g_t = 0;
+            while (g_t < 4) {
+                var g_tv = T_NEG_1_0;
+                if (g_t > 1) { g_tv = T_1_0; }
+                var g_ta = T_0_0;
+                if (g_t == 1) { g_ta = T_1_0; }
+                if (g_t == 3) { g_ta = T_1_0; }
+                var g_e = emotion_with_smoothing(emotion_with_values(g_v0, g_a0), g_s);
+                var g_n = 0;
+                while (g_n < 64) {
+                    emotion_update(g_e, g_tv, g_ta);
+                    var g_v = emotion_valence(g_e);
+                    var g_a = emotion_arousal(g_e);
+                    if (f64_gt(g_v, g_v_hi) == 1) { g_v_hi = g_v; }
+                    if (f64_lt(g_v, g_v_lo) == 1) { g_v_lo = g_v; }
+                    if (f64_gt(g_a, g_a_hi) == 1) { g_a_hi = g_a; }
+                    if (f64_lt(g_a, g_a_lo) == 1) { g_a_lo = g_a; }
+                    if (f64_gt(g_v, T_1_0) == 1)     { g_over = g_over + 1; }
+                    if (f64_lt(g_v, T_NEG_1_0) == 1) { g_over = g_over + 1; }
+                    if (f64_gt(g_a, T_1_0) == 1)     { g_over = g_over + 1; }
+                    if (f64_lt(g_a, T_0_0) == 1)     { g_over = g_over + 1; }
+                    g_n = g_n + 1;
+                }
+                g_t = g_t + 1;
+            }
+            g_j = g_j + 1;
+        }
+        g_i = g_i + 1;
+    }
+    g_k = g_k + 1;
+}
+assert_eq(g_over, 0, "748800 update steps never left [-1,1] x [0,1]");
+assert_eq(g_v_hi, T_1_0, "sweep max valence is exactly +1.0");
+assert_eq(g_v_lo, T_NEG_1_0, "sweep min valence is exactly -1.0");
+assert_eq(g_a_hi, T_1_0, "sweep max arousal is exactly 1.0");
+assert_eq(g_a_lo, T_0_0, "sweep min arousal is exactly 0.0");
+
+# ================================================================
+# valence NaN, arrived via with_values' clamp. Each zone classifier validates
+# only the field it reads, so arousal_zone still answers -- the reject is not
+# a blanket "this handle is poisoned".
+test_group("input-range guards -- NaN valence is stored, then rejected");
+var gn = emotion_with_values(f64_div(0, 0), T_0_5);
+assert_eq(prani_is_finite(emotion_valence(gn)), 0, "f64_clamp passed the NaN through (F11)");
+assert_eq(emotion_arousal(gn), T_0_5, "arousal unaffected");
+assert_eq(emotion_valence_zone(gn), PRANI_ERR_INVALID_VOCALIZATION, "valence_zone rejects NaN");
+assert_eq(emotion_arousal_zone(gn), PRE_AZ_MID, "arousal_zone still classifies its own field");
+assert_eq(emotion_select_vocalization(gn), PRANI_ERR_INVALID_VOCALIZATION, "select_vocalization rejects");
+assert_eq(emotion_select_intent(gn), PRANI_ERR_INVALID_VOCALIZATION, "select_intent rejects");
+assert_eq(emotion_evaluate(gn), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects");
+assert_eq(prani_is_err(emotion_evaluate(gn)), 1, "evaluate's return reads as an error code");
+
+# ================================================================
+# arousal NaN, arrived via set()'s clamp (the other mutator path).
+test_group("input-range guards -- NaN arousal via set()");
+var ga = emotion_new();
+emotion_set(ga, T_0_5, f64_div(0, 0));
+assert_eq(prani_is_finite(emotion_arousal(ga)), 0, "set's clamp passed the NaN through");
+assert_eq(emotion_valence(ga), T_0_5, "valence set normally");
+assert_eq(emotion_valence_zone(ga), PRE_VZ_POSITIVE, "valence_zone still classifies its own field");
+assert_eq(emotion_arousal_zone(ga), PRANI_ERR_INVALID_VOCALIZATION, "arousal_zone rejects NaN");
+assert_eq(emotion_select_vocalization(ga), PRANI_ERR_INVALID_VOCALIZATION, "select_vocalization rejects");
+assert_eq(emotion_select_intent(ga), PRANI_ERR_INVALID_VOCALIZATION, "select_intent rejects");
+assert_eq(emotion_evaluate(ga), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects");
+
+# ================================================================
+# smoothing is the field evaluate() does not read but does check: it cannot
+# reach an out-of-contract value through with_smoothing (which clamps), and it
+# corrupts valence/arousal on the very next tick.
+test_group("input-range guards -- NaN smoothing corrupts the state on update");
+var gs = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), f64_div(0, 0));
+assert_eq(prani_is_finite(PrEmotion_smoothing(gs)), 0, "with_smoothing's clamp passed the NaN through");
+assert_eq(emotion_valence_zone(gs), PRE_VZ_NEUTRAL, "valence_zone unaffected -- it checks only what it reads");
+assert_eq(emotion_evaluate(gs), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects it (it checks all three fields)");
+emotion_update(gs, T_1_0, T_1_0);
+assert_eq(prani_is_finite(emotion_valence(gs)), 0, "one update turns valence NaN too");
+assert_eq(emotion_valence_zone(gs), PRANI_ERR_INVALID_VOCALIZATION, "and now valence_zone rejects it as well");
+
+test_group("input-range guards -- finite out-of-range smoothing diverges");
+var gd = emotion_with_values(T_0_0, T_0_5);
+PrEmotion_set_smoothing(gd, T_3_0);   # unreachable via with_smoothing (clamps to 0.95)
+assert_eq(emotion_evaluate(gd), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects smoothing 3.0");
+emotion_update(gd, T_1_0, T_1_0);
+# v = 0.0*3 + 1.0*(1-3) = -2.0 -- the blend stops being convex, one tick is
+# enough to leave the documented range
+assert_eq(emotion_valence(gd), T_NEG_2_0, "s=3.0 -> valence -2.0 after one update");
+assert_eq(emotion_valence_zone(gd), PRANI_ERR_INVALID_VOCALIZATION, "the divergence is caught by the valence guard");
+
+# ================================================================
+# The out-of-range door this module cannot close from the inside: PrEmotion's
+# fields are i64 bit patterns and PrEmotion_from_json_str is derive-generated,
+# so it writes them unclamped. ADR-0002 checks the parse, not the fields; the
+# field range therefore lands at the consumer, which is the whole reason the
+# guard sits at the point of use. The document below is
+# {valence: 5.0, arousal: 0.5, smoothing: 0.1} -- one prani would never write,
+# since every prani-side path clamps before serializing.
+test_group("input-range guards -- a document prani did not write");
+var gjson = "{\"valence\":4617315517961601024,\"arousal\":4602678819172646912,\"smoothing\":4591870180066957722}";
+var gj = PrEmotion_from_json_str(gjson);
+assert_eq(emotion_valence(gj), T_5_0, "from_json_str stores valence 5.0 unclamped");
+assert_eq(emotion_arousal(gj), T_0_5, "arousal parsed");
+assert_eq(PrEmotion_smoothing(gj), T_0_1, "smoothing parsed");
+assert_eq(emotion_valence_zone(gj), PRANI_ERR_INVALID_VOCALIZATION, "valence_zone rejects 5.0");
+assert_eq(emotion_select_vocalization(gj), PRANI_ERR_INVALID_VOCALIZATION, "select_vocalization rejects 5.0");
+assert_eq(emotion_select_intent(gj), PRANI_ERR_INVALID_VOCALIZATION, "select_intent rejects 5.0");
+assert_eq(emotion_evaluate(gj), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects 5.0");
+
+# ================================================================
+# Infinities are NOT the hazard at a clamp site -- f64_clamp bounds them
+# (measured, tests/error.tcyr) -- so an infinity through with_values becomes a
+# legal endpoint and stays accepted. Only the unclamped doors deliver one.
+test_group("input-range guards -- infinities");
+var gi = emotion_with_values(T_POS_INF, T_NEG_INF);
+assert_eq(emotion_valence(gi), T_1_0, "with_values clamps +inf valence to 1.0");
+assert_eq(emotion_arousal(gi), T_0_0, "with_values clamps -inf arousal to 0.0");
+assert_eq(prani_is_err(emotion_evaluate(gi)), 0, "a clamped infinity is a valid state -- still accepted");
+var gi2 = emotion_new();
+PrEmotion_set_arousal(gi2, T_POS_INF);
+assert_eq(emotion_arousal_zone(gi2), PRANI_ERR_INVALID_VOCALIZATION, "an unclamped +inf arousal is rejected");
+assert_eq(emotion_evaluate(gi2), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects it too");
+
+# ================================================================
+# The bounds are inclusive, and exact: the endpoints update() actually reaches
+# are accepted, one ulp beyond is not.
+test_group("input-range guards -- inclusive bounds, one ulp beyond");
+var gb = emotion_with_values(T_NEG_1_0, T_0_0);
+assert_eq(prani_is_err(emotion_evaluate(gb)), 0, "valence -1.0 / arousal 0.0 accepted");
+var gb2 = emotion_with_smoothing(emotion_with_values(T_1_0, T_1_0), T_0_95);
+assert_eq(PrEmotion_smoothing(gb2), T_0_95, "smoothing 0.95 is the clamp bound itself");
+assert_eq(prani_is_err(emotion_evaluate(gb2)), 0, "valence 1.0 / arousal 1.0 / smoothing 0.95 accepted");
+PrEmotion_set_valence(gb2, T_PAST_1_0);
+assert_eq(emotion_valence_zone(gb2), PRANI_ERR_INVALID_VOCALIZATION, "one ulp past +1.0 rejected");
+PrEmotion_set_valence(gb2, T_NEG_1_0);
+PrEmotion_set_smoothing(gb2, T_PAST_0_95);
+assert_eq(emotion_evaluate(gb2), PRANI_ERR_INVALID_VOCALIZATION, "one ulp past 0.95 smoothing rejected");
+
 var rc = assert_summary();
 syscall(60, rc);

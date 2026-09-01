@@ -34,6 +34,18 @@ var H_DUR_005 = 0x3fa999999999999a;   # 0.05 s
 var H_0_02    = 0x3f947ae147ae147b;   # 0.02     the 20 ms block constant
 var H_3_0     = 0x4008000000000000;   # 3.0      an out-of-range size scale
 
+# all_finite(vec) -- 1 iff every element passes prani_is_finite.
+#must_use
+fn t_all_finite_h(v) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (prani_is_finite(vec_get(v, i)) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # ================================================================
 # F1 (CRITICAL) -- svara_tract_new's error return was used as a pointer.
 #
@@ -227,6 +239,169 @@ assert_eq(vec_len(hb_out), 2205, "control: and still returns 0.05 s of audio");
 # below is deliberately loose -- it is a REGRESSION guard on the shape of the
 # allocation (a fixed set plus the sample buffers), not a golden byte count.
 assert_eq(hb_used < 1000000, 1, "one 0.05 s call stays under 1 MB retained");
+
+# ================================================================
+# F12 (CRITICAL, 2.0.5) -- the WHOLE band (1000, 7500] aborted the process.
+#
+# ADR-0001 established that crtract_new checks svara_tract_new's return. It did.
+# The return was a valid pointer -- and the tract still could not survive its own
+# next call, for two independent reasons inside svara (both repaired in 3.5.4,
+# found from here):
+#
+#   1. Every svara vowel target carries F5 = 3750 Hz, so at or below 7500 Hz
+#      svara fell back to a SINGLE 500 Hz formant and stored that one-element vec
+#      as the tract's record -- then wrote five formants into it.
+#   2. svara_tract_new stored two UNCHECKED naad error codes as filter pointers;
+#      its fixed 600 Hz subglottal bandpass needs a rate above 1200 Hz.
+#
+# So `crvoice_vocalize(wolf, HOWL, 4000.0, ...)` -- an ordinary low sample rate,
+# reachable from prani_ffi_stream_start where a host passes the rate straight in
+# -- killed the process. On the svara 3.5.3 tree every "synthesizes" assertion in
+# this group ABORTS rather than failing.
+#
+# The band is now split at 1200, and the split is svara's, not prani's: prani
+# restates no threshold (ADR-0001 still holds) -- it propagates whatever svara
+# reports. These assertions PIN THE MEASUREMENT. If they fail, svara's range
+# moved; re-measure it, do not hardcode a new number in prani.
+# ================================================================
+test_group("F12 low sample rates report instead of aborting");
+var hlv = crvoice_new(PRANI_SP_WOLF);
+# below svara's floor: a checkable error, no crash
+assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(1001), H_DUR_005)), 1,
+  "1001 Hz -> error (svara's 600 Hz subglottal bandpass is above nyquist)");
+assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(1200), H_DUR_005)), 1,
+  "1200 Hz (600 Hz exactly at nyquist) -> error");
+# above it: these ABORTED before svara 3.5.4 and now render
+var h1201 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(1201), H_DUR_005);
+assert_eq(prani_is_err(h1201), 0, "1201 Hz synthesizes (aborted before 3.5.4)");
+assert_eq(vec_len(h1201), 60, "1201 Hz length is trunc(0.05 * 1201) = 60");
+assert_eq(t_all_finite_h(h1201), 1, "1201 Hz output is finite");
+var h4000 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(4000), H_DUR_005);
+assert_eq(prani_is_err(h4000), 0, "4000 Hz synthesizes (aborted before 3.5.4)");
+assert_eq(vec_len(h4000), 200, "4000 Hz length is 0.05 * 4000 = 200");
+assert_eq(t_all_finite_h(h4000), 1, "4000 Hz output is finite");
+var h7500 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(7500), H_DUR_005);
+assert_eq(prani_is_err(h7500), 0, "7500 Hz synthesizes (aborted before 3.5.4)");
+assert_eq(t_all_finite_h(h7500), 1, "7500 Hz output is finite");
+# the boundary above which svara carries its FULL five-formant bank
+var h7501 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(7501), H_DUR_005);
+assert_eq(prani_is_err(h7501), 0, "7501 Hz synthesizes (full five-formant bank)");
+# control: the rates the library is actually used at are untouched by all of this
+assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(8000), H_DUR_005)), 0,
+  "control: 8000 unaffected");
+assert_eq(vec_len(crvoice_vocalize(hlv, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
+  "control: 44100 still returns 0.05 s of audio");
+# The FFI surface a host actually drives carries the same split -- but through
+# ADR-0003's contract, not through stream_start: stream_new does not build a
+# tract (it is the Option::get_or_insert_with slot), so a rate svara will refuse
+# still yields a handle and fails at the first fill, reporting 0 and retiring.
+var hfv = prani_ffi_voice_create(0);
+var hfs_lo = prani_ffi_stream_start(hfv, 0, 6, f64_from(1200), H_DUR_005);
+assert_neq(hfs_lo, 0, "FFI: 1200 Hz still yields a handle (no tract built yet)");
+var hfbuf = vec_new();
+prani_vec_push_zeros(hfbuf, 64);
+assert_eq(prani_ffi_stream_fill(hfs_lo, hfbuf, 64), 0,
+  "FFI: 1200 Hz fill reports 0 written, not a crash (ADR-0003)");
+assert_eq(prani_ffi_stream_is_finished(hfs_lo), 1,
+  "FFI: the 1200 Hz stream retires so a host drain loop terminates");
+# and the band that used to abort now actually renders through the FFI
+var hfs_ok = prani_ffi_stream_start(hfv, 0, 6, f64_from(4000), H_DUR_005);
+assert_neq(hfs_ok, 0, "FFI: 4000 Hz stream starts");
+assert_eq(prani_ffi_stream_fill(hfs_ok, hfbuf, 64), 64,
+  "FFI: 4000 Hz fill writes 64 samples (aborted before svara 3.5.4)");
+assert_eq(t_all_finite_h(hfbuf), 1, "FFI: what it wrote is finite");
+
+# ================================================================
+# F11 (2.0.5) -- NaN passed every clamp in the tree and came back as SUCCESS.
+#
+# f64_clamp(NaN, lo, hi) is NaN (both comparisons are false), so a NaN reached
+# svara or a raw oscillator. MEASURED before the guards: crvoice_vocalize on a
+# syringeal / stridulatory / vibratile species returned a FULL-LENGTH ALL-NaN
+# BUFFER as a success -- worse than the audit's "silent empty", because a host
+# plays it. On a laryngeal species svara refused the NaN f0 and it surfaced as
+# an error, which is why this hid: the species you would test first was the one
+# species that reported.
+# ================================================================
+test_group("F11 non-finite input is refused, not rendered");
+var hnan = f64_div(0, 0);
+var hpinf = f64_div(f64_from(1), 0);
+var hnv = crvoice_new(PRANI_SP_WOLF);
+assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, hnan, H_DUR_005)), 1,
+  "NaN sample_rate -> error");
+assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, hnan)), 1,
+  "NaN duration -> error, not an empty buffer");
+assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, hpinf)), 1,
+  "+inf duration -> error");
+# the species that used to return an all-NaN buffer as success
+var hbird = crvoice_new(PRANI_SP_SONGBIRD);
+assert_eq(prani_is_err(crvoice_vocalize(hbird, PRANI_VOC_TRILL, hnan, H_DUR_005)), 1,
+  "syringeal + NaN rate -> error (was a full-length all-NaN buffer)");
+var hcri = crvoice_new(PRANI_SP_CRICKET);
+assert_eq(prani_is_err(crvoice_vocalize(hcri, PRANI_VOC_STRIDULATE, H_SR, hnan)), 1,
+  "stridulatory + NaN duration -> error (was an all-NaN buffer)");
+# a negative duration is not a length
+assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, f64_neg(F64_ONE))), 1,
+  "negative duration -> error");
+# CONTROL: zero duration stays VALID -- the oracle's test_zero_duration_synthesis
+# asserts an empty buffer, not an error, and 2.0.5 must not have changed that.
+var hzero = crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, 0);
+assert_eq(prani_is_err(hzero), 0, "control: zero duration is NOT an error (oracle parity)");
+assert_eq(vec_len(hzero), 0, "control: zero duration returns an empty buffer");
+# CONTROL: every valid call still behaves exactly as before
+assert_eq(vec_len(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
+  "control: a valid call is untouched by all of the above");
+
+# ================================================================
+# F10 (2.0.5) -- the chorus allocation, and why the audit understated it.
+#
+# total_len = base_samples + max_offset_samples * 2, then a vec of that many
+# zeros. The audit filed this as an i64 overflow at a timing_spread around 1e14
+# seconds. MEASURED: a spread of 1e6 seconds -- EIGHT ORDERS OF MAGNITUDE below
+# that -- already demands 4.41e10 offset samples, i.e. over 700 GB at 8 bytes
+# each. The reachable failure is arena exhaustion, not overflow, so a guard that
+# only prevented the overflow would have missed nearly the whole range.
+# Separately: a NaN spread gives i64::MIN, and i64::MIN * 2 WRAPS TO 0, so the
+# chorus quietly returned a correct-length buffer -- a silent SUCCESS path, not
+# the silent-empty the audit describes.
+# ================================================================
+test_group("F10 chorus rejects a timing_spread it cannot allocate");
+var hvoices = vec_new();
+vec_push(hvoices, crvoice_new(PRANI_SP_WOLF));
+vec_push(hvoices, crvoice_new(PRANI_SP_WOLF));
+assert_eq(prani_is_err(
+    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, hnan)), 1,
+  "NaN timing_spread -> error (was a plausible-looking buffer)");
+assert_eq(prani_is_err(
+    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, f64_from(1000000))), 1,
+  "1e6 s timing_spread -> error (would have needed >700 GB)");
+assert_eq(prani_is_err(
+    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, f64_neg(F64_ONE))), 1,
+  "negative timing_spread -> error");
+# CONTROL: an ordinary chorus is unaffected
+var hchor = sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, PR_ST_0_1);
+assert_eq(prani_is_err(hchor), 0, "control: a 0.1 s spread still mixes");
+assert_eq(t_all_finite_h(hchor), 1, "control: and the mix is finite");
+
+# ================================================================
+# ADR-0002's deferral, closed (2.0.5): a document that PARSES but carries
+# nonsense is now rejected too. 2.0.3 only checked that the parse succeeded.
+# ================================================================
+test_group("deserializers reject out-of-range fields, not just malformed JSON");
+assert_eq(prani_is_err(crvoice_from_json_str(
+  "{\"species\":0,\"f0_offset\":0,\"size_scale\":0,\"vocal_effort\":4602678819172646912,\"params\":{}}")), 1,
+  "size_scale 0 rejected (it divides in effective_f0)");
+assert_eq(prani_is_err(crvoice_from_json_str(
+  "{\"species\":99,\"f0_offset\":0,\"size_scale\":4607182418800017408,\"vocal_effort\":4602678819172646912,\"params\":{}}")), 1,
+  "out-of-range species rejected");
+# CONTROL: prani's OWN serialized output must still round-trip -- the guards are
+# only allowed to reject documents prani did not write.
+var hser = crvoice_new(PRANI_SP_WOLF);
+var hsb = str_builder_new();
+crvoice_to_json(hser, hsb);
+var hjson = str_data(str_builder_build(hsb));
+var hback = crvoice_from_json_str(hjson);
+assert_eq(prani_is_err(hback), 0, "control: prani's own to_json output still deserializes");
+assert_eq(CreatureVoice_species(hback), PRANI_SP_WOLF, "control: and round-trips its species");
 
 var rc = assert_summary();
 syscall(60, rc);

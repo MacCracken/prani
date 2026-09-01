@@ -65,6 +65,12 @@ var T_1_5       = 0x3ff8000000000000;   # 1.5   screech / chirp spectral offset
 var T_NEG_1     = 0xbff0000000000000;   # -1.0  roar spectral offset
 var T_0_45      = 0x3fdccccccccccccd;   # 0.45  dog effective_tract_scale @ size 0.5 (0.9 * 0.5)
 var T_1_8       = 0x3ffccccccccccccd;   # 1.8   dog effective_tract_scale @ size 2.0 (0.9 * 2)
+# ---- 2.0.5 input-range guard constants -------------------------------------
+var T_NAN       = 0x7ff8000000000000;   # NaN -- the one value f64_clamp passes through
+var T_1E300     = 0x7e37e43c8800759c;   # 1e300 s: finite, but 1e300 * 44100 overflows f64_to
+var T_0_05      = 0x3fa999999999999a;   # 0.05  with_jitter's ceiling (== T_DUR_005's pattern)
+var T_1_2       = 0x3ff3333333333333;   # 1.2   out of with_vocal_effort's [0,1]
+var T_8000      = 0x40bf400000000000;   # 8000.0 a LOW but perfectly valid sample rate
 
 alloc_init();
 
@@ -135,6 +141,60 @@ fn t_count_below(v, eps, lo, hi) {
         i = i + 1;
     }
     return c;
+}
+
+# const_buf(n, val) -- a fresh n-element vec, every element `val`. Used by the
+# apply_nasal_antiformant / apply_am_pattern guard tests, which need a buffer
+# whose UNTOUCHED elements are recognisable on sight.
+#must_use
+fn t_const_buf(n, val) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(v, val);
+        i = i + 1;
+    }
+    return v;
+}
+
+# voice_json(species, f0_offset, size_scale, vocal_effort, params) -- byte-for-byte
+# what crvoice_to_json emits, but with every scalar injectable. The nested params
+# object goes through the SAME SpeciesParams_to_json the real codec uses, so a
+# document built here differs from a genuine one only in the field under test.
+#must_use
+fn t_voice_json(species, f0_offset, size_scale, vocal_effort, params) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"species\":");
+    str_builder_add_int(sb, species);
+    str_builder_add_cstr(sb, ",\"f0_offset\":");
+    str_builder_add_int(sb, f0_offset);
+    str_builder_add_cstr(sb, ",\"size_scale\":");
+    str_builder_add_int(sb, size_scale);
+    str_builder_add_cstr(sb, ",\"vocal_effort\":");
+    str_builder_add_int(sb, vocal_effort);
+    str_builder_add_cstr(sb, ",\"params\":");
+    SpeciesParams_to_json(params, sb);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# wolf_json(f0_offset, size_scale, vocal_effort) -- t_voice_json over a stock
+# Wolf row (f0 150..1200, so with_f0_offset's range is 1050).
+#must_use
+fn t_wolf_json(f0_offset, size_scale, vocal_effort) {
+    return t_voice_json(PRANI_SP_WOLF, f0_offset, size_scale, vocal_effort, species_params(PRANI_SP_WOLF));
+}
+
+# roundtrip_ok(v) -- 1 iff crvoice_to_json(v) survives crvoice_from_json_str.
+# The control the deserializer's new field gate has to satisfy: it may only ever
+# reject documents prani did not write.
+#must_use
+fn t_roundtrip_ok(v) {
+    var sb = str_builder_new();
+    crvoice_to_json(v, sb);
+    var back = crvoice_from_json_str(str_data(str_builder_build(sb)));
+    if (prani_is_err(back) == 1) { return 0; }
+    return 1;
 }
 
 # vecs_equal(a, b) -- 1 iff same length and bit-identical elements.
@@ -733,6 +793,325 @@ crvoice_to_json(v2, vsb2);
 var vjson_2 = str_data(str_builder_build(vsb2));
 assert_eq(strlen(vjson_2), strlen(vjson), "voice json idempotent -- same length");
 assert_eq(memeq(vjson, vjson_2, strlen(vjson)), 1, "voice json idempotent");
+
+# ================================================================
+# 2.0.5 -- input-range validation. Everything below pins a REJECTION; the
+# behaviour for valid input is pinned by the 222 assertions above, which are
+# unchanged. Each group carries its own in-range control so a guard that
+# rejected everything could not pass.
+# ================================================================
+test_group("2.0.5 guards -- vocalization / intent tags out of range");
+# The oracle's Vocalization and CallIntent were enums: 99 was unrepresentable.
+# The port carries them as i64 and every dispatch table ends in a fallthrough,
+# so voc = 99 used to render a FLAT contour and a default envelope and return it
+# as a 2205-sample SUCCESS (measured). DELIBERATE DIVERGENCE, forced by the
+# enum -> int erasure.
+var gv = crvoice_new(PRANI_SP_WOLF);
+assert_eq(crvoice_vocalize(gv, f64_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag -1 rejected");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag == PRANI_VOC_COUNT rejected");
+assert_eq(crvoice_vocalize(gv, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag 99 rejected (was a 2205-sample success)");
+assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, f64_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+  "intent tag -1 rejected");
+assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, PRANI_INTENT_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+  "intent tag == PRANI_INTENT_COUNT rejected");
+assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+  "intent tag 99 rejected (was a 2205-sample success)");
+# Controls: the LAST valid tag of each enum is still accepted (an off-by-one in
+# the upper bound would take BUZZ and SOCIAL out with 99).
+var g_buzz = crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, T_SR, T_DUR_005);
+assert_eq(prani_is_err(g_buzz), 0, "voc tag PRANI_VOC_COUNT-1 (BUZZ) still accepted");
+assert_eq(vec_len(g_buzz), 2205, "BUZZ still renders 2205 samples");
+var g_soc = crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(g_soc), 0, "intent tag PRANI_INTENT_COUNT-1 (SOCIAL) still accepted");
+
+# ================================================================
+test_group("2.0.5 guards -- sample_rate finite and > 0");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_NAN, T_DUR_005), PRANI_ERR_INVALID_TRACT, "NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, PRANI_POS_INF, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "+inf sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, PRANI_NEG_INF, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "-inf sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, 0, T_DUR_005), PRANI_ERR_INVALID_TRACT, "sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, f64_neg(T_SR), T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "negative sample_rate -> PRANI_ERR_INVALID_TRACT");
+# CONTROL, and the reason the guard is `> 0` and not a threshold: ADR-0001 leaves
+# "too low to build a tract" to svara. 8000 Hz is below every rate this file
+# otherwise uses and must still synthesize -- a prani-side threshold would eat it.
+var g_8k = crvoice_vocalize(gv, PRANI_VOC_HOWL, T_8000, T_DUR_005);
+assert_eq(prani_is_err(g_8k), 0, "8000 Hz still synthesizes (the guard is not a threshold)");
+assert_eq(vec_len(g_8k), 400, "8000 Hz x 0.05 s == 400 samples");
+
+# ================================================================
+test_group("2.0.5 guards -- duration finite and >= 0 (zero stays VALID)");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, T_NAN), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN duration -> PRANI_ERR_INVALID_VOCALIZATION");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, PRANI_POS_INF), PRANI_ERR_INVALID_VOCALIZATION,
+  "+inf duration -> PRANI_ERR_INVALID_VOCALIZATION");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, f64_neg(T_1_0)), PRANI_ERR_INVALID_VOCALIZATION,
+  "negative duration -> PRANI_ERR_INVALID_VOCALIZATION");
+# num_samples overflow: 1e300 s is FINITE and passes the duration guard, but
+# 1e300 * 44100 does not fit an i64, f64_to gives i64::MIN, and the render loop
+# then returns an EMPTY buffer as a success. Audit F11's shape exactly.
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, T_1E300), PRANI_ERR_INVALID_VOCALIZATION,
+  "1e300 s (finite, overflows num_samples) -> PRANI_ERR_INVALID_VOCALIZATION");
+# CONTROL -- the oracle's test_zero_duration_synthesis: duration 0 is VALID and
+# yields an EMPTY buffer, not an error. Re-asserted here because it is the one
+# value prani_is_non_negative admits that prani_is_positive would not.
+var g_z = crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, 0);
+assert_eq(prani_is_err(g_z), 0, "duration 0 still accepted (oracle: empty buffer, not an error)");
+assert_eq(vec_len(g_z), 0, "duration 0 still yields an empty buffer");
+
+# ================================================================
+# The point-of-use guard the builders cannot carry themselves: crvoice_with_*
+# return `self` with no error channel, and f64_clamp(NaN, lo, hi) == NaN, so a
+# NaN handed to any of them is STORED. Measured before the guard: with_size(NaN)
+# on a Songbird produced a full 2205-sample ALL-NaN buffer returned as SUCCESS.
+test_group("2.0.5 guards -- a NaN smuggled through a builder is reported");
+var g_bird = crvoice_with_size(crvoice_new(PRANI_SP_SONGBIRD), T_NAN);
+assert_eq(prani_is_finite(crvoice_effective_f0(g_bird)), 0, "NaN size_scale makes effective_f0 non-finite (the precondition)");
+assert_eq(crvoice_vocalize(g_bird, PRANI_VOC_TRILL, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "songbird with_size(NaN) -> PRANI_ERR_INVALID_TRACT (was an ALL-NaN success)");
+var g_cri = crvoice_with_size(crvoice_new(PRANI_SP_CRICKET), T_NAN);
+assert_eq(crvoice_vocalize(g_cri, PRANI_VOC_STRIDULATE, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "cricket with_size(NaN) -> PRANI_ERR_INVALID_TRACT");
+var g_bee = crvoice_with_size(crvoice_new(PRANI_SP_BEE), T_NAN);
+assert_eq(crvoice_vocalize(g_bee, PRANI_VOC_BUZZ, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "bee with_size(NaN) -> PRANI_ERR_INVALID_TRACT");
+var g_pcat = crvoice_with_size(crvoice_new(PRANI_SP_CAT), T_NAN);
+assert_eq(crvoice_vocalize(g_pcat, PRANI_VOC_PURR, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "cat purr with_size(NaN) -> PRANI_ERR_INVALID_TRACT");
+var g_foff = crvoice_with_f0_offset(crvoice_new(PRANI_SP_WOLF), T_NAN);
+assert_eq(crvoice_vocalize(g_foff, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "wolf with_f0_offset(NaN) -> PRANI_ERR_INVALID_TRACT");
+# breathiness/jitter/shimmer live in params, not in either derived value, so they
+# need the params gate: with_breathiness(NaN) on a WOLF -- a laryngeal species
+# whose other NaN paths svara already rejects -- was a 2205-sample ALL-NaN success.
+var g_nbr = crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), T_NAN);
+assert_eq(crvoice_vocalize(g_nbr, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "wolf with_breathiness(NaN) -> PRANI_ERR_INVALID_SPECIES (was an ALL-NaN success)");
+var g_nji = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), T_NAN);
+assert_eq(crvoice_vocalize(g_nji, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "wolf with_jitter(NaN) -> PRANI_ERR_INVALID_SPECIES");
+var g_nsh = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), T_NAN);
+assert_eq(crvoice_vocalize(g_nsh, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "wolf with_shimmer(NaN) -> PRANI_ERR_INVALID_SPECIES");
+# CONTROLS: the builders' own RAILS are in range and must still synthesize. This
+# is the "clamped extremes still synthesize" group's assertion re-run against the
+# params gate specifically -- breathiness 1.0, jitter 0.05, shimmer 0.1 all sit
+# exactly ON the inclusive bound.
+var g_rail = crvoice_new(PRANI_SP_WOLF);
+var _gr1 = crvoice_with_breathiness(g_rail, T_1_0);
+var _gr2 = crvoice_with_jitter(g_rail, T_0_05);
+var _gr3 = crvoice_with_shimmer(g_rail, T_0_1);
+var _gr4 = crvoice_with_size(g_rail, T_0_1);
+var g_rail_out = crvoice_vocalize(g_rail, PRANI_VOC_HOWL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(g_rail_out), 0, "every builder railed at once still synthesizes (inclusive bounds)");
+assert_eq(t_all_finite(g_rail_out), 1, "railed voice output all finite");
+
+# ================================================================
+test_group("2.0.5 guards -- synthesize_cat_purr (a public entry point of its own)");
+var g_mods = prani_intent_modifiers(PRANI_INTENT_IDLE);
+var g_cat = crvoice_new(PRANI_SP_CAT);
+assert_eq(crvoice_synthesize_cat_purr(g_cat, T_NAN, 100, g_mods), PRANI_ERR_INVALID_TRACT,
+  "cat purr NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_synthesize_cat_purr(g_cat, 0, 100, g_mods), PRANI_ERR_INVALID_TRACT,
+  "cat purr sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_synthesize_cat_purr(g_cat, T_SR, (0 - 1), g_mods), PRANI_ERR_INVALID_VOCALIZATION,
+  "cat purr num_samples -1 -> PRANI_ERR_INVALID_VOCALIZATION");
+# size_scale DIVIDES 27.0 to make purr_f0, and f64_clamp(NaN, 20, 35) is NaN --
+# the [20,35] rails do not catch it.
+assert_eq(crvoice_synthesize_cat_purr(crvoice_with_size(crvoice_new(PRANI_SP_CAT), T_NAN), T_SR, 100, g_mods), PRANI_ERR_INVALID_SPECIES,
+  "cat purr NaN size_scale -> PRANI_ERR_INVALID_SPECIES");
+# CONTROLS: num_samples 0 is VALID (empty buffer, same rule as duration 0).
+var g_p0 = crvoice_synthesize_cat_purr(g_cat, T_SR, 0, g_mods);
+assert_eq(prani_is_err(g_p0), 0, "cat purr num_samples 0 is not an error");
+assert_eq(vec_len(g_p0), 0, "cat purr num_samples 0 -> empty buffer");
+var g_p100 = crvoice_synthesize_cat_purr(g_cat, T_SR, 100, g_mods);
+assert_eq(prani_is_err(g_p100), 0, "cat purr 100 samples non-error");
+assert_eq(vec_len(g_p100), 100, "cat purr 100 samples -> 100 samples");
+assert_eq(t_all_finite(g_p100), 1, "cat purr 100 samples all finite");
+
+# ================================================================
+# The live CRASH. nasal_len = f64_to(len * nasal_fraction) had no stop at the
+# buffer end, so a fraction above 1.0 indexed past it and terminated the process
+# ("vec: index out of bounds", measured at fraction 2.0 on a 100-sample buffer).
+# The oracle iterates `.take(nasal_len)` (2.0.3: rust-old/src/voice.rs:613), which
+# stops at the end for ANY n -- so the repair RESTORES parity rather than
+# diverging, and the fade denominator stays the unclamped nasal_len the oracle
+# divides by.
+test_group("2.0.5 -- apply_nasal_antiformant: fraction > 1.0 no longer aborts");
+var g_nb = t_const_buf(100, T_1_0);
+assert_eq(crvoice_apply_nasal_antiformant(g_nb, T_SR, T_2_0), 0, "fraction 2.0 on a 100-sample buffer returns 0 (was: process abort)");
+assert_eq(vec_len(g_nb), 100, "fraction 2.0 leaves the buffer length alone");
+assert_eq(t_all_finite(g_nb), 1, "fraction 2.0 leaves every sample finite");
+assert_neq(vec_get(g_nb, 99), T_1_0, "fraction 2.0 filters the LAST sample too -- .take() parity, not a silent no-op");
+# CONTROL: at 0.5 the bound is still nasal_len (50), NOT len. If the repair had
+# clamped the wrong quantity this assertion would fail.
+var g_nc = t_const_buf(100, T_1_0);
+assert_eq(crvoice_apply_nasal_antiformant(g_nc, T_SR, T_0_5), 0, "fraction 0.5 returns 0");
+assert_eq(vec_get(g_nc, 99), T_1_0, "fraction 0.5 leaves index 99 UNTOUCHED (bound is nasal_len, not len)");
+assert_neq(vec_get(g_nc, 10), T_1_0, "fraction 0.5 does filter index 10 (control)");
+# sample_rate divides both notch coefficients: at 0, theta is inf and
+# cos_theta = sin(inf) = NaN, which NaNs every filtered sample.
+assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), 0, T_0_2), PRANI_ERR_INVALID_TRACT,
+  "nasal antiformant sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_NAN, T_0_2), PRANI_ERR_INVALID_TRACT,
+  "nasal antiformant NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_SR, T_NAN), PRANI_ERR_INVALID_VOCALIZATION,
+  "nasal antiformant NaN fraction -> PRANI_ERR_INVALID_VOCALIZATION");
+assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_SR, f64_neg(T_0_2)), PRANI_ERR_INVALID_VOCALIZATION,
+  "nasal antiformant negative fraction -> PRANI_ERR_INVALID_VOCALIZATION");
+# CONTROL: the two fractions the module actually passes (cat 0.2, wolf 0.1) are
+# untouched, and fraction 0 is a legal no-op.
+var g_nd = t_const_buf(100, T_1_0);
+assert_eq(crvoice_apply_nasal_antiformant(g_nd, T_SR, T_0_2), 0, "cat's own 0.2 fraction still returns 0");
+assert_neq(vec_get(g_nd, 5), T_1_0, "cat's 0.2 fraction still filters the nasal phase");
+assert_eq(vec_get(g_nd, 50), T_1_0, "cat's 0.2 fraction still stops at 20 samples");
+var g_ne = t_const_buf(100, T_1_0);
+assert_eq(crvoice_apply_nasal_antiformant(g_ne, T_SR, 0), 0, "fraction 0.0 is a legal no-op");
+assert_eq(vec_get(g_ne, 0), T_1_0, "fraction 0.0 changes nothing");
+
+# ================================================================
+test_group("2.0.5 -- apply_am_pattern sample_rate guard");
+assert_eq(crvoice_apply_am_pattern(t_const_buf(10, T_1_0), PRANI_VOC_TRILL, 0), PRANI_ERR_INVALID_TRACT,
+  "trill AM at sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_apply_am_pattern(t_const_buf(10, T_1_0), PRANI_VOC_TRILL, T_NAN), PRANI_ERR_INVALID_TRACT,
+  "trill AM at NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
+# The non-trill early return comes FIRST and is unchanged -- a HOWL never reads
+# the sample rate, so it is still a no-op success at any value.
+assert_eq(crvoice_apply_am_pattern(t_const_buf(10, T_1_0), PRANI_VOC_HOWL, 0), 0,
+  "non-trill AM is still a no-op success at sample_rate 0");
+var g_am = t_const_buf(10, T_1_0);
+assert_eq(crvoice_apply_am_pattern(g_am, PRANI_VOC_TRILL, T_SR), 0, "trill AM at 44100 still returns 0");
+assert_eq(t_all_finite(g_am), 1, "trill AM at 44100 leaves the buffer finite");
+
+# ================================================================
+# ADR-0002 accepted a document that PARSES but carries nonsense; 2.0.5 closes it.
+# Every scalar arrives as a raw i64 bit pattern, so the document's syntax
+# constrains nothing: "size_scale": 0 deserializes to +0.0 and makes
+# crvoice_effective_f0 divide by zero, which is the exact hazard ADR-0002 named
+# and deferred.
+test_group("2.0.5 -- from_json_str rejects out-of-range fields");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_0_5))), 0, "CONTROL: an in-range hand-built document is accepted");
+assert_eq(crvoice_from_json_str("{\"species\":99}"), PRANI_ERR_INVALID_SPECIES, "species 99 rejected");
+assert_eq(crvoice_from_json_str("{\"species\":-1}"), PRANI_ERR_INVALID_SPECIES, "species -1 rejected");
+assert_eq(crvoice_from_json_str("{\"species\":13}"), PRANI_ERR_INVALID_SPECIES, "species == PRANI_SP_COUNT rejected");
+assert_eq(crvoice_from_json_str("{\"species\":0}"), PRANI_ERR_INVALID_SPECIES, "a document with NO params object is rejected");
+# size_scale -- with_size's [0.1, 10.0].
+assert_eq(crvoice_from_json_str(t_wolf_json(0, 0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
+  "size_scale 0.0 rejected (ADR-0002's divide-by-zero)");
+assert_eq(crvoice_from_json_str(t_wolf_json(0, T_NAN, T_0_5)), PRANI_ERR_INVALID_SPECIES, "size_scale NaN rejected");
+assert_eq(crvoice_from_json_str(t_wolf_json(0, f64_from(100), T_0_5)), PRANI_ERR_INVALID_SPECIES,
+  "size_scale 100.0 rejected (above with_size's ceiling)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_0_1, T_0_5))), 0, "size_scale 0.1 accepted (with_size's floor, inclusive)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, f64_from(10), T_0_5))), 0,
+  "size_scale 10.0 accepted (with_size's ceiling, inclusive)");
+# vocal_effort -- with_vocal_effort's [0, 1].
+assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_2)), PRANI_ERR_INVALID_SPECIES, "vocal_effort 1.2 rejected");
+assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, f64_neg(T_1_0))), PRANI_ERR_INVALID_SPECIES, "vocal_effort -1.0 rejected");
+assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_NAN)), PRANI_ERR_INVALID_SPECIES, "vocal_effort NaN rejected");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, 0))), 0, "vocal_effort 0.0 accepted (inclusive floor)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_0))), 0, "vocal_effort 1.0 accepted (inclusive ceiling)");
+# f0_offset -- with_f0_offset's +/-(f0_max - f0_min); Wolf is 1200 - 150 = 1050.
+assert_eq(crvoice_from_json_str(t_wolf_json(f64_from(5000), T_1_0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
+  "f0_offset 5000 rejected (Wolf range is 1050)");
+assert_eq(crvoice_from_json_str(t_wolf_json(T_NAN, T_1_0, T_0_5)), PRANI_ERR_INVALID_SPECIES, "f0_offset NaN rejected");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(f64_from(1050), T_1_0, T_0_5))), 0,
+  "f0_offset +1050 accepted (exactly the Wolf range)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(f64_neg(f64_from(1050)), T_1_0, T_0_5))), 0,
+  "f0_offset -1050 accepted (exactly the Wolf range)");
+# The 16 nested SpeciesParams fields, one poked field per document.
+var g_jp = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_breathiness(g_jp, f64_from(5));
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jp)), PRANI_ERR_INVALID_SPECIES,
+  "params breathiness 5.0 rejected (with_breathiness clamps to [0,1])");
+var g_jj = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_jitter(g_jj, T_NAN);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jj)), PRANI_ERR_INVALID_SPECIES,
+  "params jitter NaN rejected");
+var g_js = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_shimmer(g_js, T_1_0);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_js)), PRANI_ERR_INVALID_SPECIES,
+  "params shimmer 1.0 rejected (with_shimmer clamps to [0,0.1])");
+var g_jf = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_f0_min(g_jf, f64_from(5000));
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jf)), PRANI_ERR_INVALID_SPECIES,
+  "params f0_min > f0_max rejected");
+var g_jt = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_tract_scale(g_jt, 0);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jt)), PRANI_ERR_INVALID_SPECIES,
+  "params tract_scale 0.0 rejected (it multiplies into every tract length)");
+var g_ja = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_apparatus(g_ja, 9);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_ja)), PRANI_ERR_INVALID_SPECIES,
+  "params apparatus 9 rejected (five variants exist)");
+var g_jd = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_f0_default(g_jd, f64_from(5000));
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jd)), PRANI_ERR_INVALID_SPECIES,
+  "params f0_default outside [f0_min, f0_max] rejected");
+var g_jb = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_formant1(g_jb, PRANI_POS_INF);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jb)), PRANI_ERR_INVALID_SPECIES,
+  "params formant1 +inf rejected");
+var g_jw = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_bandwidth2(g_jw, 0);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jw)), PRANI_ERR_INVALID_SPECIES,
+  "params bandwidth2 0.0 rejected");
+var g_jl = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_spectral_tilt(g_jl, T_NAN);
+assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jl)), PRANI_ERR_INVALID_SPECIES,
+  "params spectral_tilt NaN rejected");
+# resonance_seed is deliberately NOT range-checked -- it is an RNG seed, and
+# every i64 bit pattern is a legal one.
+var g_jr = crvoice_clone_params(species_params(PRANI_SP_WOLF));
+SpeciesParams_set_resonance_seed(g_jr, f64_neg(1));
+assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jr))), 0,
+  "resonance_seed is NOT range-checked (every i64 is a legal seed)");
+# Snake's row is f0_min == f0_max == f0_default == 0.0 -- the degenerate case
+# ADR-0002 named, and a LEGITIMATE species row (noise-only, no f0). It must pass,
+# which is why the f0 fields are non-negative rather than positive.
+assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_SNAKE, 0, T_1_0, T_0_5, species_params(PRANI_SP_SNAKE)))), 0,
+  "Snake's 0/0/0 f0 row is accepted (noise-only, legitimately f0-less)");
+
+# ================================================================
+# The bar the tightened deserializer has to clear: it may only ever reject a
+# document prani did NOT write. Every species, and every builder rail, must
+# survive its own to_json.
+test_group("2.0.5 -- prani's own to_json output always satisfies the new ranges");
+var g_rt = 0;
+var g_rs = 0;
+while (g_rs < PRANI_SP_COUNT) {
+    if (t_roundtrip_ok(crvoice_new(g_rs)) == 1) { g_rt = g_rt + 1; }
+    g_rs = g_rs + 1;
+}
+assert_eq(g_rt, PRANI_SP_COUNT, "all 13 default voices roundtrip through the field gate");
+# ... and the same 13 with every builder pushed PAST its rail, so each field
+# lands exactly ON an inclusive bound.
+var g_rt2 = 0;
+var g_rs2 = 0;
+while (g_rs2 < PRANI_SP_COUNT) {
+    var g_rv = crvoice_new(g_rs2);
+    var _gx1 = crvoice_with_size(g_rv, f64_from(100));
+    var _gx2 = crvoice_with_vocal_effort(g_rv, f64_from(9));
+    var _gx3 = crvoice_with_breathiness(g_rv, f64_from(5));
+    var _gx4 = crvoice_with_jitter(g_rv, T_1_0);
+    var _gx5 = crvoice_with_shimmer(g_rv, T_1_0);
+    var _gx6 = crvoice_with_f0_offset(g_rv, f64_from(99999));
+    if (t_roundtrip_ok(g_rv) == 1) { g_rt2 = g_rt2 + 1; }
+    g_rs2 = g_rs2 + 1;
+}
+assert_eq(g_rt2, PRANI_SP_COUNT, "all 13 voices roundtrip with every builder railed (bounds are inclusive)");
+# And the deserialized voice still SYNTHESIZES -- the gate returns a usable voice,
+# not just a non-error.
+var g_rsb = str_builder_new();
+crvoice_to_json(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_2_0), g_rsb);
+var g_rv3 = crvoice_from_json_str(str_data(str_builder_build(g_rsb)));
+assert_eq(prani_is_err(g_rv3), 0, "a roundtripped wolf is not an error");
+assert_eq(crvoice_effective_f0(g_rv3), T_200, "roundtripped wolf @ size 2 still has effective_f0 200");
+var g_rout = crvoice_vocalize(g_rv3, PRANI_VOC_HOWL, T_SR, T_DUR_005);
+assert_eq(prani_is_err(g_rout), 0, "a roundtripped wolf still synthesizes");
+assert_eq(vec_len(g_rout), 2205, "roundtripped wolf howl length == 2205");
+assert_eq(t_all_finite(g_rout), 1, "roundtripped wolf howl all finite");
 
 var rc = assert_summary();
 syscall(60, rc);

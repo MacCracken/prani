@@ -79,5 +79,107 @@ var jstr_2 = str_data(str_builder_build(sb2));
 assert_eq(strlen(jstr_2), strlen(jstr), "json idempotent -- same length");
 assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
 
+# ================================================================
+# 2.0.5 input-range validation. Three groups: the hazard this module DECLINED to
+# guard (and why the guard belongs at the callers), the count range it DOES
+# guard, and the copy helper that has no range at all.
+# ================================================================
+
+var NAN_BITS = 0x7FF8000000000000;   # canonical quiet NaN
+
+# ----------------------------------------------------------------
+# The reason dcblocker_process is not guarded per sample: it is recursive, so
+# ONE non-finite input poisons the state permanently. Pinned so the claim in
+# src/dsp.cyr is a measurement, not an assertion of faith.
+# ----------------------------------------------------------------
+test_group("DcBlocker NaN latches the state permanently (unguarded, by decision)");
+var bn = dcblocker_new();
+assert_eq(prani_is_finite(dcblocker_process(bn, NAN_BITS)), 0, "NaN in -> NaN out");
+# the input has RECOVERED and every later sample is still poisoned
+assert_eq(prani_is_finite(dcblocker_process(bn, F64_ONE)), 0, "next finite sample still NaN");
+assert_eq(prani_is_finite(dcblocker_process(bn, 0)), 0, "and the one after that");
+assert_eq(prani_is_finite(DcBlocker_y_prev(bn)), 0, "y_prev is latched non-finite");
+# reset is the named cure, and it works
+dcblocker_reset(bn);
+assert_eq(dcblocker_process(bn, F64_ONE), F64_ONE, "after reset the filter is clean again");
+
+# +inf is no safer than NaN here, unlike at a clamp site (f64_clamp DOES bound
+# an infinity -- see tests/error.tcyr). y0 = +inf, then y1 = 1 - inf + r*inf.
+test_group("DcBlocker +inf latches too (inf - inf = NaN on the second sample)");
+var bi = dcblocker_new();
+assert_eq(prani_is_finite(dcblocker_process(bi, PRANI_POS_INF)), 0, "y0 non-finite");
+assert_eq(prani_is_finite(dcblocker_process(bi, F64_ONE)), 0, "y1 non-finite");
+assert_eq(prani_is_finite(dcblocker_process(bi, F64_ONE)), 0, "y2 still non-finite");
+
+# process_buffer detects the latch (O(1) per buffer, logged) but does NOT
+# repair it and does NOT change the buffer contents -- the whole tail is NaN.
+test_group("process_buffer detects but does not repair the latch");
+var bl = dcblocker_new();
+var lbuf = vec_new();
+vec_push(lbuf, F64_ONE);
+vec_push(lbuf, NAN_BITS);
+vec_push(lbuf, F64_ONE);
+dcblocker_process_buffer(bl, lbuf);
+assert_eq(vec_get(lbuf, 0), F64_ONE, "samples before the NaN are filtered normally");
+assert_eq(prani_is_finite(vec_get(lbuf, 1)), 0, "the NaN sample");
+assert_eq(prani_is_finite(vec_get(lbuf, 2)), 0, "and everything after it");
+assert_eq(prani_is_finite(DcBlocker_y_prev(bl)), 0, "state left poisoned, not fabricated back");
+# a clean filter over a clean buffer leaves finite state (the detector stays quiet)
+var lok = vec_new();
+vec_push(lok, F64_ONE);
+dcblocker_process_buffer(dcblocker_new(), lok);
+assert_eq(vec_get(lok, 0), F64_ONE, "clean buffer unchanged in behaviour");
+
+# ----------------------------------------------------------------
+# prani_vec_push_zeros: n in [0, i64::MAX]. 0 is VALID, negative is REPORTED.
+# ----------------------------------------------------------------
+test_group("push_zeros: a zero count is VALID (nothing to append is an answer)");
+var pz = vec_new();
+assert_eq(prani_vec_push_zeros(pz, 0), PRANI_ERR_NONE, "n == 0 -> ERR_NONE, not an error");
+assert_eq(vec_len(pz), 0, "and appends nothing");
+assert_eq(prani_vec_push_zeros(pz, 3), PRANI_ERR_NONE, "n == 3 -> ERR_NONE");
+assert_eq(vec_len(pz), 3, "appends exactly n");
+assert_eq(vec_get(pz, 2), 0, "and they are zero");
+
+test_group("push_zeros: a NEGATIVE count is reported, not silently empty (F11)");
+assert_eq(prani_vec_push_zeros(pz, (0 - 1)), PRANI_ERR_INVALID_VOCALIZATION, "n == -1 rejected");
+assert_eq(vec_len(pz), 3, "and the buffer is untouched");
+# the shape every call site actually produces: f64_to saturates NaN to i64::MIN
+var pz_nan = f64_to(f64_div(0, 0));
+assert_eq(pz_nan < 0, 1, "f64_to(NaN) is i64::MIN, i.e. negative");
+assert_eq(prani_vec_push_zeros(pz, pz_nan), PRANI_ERR_INVALID_VOCALIZATION,
+  "a NaN-derived gap count is reported");
+assert_eq(vec_len(pz), 3, "still untouched -- behaviour identical, only the code moved");
+# and a NaN-derived count from the real expression (seconds * sample_rate)
+var pz_gap = f64_to(f64_mul(f64_div(0, 0), f64_from(44100)));
+assert_eq(prani_vec_push_zeros(pz, pz_gap), PRANI_ERR_INVALID_VOCALIZATION,
+  "f64_to(NaN gap * 44100) is reported");
+
+# F10's chorus overflow, reproduced: total_len = base + max_offset*2 wraps past
+# i64::MAX to a negative around timing_spread 1e14 s, and the old helper turned
+# that into an empty mix with no complaint.
+test_group("push_zeros: F10's wrapped chorus length is reported");
+var f10_off = f64_to(f64_mul(f64_from(100000000000000), f64_from(48000)));
+assert_eq(f10_off > 0, 1, "max_offset_samples itself is positive");
+var f10_total = f64_to(f64_mul(F64_ONE, f64_from(48000))) + f10_off * 2;
+assert_eq(f10_total < 0, 1, "base + max_offset*2 wraps NEGATIVE (F10)");
+assert_eq(prani_vec_push_zeros(pz, f10_total), PRANI_ERR_INVALID_VOCALIZATION,
+  "the wrapped chorus length is reported, not silently empty");
+assert_eq(vec_len(pz), 3, "and no mix buffer was fabricated");
+
+# ----------------------------------------------------------------
+# prani_vec_extend: no numeric range -- it copies bit patterns verbatim.
+# ----------------------------------------------------------------
+test_group("extend has no range: it copies bit patterns without interpreting them");
+var ex_src = vec_new();
+vec_push(ex_src, F64_ONE);
+vec_push(ex_src, NAN_BITS);
+var ex_dst = vec_new();
+assert_eq(prani_vec_extend(ex_dst, ex_src), PRANI_ERR_NONE, "extend returns ERR_NONE");
+assert_eq(vec_len(ex_dst), 2, "every element appended");
+assert_eq(vec_get(ex_dst, 1), NAN_BITS, "a NaN element is copied VERBATIM, not rejected");
+assert_eq(prani_vec_extend(ex_dst, vec_new()), PRANI_ERR_NONE, "an empty src is not an error");
+assert_eq(vec_len(ex_dst), 2, "and appends nothing");
+
 var rc = assert_summary();
 syscall(60, rc);

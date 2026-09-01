@@ -25,6 +25,10 @@
 # internal bit parity vs the f32 oracle is not attainable (f32->f64 diverges
 # through svara's own DSP); tests assert structural parity + finiteness +
 # determinism instead. See tests/tract.tcyr parity_notes.
+#
+# INPUT RANGES: every fallible entry point here range-checks its numeric input
+# (roadmap 2.0.5, audit F11). The table, the measurements behind it, and what is
+# deliberately left unguarded are in the INPUT RANGES block below the constants.
 
 # ================================================================
 # Non-integer literal constants (IEEE-754 hex; decimals in comments).
@@ -47,6 +51,67 @@ var PR_TR_0_02  = 0x3f947ae147ae147b;   # 0.02  purr closed-phase noise scale
 var PR_TR_0_85  = 0x3feb333333333333;   # 0.85  spectral-tilt coefficient clamp ceiling
 var PR_TR_0_01  = 0x3f847ae147ae147b;   # 0.01  spectral-tilt coefficient floor
 var PR_TR_12_0  = 0x4028000000000000;   # 12.0  dB/octave -> coefficient divisor
+
+# ================================================================
+# INPUT RANGES (2.0.5, audit F11). Every fallible entry point in this module
+# rejects input outside the range below with a negative PRANI_ERR_* instead of
+# synthesizing from it. The helpers live in error.cyr; the error code is chosen
+# by CATEGORY, from the oracle's own five variants -- there is no generic "bad
+# parameter" code.
+#
+#   parameter                                  range      code
+#   -------------------------------------------------------------------------
+#   f0        (laryngeal/syringeal/            finite     PRANI_ERR_INVALID_TRACT
+#              stridulatory/vibratile)
+#   purr_f0   (synthesize_purr)                finite     PRANI_ERR_INVALID_TRACT
+#   tilt_db   (apply_spectral_tilt)            finite     PRANI_ERR_INVALID_TRACT
+#   num_samples (every synthesis path)         >= 0       PRANI_ERR_INVALID_VOCALIZATION
+#   subharmonic_amp / perturbation_scale       finite     PRANI_ERR_INVALID_VOCALIZATION
+#   from_json_str "phase"                      [0, 1]     PRANI_ERR_INVALID_TRACT
+#   from_json_str "dcb_x_prev" / "dcb_y_prev"  finite     PRANI_ERR_INVALID_TRACT
+#   from_json_str "dcb_r"                      [0, 1)     PRANI_ERR_INVALID_TRACT
+#
+# Why FINITE and not a magnitude band for f0 / purr_f0 / tilt_db: every finite
+# value is already bounded where it is used. f0 is clamped into the species band
+# on the glottal paths and drives a sine elsewhere; tilt_db's coefficient is
+# clamped to [0, 0.85]; purr_f0 only sets a phase increment. A band would be a
+# number invented here, and ADR-0001 rejected inventing one (it declined to
+# restate svara's sample-rate threshold for the same reason). What a finite
+# value cannot do is any of the following, all MEASURED 2026-08-31 on the
+# pre-guard tree and pinned as assertions in tests/tract.tcyr:
+#
+#   crtract_synthesize(bee,      +inf, 32) -> SUCCESS, buffer all NaN  (sin(inf))
+#   crtract_synthesize(bee,       NaN, 32) -> SUCCESS, buffer all NaN
+#   crtract_synthesize(cricket,  +inf, 32) -> SUCCESS, buffer all NaN
+#   crtract_synthesize(songbird,  NaN, 32) -> SUCCESS, buffer all NaN  (clamp
+#                                             passes NaN; NaN <= 2000 is false,
+#                                             so the dual-source arm runs raw)
+#   crtract_synthesize(wolf, 220, -5)      -> SUCCESS, EMPTY buffer
+#   crtract_synthesize_purr(cat, 32, NaN)  -> finite output, tract phase LATCHED
+#                                             non-finite for the tract's life
+#   crtract_apply_spectral_tilt(buf, NaN)  -> whole buffer NaN
+#   options(NaN, _)                        -> silently takes the NO-subharmonic
+#                                             arm (f64_gt(NaN, 0) is false)
+#
+# The last one is the shape this milestone is really about: not a crash, but a
+# plausible-looking answer fabricated from a value the caller never meant.
+#
+# NOT guarded here, deliberately:
+#   * crtract_new's sample_rate -- svara owns that rule and reports it (ADR-0001).
+#   * crtract_set_formant_blend's blend / target / target_bw -- MEASURED: svara
+#     already rejects a NaN blend AND a NaN target formant (both return an error
+#     through prani_from_svara, and the tract is left synthesizing finite audio).
+#     A guard here would restate a dependency's rule, which is the thing ADR-0001
+#     says goes stale silently.
+#   * apply_spectral_tilt's sample_rate -- the function never reads it (the
+#     coefficient comes from tilt_db alone; the parameter exists for oracle
+#     signature parity). Rejecting a value a function does not read reports a
+#     failure that cannot happen.
+#   * options on the stridulatory path -- never read there either (the oracle
+#     writes `let _ = options`). Same rule.
+#   * from_json_str "rng_state" / "rng_inc" -- every 64-bit pattern is a
+#     reachable PCG32 state; neither is a number with a range.
+# ================================================================
 
 # ================================================================
 # SynthesisOptions -- per-block synthesis modifiers passed voice -> tract.
@@ -196,25 +261,73 @@ fn crtract_to_json(self, sb) {
 # reconstructed from the serialized SpeciesParams (see the DEVIATION note above),
 # then the saved rng / phase / dc_blocker state is restored over the rebuild.
 # Returns the CreatureTract ptr, or a NEGATIVE PRANI_ERR_INVALID_TRACT if `json`
-# is 0, does not parse, or names a sample rate svara rejects.
+# is 0, does not parse, carries an out-of-range field, or names a sample rate
+# svara rejects.
+#
+# 2.0.5 (ADR-0002 deferred field ranges to roadmap 2.0.5, docs/development/
+# roadmap.md): every scalar below arrives as a RAW f64
+# BIT PATTERN named by the document -- `bayan_json_v_int` hands back whatever
+# 64-bit integer was written, and the fields are f64s reinterpreted -- so a
+# hostile document can spell NaN or inf directly and no amount of parse checking
+# will notice. The ranges:
+#
+#   phase       [0, 1]   the accumulator's own invariant: it is compared against
+#                        0.4 and wrapped at 1.0. A NaN phase makes both compares
+#                        false forever (permanent closed phase, never wraps);
+#                        an out-of-band phase counts down at 1.0 per sample.
+#                        KNOWN EDGE, stated rather than hidden: the wrap
+#                        subtracts 1.0 at most once per sample, so a purr driven
+#                        at purr_f0 > sample_rate (phase_inc > 1) can leave phase
+#                        above 1, and such a tract's own json is rejected on
+#                        read. purr_f0 is a 25-30 Hz muscle-cycling rate --
+#                        voice.cyr clamps it to [20, 35] and stream.cyr passes
+#                        the constant 27 -- so no in-tree path reaches it.
+#   dcb_x_prev  finite   filter memory. Any finite sample is legal -- these are
+#   dcb_y_prev  finite   post-amplitude audio values, so no magnitude band
+#                        belongs here -- but a non-finite one poisons every
+#                        sample the blocker will ever emit (dsp.cyr reports the
+#                        latch; it cannot undo it).
+#   dcb_r       [0, 1)   the pole radius, and this one is a STABILITY bound, not
+#                        a taste one: y = x - x_prev + r*y_prev diverges for
+#                        |r| >= 1. dcblocker_new writes 0.995 and nothing else
+#                        ever writes it, so prani's own output always passes.
+#
+# The checks run BEFORE crtract_new, so a rejected document costs no tract.
+# sample_rate is deliberately NOT checked here: svara owns that threshold and
+# crtract_new reports its rejection (ADR-0001 -- restating a dependency's
+# constant is how it goes stale). rng_state / rng_inc are not checked either:
+# every 64-bit pattern is a reachable PCG32 state.
 fn crtract_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_TRACT; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_TRACT; }
+
+    var phase = bayan_json_v_int(bayan_json_v_obj_get(root, "phase"));
+    var dcb_x = bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_x_prev"));
+    var dcb_y = bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_y_prev"));
+    var dcb_r = bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_r"));
+    if (prani_in_range(phase, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_finite2(dcb_x, dcb_y) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_is_non_negative(dcb_r) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (f64_lt(dcb_r, F64_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
+
     var params = species_params_from_node(bayan_json_v_obj_get(root, "params"));
+    # species.cyr ranges the nested params object itself (2.0.5); propagate its
+    # code rather than restating it, exactly as the crtract_new check below does.
+    if (prani_is_err(params) == 1) { return params; }
     var sample_rate = bayan_json_v_int(bayan_json_v_obj_get(root, "sample_rate"));
     # rebuild the svara tract + naad filter + fresh rng/dc_blocker from params
     var self = crtract_new(params, sample_rate);
     if (prani_is_err(self) == 1) { return self; }
     # then restore the serialized rng / phase / dc_blocker state over the rebuild
-    CreatureTract_set_phase(self, bayan_json_v_int(bayan_json_v_obj_get(root, "phase")));
+    CreatureTract_set_phase(self, phase);
     var rng = CreatureTract_rng(self);
     PrRng_set_state(rng, bayan_json_v_int(bayan_json_v_obj_get(root, "rng_state")));
     PrRng_set_inc(rng, bayan_json_v_int(bayan_json_v_obj_get(root, "rng_inc")));
     var dc = CreatureTract_dc_blocker(self);
-    DcBlocker_set_x_prev(dc, bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_x_prev")));
-    DcBlocker_set_y_prev(dc, bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_y_prev")));
-    DcBlocker_set_r(dc, bayan_json_v_int(bayan_json_v_obj_get(root, "dcb_r")));
+    DcBlocker_set_x_prev(dc, dcb_x);
+    DcBlocker_set_y_prev(dc, dcb_y);
+    DcBlocker_set_r(dc, dcb_r);
     return self;
 }
 
@@ -222,7 +335,21 @@ fn crtract_from_json_str(json) {
 
 # synthesize_laryngeal -- glottal source through the vocal tract (mammals).
 # Returns a vec (heap ptr) on success or a negative PRANI_ERR_* on failure.
+#
+# 2.0.5 guards: f0 finite, num_samples >= 0, both option fields finite (see the
+# INPUT RANGES block). A non-finite f0 was already reported on THIS path -- the
+# clamp passes NaN through and svara_glottal_new refuses it (measured: an error,
+# not a NaN buffer) -- so the guard changes only which code comes back
+# (PRANI_ERR_INVALID_TRACT, prani's own parameter, rather than PRANI_ERR_SVARA)
+# and makes the contract the same on all five apparatus paths, four of which had
+# no such backstop.
 fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
+    if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var sub_amp = SynthesisOptions_subharmonic_amp(options);
+    var pert = SynthesisOptions_perturbation_scale(options);
+    if (prani_finite2(sub_amp, pert) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+
     var params = CreatureTract_params(self);
     var sr = CreatureTract_sample_rate(self);
     var tract = CreatureTract_tract(self);
@@ -236,12 +363,12 @@ fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
     if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
     svara_glottal_set_breathiness(glottal, SpeciesParams_breathiness(params));
     # non-stationary perturbation: scale jitter/shimmer by block intensity
-    var ps = f64_max(SynthesisOptions_perturbation_scale(options), 0);
+    var ps = f64_max(pert, 0);
     svara_glottal_set_jitter(glottal, f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05));
     svara_glottal_set_shimmer(glottal, f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1));
 
     var output = vec_new();
-    if (f64_gt(SynthesisOptions_subharmonic_amp(options), 0) == 1) {
+    if (f64_gt(sub_amp, 0) == 1) {
         # inject subharmonics into excitation before tract filtering, so the
         # formant resonances shape the subharmonic energy.
         var sub_f0 = f64_mul(clamped_f0, PR_TR_0_5);
@@ -249,8 +376,7 @@ fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
         var i = 0;
         while (i < num_samples) {
             var glottal_sample = svara_glottal_next_sample(glottal);
-            var sub = f64_mul(f64_sin(f64_mul(F64_TAU, CreatureTract_phase(self))),
-              SynthesisOptions_subharmonic_amp(options));
+            var sub = f64_mul(f64_sin(f64_mul(F64_TAU, CreatureTract_phase(self))), sub_amp);
             var ph = f64_add(CreatureTract_phase(self), phase_inc);
             if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
             CreatureTract_set_phase(self, ph);
@@ -271,7 +397,21 @@ fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
 }
 
 # synthesize_syringeal -- dual-source capable, high-frequency range (birds).
+#
+# 2.0.5 guards: f0 finite, num_samples >= 0, both option fields finite. The
+# option fields are checked at the function's contract level even though the
+# dual-source (f0 > 2000) arm discards them, as the oracle does: which arm runs
+# depends on the clamped f0, so "the function reads them" is the honest bar.
+# A NaN f0 is the sharpest case on this path -- it survives the clamp, and
+# `NaN <= 2000` is false, so it fell through to the raw-oscillator arm and
+# returned an all-NaN buffer as SUCCESS (measured).
 fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
+    if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var sub_amp = SynthesisOptions_subharmonic_amp(options);
+    var pert = SynthesisOptions_perturbation_scale(options);
+    if (prani_finite2(sub_amp, pert) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+
     var params = CreatureTract_params(self);
     var sr = CreatureTract_sample_rate(self);
     var tract = CreatureTract_tract(self);
@@ -285,7 +425,7 @@ fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
         var glottal = svara_glottal_new(clamped_f0, sr);
         if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
         svara_glottal_set_breathiness(glottal, SpeciesParams_breathiness(params));
-        var ps = f64_max(SynthesisOptions_perturbation_scale(options), 0);
+        var ps = f64_max(pert, 0);
         svara_glottal_set_jitter(glottal, f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05));
         svara_glottal_set_shimmer(glottal, f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1));
         var i = 0;
@@ -328,6 +468,10 @@ fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
 # filter_biquad_process_sample is a null dereference, so the invariant the
 # comment asserted is checked instead of assumed.
 fn crtract_synthesize_noise(self, num_samples) {
+    # 2.0.5: num_samples >= 0. No f0 and no options reach this path, so there is
+    # nothing else here with a range. The input check comes BEFORE the filter
+    # check so a caller learns about its own bad argument first.
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var filter = CreatureTract_noise_filter(self);
     if (filter == 0) {
         prani_log_error("prani: noise-only synthesis has no bandpass filter");
@@ -349,6 +493,13 @@ fn crtract_synthesize_noise(self, num_samples) {
 # High-carrier (cricket, f0 > 1000): discrete pulse-train chirps.
 # Low-carrier (bee, f0 <= 1000): continuous wing-beat modulation.
 fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
+    # 2.0.5: f0 finite, num_samples >= 0. `options` is NOT checked -- this path
+    # never reads it (the oracle writes `let _ = options;`), and a function must
+    # not reject a value it does not use. f0 here is raw: it multiplies TAU*t
+    # inside sin(), and sin(+-inf) is NaN, so a non-finite f0 turned the whole
+    # buffer to NaN and returned it as SUCCESS (measured).
+    if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
     var output = vec_new();
 
@@ -415,6 +566,10 @@ fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
 # Thoracic flight-muscle vibration through wings; steady buzz, AM at half the
 # wing frequency.
 fn crtract_synthesize_vibratile(self, f0, num_samples) {
+    # 2.0.5: f0 finite, num_samples >= 0. Same raw-oscillator hazard as the
+    # stridulatory path.
+    if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
     var mod_rate = f64_mul(f0, PR_TR_0_5);
     var output = vec_new();
@@ -445,6 +600,13 @@ fn crtract_fmod(a, b) {
 # synthesize(f0, num_samples, options) -- CreatureTract::synthesize. Dispatches
 # on the species' vocal apparatus. Returns a vec (heap ptr) on success or a
 # negative PRANI_ERR_* on failure.
+#
+# 2.0.5: the input guards live in the five paths below, not here, because that
+# is where each parameter is READ. Dispatch alone cannot say whether `f0` or
+# `options` matters -- the NoiseOnly path takes neither -- and a guard here
+# would reject, say, a NaN `f0` for a snake, whose synthesis never looks at it.
+# Every path guards `num_samples`, so this entry point rejects a negative count
+# for every apparatus.
 #inline
 fn crtract_synthesize(self, f0, num_samples, options) {
     var apparatus = SpeciesParams_apparatus(CreatureTract_params(self));
@@ -467,10 +629,22 @@ fn crtract_synthesize(self, f0, num_samples, options) {
 # synthesize_purr(num_samples, purr_f0) -- 25-30 Hz laryngeal muscle cycling.
 # Asymmetric waveform (0.4 open duty): a sharp squared half-sine pulse burst on
 # the open phase excites the tract resonances; near-silence + faint noise on the
-# closed phase. Returns a vec ptr (never fails -- no glottal source involved).
+# closed phase. Returns a vec ptr on success or a negative PRANI_ERR_* on failure.
+#
+# 2.0.5 CONTRACT CHANGE: this used to be documented as "never fails -- no glottal
+# source involved", and it has no glottal source still. What it does have is the
+# phase accumulator, which is tract state that OUTLIVES the call: `phase +=
+# purr_f0/sample_rate` with a non-finite purr_f0 latches `phase` non-finite for
+# the tract's whole life, and every later purr then takes the closed-phase arm
+# because `NaN < 0.4` is false. The output of the poisoned call is still finite
+# (measured), so nothing downstream reports it -- the tract just quietly stops
+# purring. That is the silent-corruption shape 2.0.5 exists to replace with a
+# code, and it cannot be caught anywhere but here.
 #inline
 #must_use
 fn crtract_synthesize_purr(self, num_samples, purr_f0) {
+    if (prani_is_finite(purr_f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
     var tract = CreatureTract_tract(self);
     var rng = CreatureTract_rng(self);
@@ -535,7 +709,16 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
 # lowpass applied in place to a vec. tilt_db is dB/octave: negative = darker
 # (lowpass), 0 = neutral. y[n] = (1-a)*x[n] + a*y[n-1]. The coefficient is
 # derived from tilt_db directly (sample_rate unused, kept for signature parity).
+# Returns PRANI_ERR_NONE, or PRANI_ERR_INVALID_TRACT for a non-finite tilt_db.
+#
+# 2.0.5: all three non-finite tilts were silent, and each was silent in a
+# different way (measured). NaN: `|NaN| < 0.1` is false and `a < 0.01` is false,
+# so a = NaN multiplied the WHOLE buffer into NaN and returned success. +inf:
+# a = clamp(-inf/12) = 0, a no-op. -inf: a = clamp(+inf/12) = 0.85, the maximum
+# lowpass this filter can apply -- a real, plausible-sounding filter fabricated
+# out of a caller's arithmetic accident. All three now report.
 fn crtract_apply_spectral_tilt(samples, tilt_db, sample_rate) {
+    if (prani_is_finite(tilt_db) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (f64_lt(f64_abs(tilt_db), PR_TR_0_1) == 1) { return 0; }
     # dB/octave -> coefficient: a = clamp(-tilt_db/12, 0, 0.85)
     var a = f64_clamp(f64_div(f64_neg(tilt_db), PR_TR_12_0), 0, PR_TR_0_85);

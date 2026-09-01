@@ -99,6 +99,41 @@ fn t_count_below(v, eps, lo, hi) {
     return n;
 }
 
+# nan() -- a quiet NaN. Cyrius f64s ARE their bit patterns, so this doubles as
+# the literal an attacker would write into a JSON field (see t_tract_json).
+#must_use
+fn t_nan() {
+    return f64_div(0, 0);
+}
+
+# t_tract_json(sr, phase, x, y, r, params) -- a CreatureTract document whose
+# scalar fields are chosen by the caller. Mirrors crtract_to_json field for
+# field, so the ONLY difference from prani's own output is the values -- which
+# is exactly what the 2.0.5 range checks read. rng_state/rng_inc are arbitrary
+# here on purpose: they have no range (every 64-bit pattern is a PCG32 state).
+#must_use
+fn t_tract_json(sr, phase, x, y, r, params) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"sample_rate\":");
+    str_builder_add_int(sb, sr);
+    str_builder_add_cstr(sb, ",\"phase\":");
+    str_builder_add_int(sb, phase);
+    str_builder_add_cstr(sb, ",\"rng_state\":");
+    str_builder_add_int(sb, 12345);
+    str_builder_add_cstr(sb, ",\"rng_inc\":");
+    str_builder_add_int(sb, 67891);
+    str_builder_add_cstr(sb, ",\"dcb_x_prev\":");
+    str_builder_add_int(sb, x);
+    str_builder_add_cstr(sb, ",\"dcb_y_prev\":");
+    str_builder_add_int(sb, y);
+    str_builder_add_cstr(sb, ",\"dcb_r\":");
+    str_builder_add_int(sb, r);
+    str_builder_add_cstr(sb, ",\"params\":");
+    SpeciesParams_to_json(params, sb);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
 # ================================================================
 test_group("laryngeal -- non-error vec, length, finite (wolf)");
 var wolf = species_params(PRANI_SP_WOLF);
@@ -342,6 +377,277 @@ assert_eq(t_vecs_equal(post, post3), 1, "deserialized tract == fresh tract + res
 # sample through svara_tract_process_sample (src/tract.cyr:496), so it does.
 var post_orig = crtract_synthesize_purr(tser, 16, f64_from(27));
 assert_eq(t_vecs_equal(post, post_orig), 0, "control: the original's live svara memory does NOT survive the roundtrip");
+
+# ================================================================
+# 2.0.5 -- INPUT RANGES (roadmap 2.0.5, audit F11). Each group pins three things:
+# the guard, the MEASUREMENT it rests on (taken on the pre-guard tree 2026-08-31
+# and quoted in the comment, so a reader can see what the guard replaced), and
+# the control that proves valid input is untouched. The exact PRANI_ERR_* code is
+# asserted, not merely "is an error" -- the code is what a consumer branches on,
+# and the category (tract vs vocalization) is the decision this milestone made.
+# The ranges themselves are tabulated at the top of src/tract.cyr.
+test_group("2.0.5 f0 -- non-finite rejected on every path that READS f0");
+# Before: NaN/inf survived f64_clamp (both compares false), so the raw-oscillator
+# paths ran sin(TAU*inf*t) and returned an all-NaN buffer as SUCCESS.
+var g_wolf = crtract_new(wolf, T_SR);
+assert_eq(crtract_synthesize(g_wolf, t_nan(), 32, opts), PRANI_ERR_INVALID_TRACT,
+  "laryngeal: NaN f0 -> INVALID_TRACT");
+assert_eq(crtract_synthesize(g_wolf, PRANI_POS_INF, 32, opts), PRANI_ERR_INVALID_TRACT,
+  "laryngeal: +inf f0 -> INVALID_TRACT");
+assert_eq(crtract_synthesize(g_wolf, PRANI_NEG_INF, 32, opts), PRANI_ERR_INVALID_TRACT,
+  "laryngeal: -inf f0 -> INVALID_TRACT");
+var g_bird = crtract_new(bird, T_SR);
+assert_eq(crtract_synthesize(g_bird, t_nan(), 32, opts), PRANI_ERR_INVALID_TRACT,
+  "syringeal: NaN f0 -> INVALID_TRACT (was: all-NaN buffer, reported as success)");
+var g_cricket = crtract_new(cricket, T_SR);
+assert_eq(crtract_synthesize(g_cricket, PRANI_POS_INF, 32, opts), PRANI_ERR_INVALID_TRACT,
+  "stridulatory: +inf f0 -> INVALID_TRACT (was: all-NaN buffer)");
+assert_eq(crtract_synthesize(g_cricket, t_nan(), 32, opts), PRANI_ERR_INVALID_TRACT,
+  "stridulatory: NaN f0 -> INVALID_TRACT");
+var g_bee = crtract_new(bee, T_SR);
+assert_eq(crtract_synthesize(g_bee, PRANI_NEG_INF, 32, opts), PRANI_ERR_INVALID_TRACT,
+  "vibratile: -inf f0 -> INVALID_TRACT (was: all-NaN buffer)");
+assert_eq(crtract_synthesize(g_bee, t_nan(), 32, opts), PRANI_ERR_INVALID_TRACT,
+  "vibratile: NaN f0 -> INVALID_TRACT");
+# Controls: a rejected call must not have touched the tract, and every finite f0
+# the oracle accepted is still accepted -- including 0 and a negative one, which
+# the raw-oscillator paths render as a mirrored tone exactly as the Rust did.
+assert_eq(CreatureTract_phase(g_wolf), 0, "control: a rejected call left phase untouched");
+var g_ok = crtract_synthesize(g_wolf, T_220, 16, opts);
+assert_eq(prani_is_err(g_ok), 0, "control: the same tract still synthesizes after a rejection");
+assert_eq(prani_is_err(crtract_synthesize(g_bee, f64_from(0), 8, opts)), 0,
+  "control: f0 = 0 is VALID (the oracle accepted it)");
+assert_eq(prani_is_err(crtract_synthesize(g_bee, f64_neg(f64_from(300)), 8, opts)), 0,
+  "control: a negative f0 is VALID (mirrored tone, as in the oracle)");
+
+# ================================================================
+test_group("2.0.5 f0 -- NOT guarded on the noise path, which never reads it");
+# Deliberate asymmetry, and the reason the guards live in the five apparatus
+# paths rather than in crtract_synthesize: a snake's synthesis never looks at f0,
+# so rejecting one would report a failure that cannot happen. If a future edit
+# moves the guard up into the dispatcher, this assertion fails and says why.
+var g_snake = crtract_new(snake, T_SR);
+var g_noise = crtract_synthesize(g_snake, t_nan(), 24, opts);
+assert_eq(prani_is_err(g_noise), 0, "noise: NaN f0 accepted -- the path never reads f0");
+assert_eq(vec_len(g_noise), 24, "noise: NaN f0 still produced 24 samples");
+assert_eq(t_all_finite(g_noise), 1, "noise: NaN f0 output is finite (f0 is unused)");
+
+# ================================================================
+test_group("2.0.5 num_samples -- negative rejected, zero still VALID");
+# Before: a negative count (which is what f64_to(NaN * rate) saturates to --
+# i64::MIN) simply skipped the loop and returned an EMPTY buffer as success.
+# Zero, by contrast, is VALID: the oracle's test_zero_duration_synthesis asserts
+# an empty buffer, NOT an error, so the bound is >= 0 rather than > 0.
+var n_wolf = crtract_new(wolf, T_SR);
+assert_eq(crtract_synthesize(n_wolf, T_220, 0 - 1, opts), PRANI_ERR_INVALID_VOCALIZATION,
+  "laryngeal: negative num_samples -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(n_wolf, T_220, f64_to(t_nan()), opts), PRANI_ERR_INVALID_VOCALIZATION,
+  "laryngeal: f64_to(NaN) count (i64::MIN) -> INVALID_VOCALIZATION (was: empty buffer)");
+assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), 0 - 1, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "syringeal: negative num_samples -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), 0 - 1, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "noise: negative num_samples -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(crtract_new(cricket, T_SR), f64_from(4500), 0 - 1, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "stridulatory: negative num_samples -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(crtract_new(bee, T_SR), f64_from(300), 0 - 1, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "vibratile: negative num_samples -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize_purr(crtract_new(cat, T_SR), 0 - 1, f64_from(25)),
+  PRANI_ERR_INVALID_VOCALIZATION, "purr: negative num_samples -> INVALID_VOCALIZATION");
+# zero-duration controls, one per apparatus -- the oracle's contract
+var z_lar = crtract_synthesize(n_wolf, T_220, 0, opts);
+assert_eq(prani_is_err(z_lar), 0, "laryngeal: 0 samples is NOT an error");
+assert_eq(vec_len(z_lar), 0, "laryngeal: 0 samples -> empty buffer (oracle parity)");
+var z_syr = crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), 0, opts);
+assert_eq(vec_len(z_syr), 0, "syringeal: 0 samples -> empty buffer");
+var z_noi = crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), 0, opts);
+assert_eq(vec_len(z_noi), 0, "noise: 0 samples -> empty buffer");
+var z_str = crtract_synthesize(crtract_new(cricket, T_SR), f64_from(4500), 0, opts);
+assert_eq(vec_len(z_str), 0, "stridulatory: 0 samples -> empty buffer");
+var z_vib = crtract_synthesize(crtract_new(bee, T_SR), f64_from(300), 0, opts);
+assert_eq(vec_len(z_vib), 0, "vibratile: 0 samples -> empty buffer");
+var z_purr = crtract_synthesize_purr(crtract_new(cat, T_SR), 0, f64_from(25));
+assert_eq(prani_is_err(z_purr), 0, "purr: 0 samples is NOT an error");
+assert_eq(vec_len(z_purr), 0, "purr: 0 samples -> empty buffer");
+
+# ================================================================
+test_group("2.0.5 SynthesisOptions -- non-finite fields rejected where they are read");
+# crtract_options_new has no error channel (it returns the struct), and 2.0.5
+# does not give it one -- that is 2.1.0's constructor-contract work, and
+# stream.cyr uses its result as a pointer without a check. So the NaN is caught
+# at the point of USE instead, which covers every path into svara with no API
+# change. Before: a NaN subharmonic_amp silently took the no-subharmonic arm
+# (f64_gt(NaN, 0) is false) -- a plausible answer fabricated from nonsense.
+var o_wolf = crtract_new(wolf, T_SR);
+assert_eq(crtract_synthesize(o_wolf, T_220, 32, crtract_options_new(t_nan(), 0)),
+  PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: NaN subharmonic_amp -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(o_wolf, T_220, 32, crtract_options_new(0, t_nan())),
+  PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: NaN perturbation_scale -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(o_wolf, T_220, 32, crtract_options_new(PRANI_POS_INF, 0)),
+  PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: +inf subharmonic_amp -> INVALID_VOCALIZATION");
+assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(1500), 32, crtract_options_new(0, t_nan())),
+  PRANI_ERR_INVALID_VOCALIZATION, "syringeal: NaN perturbation_scale -> INVALID_VOCALIZATION");
+assert_eq(CreatureTract_phase(o_wolf), 0, "control: a rejected options call left phase untouched");
+assert_eq(prani_is_err(crtract_synthesize(o_wolf, T_220, 16, crtract_options_new(T_0_25, T_0_5))), 0,
+  "control: finite options still synthesize");
+# NOT guarded on the stridulatory path: it never reads options (the oracle writes
+# `let _ = options;`), so there is nothing there to be out of range.
+var st_nan = crtract_new(cricket, T_SR);
+var st_out = crtract_synthesize_stridulatory(st_nan, f64_from(4500), 16,
+  crtract_options_new(t_nan(), t_nan()));
+assert_eq(prani_is_err(st_out), 0,
+  "stridulatory: NaN options accepted -- the path never reads them");
+
+# ================================================================
+test_group("2.0.5 purr_f0 -- non-finite rejected before it can latch the phase");
+# The sharpest silent case in the module. purr advances tract state that OUTLIVES
+# the call: phase += purr_f0/sample_rate. Measured on the pre-guard tree, a NaN or
+# inf purr_f0 returned a FINITE buffer -- nothing downstream could see anything
+# wrong -- while latching `phase` non-finite for the tract's whole life, after
+# which every purr takes the closed-phase arm because `NaN < 0.4` is false. So
+# the assertion that matters here is the phase one, not the return code.
+var p_cat = crtract_new(cat, T_SR);
+assert_eq(crtract_synthesize_purr(p_cat, 32, t_nan()), PRANI_ERR_INVALID_TRACT,
+  "purr: NaN purr_f0 -> INVALID_TRACT");
+assert_eq(prani_is_finite(CreatureTract_phase(p_cat)), 1,
+  "purr: the rejected NaN did NOT reach the phase accumulator");
+assert_eq(CreatureTract_phase(p_cat), 0, "purr: phase is still exactly 0 after the rejection");
+assert_eq(crtract_synthesize_purr(p_cat, 32, PRANI_POS_INF), PRANI_ERR_INVALID_TRACT,
+  "purr: +inf purr_f0 -> INVALID_TRACT");
+assert_eq(CreatureTract_phase(p_cat), 0, "purr: +inf did not reach the phase either");
+var p_ok = crtract_synthesize_purr(p_cat, 32, f64_from(27));
+assert_eq(prani_is_err(p_ok), 0, "control: a 27 Hz purr still succeeds");
+assert_neq(CreatureTract_phase(p_cat), 0, "control: the valid purr DID advance the phase");
+assert_eq(t_all_finite(p_ok), 1, "control: valid purr output all finite");
+
+# ================================================================
+test_group("2.0.5 tilt_db -- all three non-finite tilts were silent, differently");
+# Measured pre-guard: NaN put the WHOLE buffer to NaN and returned success
+# (|NaN| < 0.1 is false, a = NaN, and a < 0.01 is false too); +inf was a no-op
+# (a = clamp(-inf/12) = 0); -inf applied a = 0.85, the maximum lowpass the filter
+# can make -- a real, plausible-sounding filter fabricated out of an accident.
+var tl = vec_new();
+vec_push(tl, F64_ONE);
+vec_push(tl, T_0_5);
+assert_eq(crtract_apply_spectral_tilt(tl, t_nan(), T_SR), PRANI_ERR_INVALID_TRACT,
+  "tilt: NaN tilt_db -> INVALID_TRACT");
+assert_eq(vec_get(tl, 0), F64_ONE, "tilt: the rejected NaN left the buffer untouched (x[0])");
+assert_eq(vec_get(tl, 1), T_0_5, "tilt: the rejected NaN left the buffer untouched (x[1])");
+assert_eq(crtract_apply_spectral_tilt(tl, PRANI_POS_INF, T_SR), PRANI_ERR_INVALID_TRACT,
+  "tilt: +inf tilt_db -> INVALID_TRACT (was: a silent no-op)");
+assert_eq(crtract_apply_spectral_tilt(tl, PRANI_NEG_INF, T_SR), PRANI_ERR_INVALID_TRACT,
+  "tilt: -inf tilt_db -> INVALID_TRACT (was: a silent a = 0.85 lowpass)");
+assert_eq(vec_get(tl, 0), F64_ONE, "tilt: neither infinity touched the buffer");
+# controls: the two valid outcomes still return PRANI_ERR_NONE and still filter
+assert_eq(crtract_apply_spectral_tilt(tl, 0, T_SR), PRANI_ERR_NONE,
+  "control: neutral tilt returns PRANI_ERR_NONE");
+assert_eq(vec_get(tl, 0), F64_ONE, "control: neutral tilt left the buffer alone");
+var tl2 = vec_new();
+vec_push(tl2, F64_ONE);
+vec_push(tl2, 0);
+assert_eq(crtract_apply_spectral_tilt(tl2, T_TILT_N6, T_SR), PRANI_ERR_NONE,
+  "control: -6 dB/oct returns PRANI_ERR_NONE");
+assert_eq(vec_get(tl2, 0), T_0_5, "control: -6 dB/oct still filters (y[0] == 0.5)");
+# NOT guarded: sample_rate. The function never reads it (the coefficient comes
+# from tilt_db alone; the parameter is there for oracle signature parity), so a
+# NaN in it cannot change the output -- and a guard would report a failure that
+# cannot happen.
+var tl3 = vec_new();
+vec_push(tl3, F64_ONE);
+vec_push(tl3, 0);
+assert_eq(crtract_apply_spectral_tilt(tl3, T_TILT_N6, t_nan()), PRANI_ERR_NONE,
+  "tilt: a NaN sample_rate is accepted -- the function never reads it");
+assert_eq(vec_get(tl3, 0), T_0_5, "tilt: NaN sample_rate changed nothing (y[0] == 0.5)");
+
+# ================================================================
+test_group("2.0.5 from_json_str -- raw f64 bit patterns are range-checked");
+# ADR-0002 deferred field ranges to roadmap 2.0.5 (docs/development/roadmap.md),
+# which is this group. Each field below arrives as a RAW f64 BIT
+# PATTERN named by the document, so a hostile document spells NaN or inf
+# directly and no amount of parse checking sees it. t_tract_json writes the same
+# fields crtract_to_json does, so these documents differ from prani's own output
+# only in the value under test.
+var j_ok = t_tract_json(T_SR, 0, 0, 0, PRANI_DCBLOCK_R, wolf);
+assert_eq(prani_is_err(crtract_from_json_str(j_ok)), 0,
+  "control: the hand-built document with in-range fields is accepted");
+# phase: [0, 1] -- the accumulator's own invariant (compared against 0.4, wrapped at 1.0)
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, t_nan(), 0, 0, PRANI_DCBLOCK_R, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: NaN phase -> INVALID_TRACT");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, PRANI_POS_INF, 0, 0, PRANI_DCBLOCK_R, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: +inf phase -> INVALID_TRACT");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, f64_neg(T_0_5), 0, 0, PRANI_DCBLOCK_R, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: phase = -0.5 -> INVALID_TRACT");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, f64_from(2), 0, 0, PRANI_DCBLOCK_R, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: phase = 2.0 -> INVALID_TRACT");
+assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, T_0_5, 0, 0, PRANI_DCBLOCK_R, wolf))), 0,
+  "json: phase = 0.5 accepted (in range)");
+assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, F64_ONE, 0, 0, PRANI_DCBLOCK_R, wolf))), 0,
+  "json: phase = 1.0 accepted (inclusive bound; it self-corrects on the first wrap)");
+# dc blocker memory: finite. A non-finite one poisons every sample the blocker
+# will ever emit -- dsp.cyr reports the latch, it cannot undo it.
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, t_nan(), 0, PRANI_DCBLOCK_R, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: NaN dcb_x_prev -> INVALID_TRACT");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, PRANI_NEG_INF, PRANI_DCBLOCK_R, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: -inf dcb_y_prev -> INVALID_TRACT");
+var j_mem = t_tract_json(T_SR, 0, f64_neg(T_0_25), T_0_5, PRANI_DCBLOCK_R, wolf);
+assert_eq(prani_is_err(crtract_from_json_str(j_mem)), 0,
+  "json: ordinary finite filter memory accepted (sign included)");
+# dcb_r: [0, 1). This one is a STABILITY bound, not a taste one --
+# y = x - x_prev + r*y_prev diverges for |r| >= 1.
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, F64_ONE, wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: dcb_r = 1.0 -> INVALID_TRACT (marginally unstable)");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, f64_from(2), wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: dcb_r = 2.0 -> INVALID_TRACT (divergent)");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, f64_neg(T_0_5), wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: dcb_r = -0.5 -> INVALID_TRACT");
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, t_nan(), wolf)),
+  PRANI_ERR_INVALID_TRACT, "json: NaN dcb_r -> INVALID_TRACT");
+assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, T_0_5, wolf))), 0,
+  "json: dcb_r = 0.5 accepted (in range)");
+# NOT range-checked, and each for its own reason:
+#   sample_rate -- svara owns the threshold and crtract_new reports it (ADR-0001)
+#   rng_state / rng_inc -- every 64-bit pattern is a reachable PCG32 state
+var j_slow = t_tract_json(f64_from(10), 0, 0, 0, PRANI_DCBLOCK_R, wolf);
+assert_eq(prani_is_err(crtract_from_json_str(j_slow)), 1,
+  "json: a 10 Hz sample rate is still rejected -- by svara, via crtract_new");
+var j_rng = crtract_from_json_str(j_ok);
+assert_eq(PrRng_state(CreatureTract_rng(j_rng)), 12345, "json: rng_state restored unchecked (no range)");
+assert_eq(PrRng_inc(CreatureTract_rng(j_rng)), 67891, "json: rng_inc restored unchecked (no range)");
+# and the accepted document really did restore what it named
+assert_eq(CreatureTract_phase(j_rng), 0, "json: phase restored from the accepted document");
+assert_eq(DcBlocker_r(CreatureTract_dc_blocker(j_rng)), PRANI_DCBLOCK_R, "json: dcb_r restored");
+
+# ================================================================
+test_group("2.0.5 set_formant_blend -- NOT guarded here: svara already rejects it");
+# MEASURED, and the reason this function has no guard of its own: svara refuses a
+# NaN blend and a NaN target formant already, and the tract is left synthesizing
+# finite audio afterwards. Restating a dependency's rule in prani is what ADR-0001
+# declined to do for the sample rate -- the duplicate is the thing that goes
+# stale. If svara ever stops refusing, these assertions fail and prani learns it
+# needs its own guard, which is the whole point of pinning them.
+var fb_tract = crtract_new(wolf, T_SR);
+var fb_t = vec_new();
+vec_push(fb_t, f64_from(800));
+vec_push(fb_t, f64_from(1200));
+vec_push(fb_t, f64_from(2500));
+var fb_b = vec_new();
+vec_push(fb_b, f64_from(80));
+vec_push(fb_b, f64_from(90));
+vec_push(fb_b, f64_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_b, T_0_5), PRANI_ERR_NONE,
+  "control: a valid blend returns PRANI_ERR_NONE");
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_b, t_nan()), PRANI_ERR_SVARA,
+  "blend: NaN blend -> PRANI_ERR_SVARA (svara's rejection, not prani's)");
+var fb_after = crtract_synthesize(fb_tract, T_220, 16, opts);
+assert_eq(prani_is_err(fb_after), 0, "blend: the tract still synthesizes after a refused blend");
+assert_eq(t_all_finite(fb_after), 1, "blend: and its output is still finite (svara kept the old formants)");
+var fb_nan_t = vec_new();
+vec_push(fb_nan_t, t_nan());
+vec_push(fb_nan_t, f64_from(1200));
+vec_push(fb_nan_t, f64_from(2500));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_nan_t, fb_b, F64_ONE), PRANI_ERR_SVARA,
+  "blend: a NaN target formant -> PRANI_ERR_SVARA (svara's rejection)");
+var fb_after2 = crtract_synthesize(fb_tract, T_220, 16, opts);
+assert_eq(t_all_finite(fb_after2), 1, "blend: still finite after a refused NaN target formant");
 
 var rc = assert_summary();
 syscall(60, rc);

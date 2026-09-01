@@ -90,6 +90,12 @@ var T_0_001 = 0x3f50624dd2f1a9fc;   # 0.001 -- the oracle's audibility floor
 var T_NAN   = 0x7ff8000000000000;   # NaN   -- control for t_all_finite
 var T_INF   = 0x7ff0000000000000;   # +inf  -- control for t_all_finite
 
+# ---- codec-guard constants (2.0.5) -----------------------------------------
+# T_0_1 (0.1) above doubles as crvoice_with_size's floor; T_1_0 as its
+# breathiness ceiling; T_1_5 as an over-ceiling breathiness.
+var T_NEG_INF = 0xfff0000000000000;   # -inf
+var T_0_05    = 0x3fa999999999999a;   # 0.05  -- just under the 0.1 size floor
+
 alloc_init();
 
 # ---- helpers ---------------------------------------------------------------
@@ -131,6 +137,43 @@ fn t_preset_voc(sp) {
     if (species_supports_vocalization(sp, PRANI_VOC_GROWL) == 1) { return PRANI_VOC_GROWL; }
     if (species_supports_vocalization(sp, PRANI_VOC_CHIRP) == 1) { return PRANI_VOC_CHIRP; }
     return PRANI_VOC_BUZZ;
+}
+
+# t_pj(species, size, f0, br) -- a preset document with a valid name and the
+# four scalars written as RAW i64s, so a test can put any bit pattern (NaN,
+# inf, out-of-range) in one field and leave the others valid. Key order and
+# encoding match preset_to_json exactly (the wire format for the three f64
+# fields is their i64 bit pattern, not a JSON float).
+#must_use
+fn t_pj(species, size, f0, br) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"name\":\"Probe\",\"species\":");
+    str_builder_add_int(sb, species);
+    str_builder_add_cstr(sb, ",\"size\":");
+    str_builder_add_int(sb, size);
+    str_builder_add_cstr(sb, ",\"f0_offset\":");
+    str_builder_add_int(sb, f0);
+    str_builder_add_cstr(sb, ",\"breathiness\":");
+    str_builder_add_int(sb, br);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# t_pj_err(...) -- 1 iff that document is REJECTED, 0 iff it is accepted.
+#must_use
+fn t_pj_err(species, size, f0, br) {
+    return prani_is_err(preset_from_json_str(t_pj(species, size, f0, br)));
+}
+
+# t_preset_eq(a, b) -- 1 iff the four scalars are bit-identical (the name is a
+# separate pointer and is checked on its own).
+#must_use
+fn t_preset_eq(a, b) {
+    if (VoicePreset_species(a) != VoicePreset_species(b)) { return 0; }
+    if (VoicePreset_size(a) != VoicePreset_size(b)) { return 0; }
+    if (VoicePreset_f0_offset(a) != VoicePreset_f0_offset(b)) { return 0; }
+    if (VoicePreset_breathiness(a) != VoicePreset_breathiness(b)) { return 0; }
+    return 1;
 }
 
 # ================================================================
@@ -388,6 +431,140 @@ preset_to_json(pre2, sbp2);
 var jstr_2 = str_data(str_builder_build(sbp2));
 assert_eq(strlen(jstr_2), strlen(jstr), "json idempotent -- same length");
 assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
+
+# ================================================================
+# 2.0.5 -- input-range validation. preset_from_json_str is the ONLY entry point
+# in this module with an error channel: ADR-0002 gave it one for parse failures,
+# and this is the field-level half that ADR left open. Each document below is a
+# valid preset with exactly ONE defect, so a rejection names that defect, and
+# every rejection is paired with an accepted control so the guards cannot pass
+# by rejecting everything.
+#
+# The scalars are f64 BIT PATTERNS on the wire, so a valid size of 1.0 is the
+# literal 4607182418800017408 and a valid f0_offset / breathiness of 0.0 is 0.
+var T_D_GARBAGE = "not json at all";
+var T_D_EMPTY   = "{}";
+var T_D_ARRAY   = "[1,2,3]";
+var T_D_NO_NAME = "{\"species\":0,\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":0}";
+var T_D_NAME_I  = "{\"name\":7,\"species\":0,\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":0}";
+var T_D_NAME_N  = "{\"name\":null,\"species\":0,\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":0}";
+var T_D_SP_STR  = "{\"name\":\"P\",\"species\":\"W\",\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":0}";
+var T_D_NO_SP   = "{\"name\":\"P\",\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":0}";
+var T_D_NO_SIZE = "{\"name\":\"P\",\"species\":0,\"f0_offset\":0,\"breathiness\":0}";
+var T_D_NO_F0   = "{\"name\":\"P\",\"species\":0,\"size\":4607182418800017408,\"breathiness\":0}";
+var T_D_NO_BR   = "{\"name\":\"P\",\"species\":0,\"size\":4607182418800017408,\"f0_offset\":0}";
+
+test_group("preset_from_json_str -- malformed documents rejected, never dereferenced");
+assert_eq(prani_is_err(preset_from_json_str(0)), 1, "null json rejected (2.0.3)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_GARBAGE)), 1, "unparseable json rejected (2.0.3)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_EMPTY)), 1, "{} rejected -- no fields at all");
+# The next three were a LIVE SIGSEGV before 2.0.5, not a range question:
+# bayan_json_v_obj_get returns 0 for a missing key, bayan_json_v_str returns 0
+# for a non-string node, and str_data(0) dereferences address 0. Measured
+# 2026-08-31 on 2.0.4: T_D_NO_NAME exits 139.
+assert_eq(prani_is_err(preset_from_json_str(T_D_NO_NAME)), 1, "missing name rejected (was SIGSEGV: exit 139)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_NAME_I)), 1, "integer name rejected (v_str -> 0, was SIGSEGV)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_NAME_N)), 1, "null name rejected (v_str -> 0, was SIGSEGV)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_ARRAY)), 1, "array root rejected (obj_get -> 0, was SIGSEGV)");
+# A missing scalar and a wrong-typed scalar are one rejection: obj_get gives 0
+# for both and bayan_json_v_is_int(0) is 0. Reading with bayan_json_v_int alone
+# could not tell an absent field from a present 0 -- and 0 is a legal bit
+# pattern (+0.0) for f0_offset and breathiness, so those two silently defaulted.
+assert_eq(prani_is_err(preset_from_json_str(T_D_NO_SP)), 1, "missing species rejected (silently read as Wolf before)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_SP_STR)), 1, "non-integer species rejected");
+assert_eq(prani_is_err(preset_from_json_str(T_D_NO_SIZE)), 1, "missing size rejected");
+assert_eq(prani_is_err(preset_from_json_str(T_D_NO_F0)), 1, "missing f0_offset rejected (silently 0.0 before)");
+assert_eq(prani_is_err(preset_from_json_str(T_D_NO_BR)), 1, "missing breathiness rejected (silently 0.0 before)");
+# Control: the same shape with every field present and in range is ACCEPTED.
+var d_ok = preset_from_json_str(t_pj(PRANI_SP_WOLF, T_1_0, 0, 0));
+assert_eq(prani_is_err(d_ok), 0, "control: a complete, in-range document is accepted");
+assert_eq(VoicePreset_species(d_ok), PRANI_SP_WOLF, "control: species read back");
+assert_eq(VoicePreset_size(d_ok), T_1_0, "control: size read back as the exact bit pattern");
+assert_eq(memeq(VoicePreset_name(d_ok), "Probe", 5), 1, "control: name read back");
+
+test_group("preset_from_json_str -- species range [0, PRANI_SP_COUNT)");
+# A discriminant, not a measurement. Outside the enum, species_params falls
+# THROUGH to the Fantasy row (measured: species 999 -> f0_min 50), so an
+# unnamed species used to come back as a plausible creature instead of an error.
+# The oracle's serde rejected an unknown Species variant too.
+assert_eq(t_pj_err((0 - 1), T_1_0, 0, 0), 1, "species -1 rejected");
+assert_eq(t_pj_err(PRANI_SP_COUNT, T_1_0, 0, 0), 1, "species 13 (one past the last) rejected");
+assert_eq(t_pj_err(999, T_1_0, 0, 0), 1, "species 999 rejected (Fantasy fallthrough closed)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, 0), 0, "control: species 0 (Wolf, the first) accepted");
+assert_eq(t_pj_err(PRANI_SP_FANTASY, T_1_0, 0, 0), 0, "control: species 12 (Fantasy, the last) accepted");
+
+test_group("preset_from_json_str -- size range [0.1, 10.0] (with_size's clamp domain)");
+# NaN is the hazard the range exists for: f64_clamp(NaN, lo, hi) -> NaN, so a
+# NaN size passes every clamp in the chain untouched (audit F11) and reaches
+# svara. Outside the range but finite, the builder would silently substitute
+# the clamp bound -- a fabricated answer (ADR-0001).
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_NAN, 0, 0), 1, "size NaN rejected (F11: NaN passes f64_clamp)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_INF, 0, 0), 1, "size +inf rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_NEG_INF, 0, 0), 1, "size -inf rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, 0, 0, 0), 1, "size 0.0 rejected (effective_f0 divides by size)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_0_05, 0, 0), 1, "size 0.05 rejected (under the 0.1 floor)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, f64_from(11), 0, 0), 1, "size 11.0 rejected (over the 10.0 ceiling)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_0_1, 0, 0), 0, "control: size 0.1 (the floor) accepted");
+assert_eq(t_pj_err(PRANI_SP_WOLF, f64_from(10), 0, 0), 0, "control: size 10.0 (the ceiling) accepted");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_4_0, 0, 0), 0, "control: size 4.0 (Ancient Dragon's) accepted");
+
+test_group("preset_from_json_str -- f0_offset range +/-(f0_max - f0_min), per species");
+# with_f0_offset's clamp is species-dependent, so this bound is too: Wolf spans
+# 1200-150 = 1050 Hz, Cricket spans 8000-3000 = 5000 Hz. The same offset is
+# legal for one and not the other -- that asymmetry is the point, and it is why
+# the bound is read from the declared species rather than being a constant.
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, T_NAN, 0), 1, "f0_offset NaN rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, T_INF, 0), 1, "f0_offset +inf rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, T_NEG_INF, 0), 1, "f0_offset -inf rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_from(1051), 0), 1, "f0_offset +1051 rejected for Wolf (span 1050)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_neg(f64_from(1051)), 0), 1, "f0_offset -1051 rejected for Wolf");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_from(3000), 0), 1, "f0_offset +3000 rejected for Wolf");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_from(1050), 0), 0, "control: +1050 (the bound) ok for Wolf");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_neg(f64_from(1050)), 0), 0, "control: f0_offset -1050 accepted for Wolf");
+assert_eq(t_pj_err(PRANI_SP_CRICKET, T_1_0, f64_from(3000), 0), 0, "control: SAME +3000 ok for Cricket (span 5000)");
+
+test_group("preset_from_json_str -- breathiness range [0.0, 1.0]");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_NAN), 1, "breathiness NaN rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_INF), 1, "breathiness +inf rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, f64_neg(T_0_1)), 1, "breathiness -0.1 rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_1_5), 1, "breathiness 1.5 rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, 0), 0, "control: breathiness 0.0 (the floor) accepted");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_1_0), 0, "control: breathiness 1.0 (the ceiling) accepted");
+
+test_group("preset_from_json_str -- prani's own output always roundtrips");
+# The parity guarantee the ranges rest on: the guards can only ever reject a
+# document prani did not write. Every built-in preset, serialized and read back,
+# must survive with all four scalars bit-identical -- non-vacuous at 11.
+var rt_ok = 0;
+var rt_eq = 0;
+var ri = 0;
+while (ri < 11) {
+    var p0 = vec_get(all, ri);
+    var sbr = str_builder_new();
+    preset_to_json(p0, sbr);
+    var p1 = preset_from_json_str(str_data(str_builder_build(sbr)));
+    if (prani_is_err(p1) == 0) {
+        rt_ok = rt_ok + 1;
+        if (t_preset_eq(p0, p1) == 1) { rt_eq = rt_eq + 1; }
+    }
+    ri = ri + 1;
+}
+assert_eq(rt_ok, 11, "all 11 built-in presets are ACCEPTED by their own codec");
+assert_eq(rt_eq, 11, "all 11 roundtrip with every scalar bit-identical");
+
+test_group("preset_make / preset_build -- constructor contract unchanged (2.1.0)");
+# Measured, not wished for. preset_make hands back a VoicePreset and nothing
+# else -- the same shape as the crvoice_with_* builders it feeds -- so it has no
+# channel to report a bad field on, and preset_build is the same. 2.0.5 puts the
+# range check where a failure CAN be reported (the codec above) and leaves the
+# constructor contract to roadmap 2.1.0; the NaN's remaining path to svara is
+# closed downstream at the fallible point of use (crvoice_vocalize / the tract
+# constructor). Pinned here so 2.1.0 has to notice it is changing this.
+var nanp = preset_make("NaN Probe", PRANI_SP_WOLF, T_NAN, 0, 0);
+assert_eq(prani_is_err(nanp), 0, "preset_make still returns a preset for a NaN size");
+assert_eq(VoicePreset_size(nanp), T_NAN, "preset_make stores the NaN size verbatim (no clamp, no guard)");
+# ...and the codec refuses to produce that same preset from a document.
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_NAN, 0, 0), 1, "the codec will not build that preset from JSON");
 
 var rc = assert_summary();
 syscall(60, rc);

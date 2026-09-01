@@ -45,5 +45,40 @@ assert_eq(prani_is_finite(NAN_BITS), 0, "NaN not finite");
 assert_eq(prani_is_finite(PRANI_POS_INF), 0, "+inf not finite");
 assert_eq(prani_is_finite(PRANI_NEG_INF), 0, "-inf not finite");
 
+test_group("input-range guards (2.0.5)");
+var e_nan = f64_div(0, 0);
+var e_pinf = f64_div(f64_from(1), 0);
+var e_ninf = f64_div(f64_from(0) - f64_from(1), 0);
+# the measurements these guards exist because of -- pinned so they cannot drift
+assert_eq(prani_is_finite(f64_clamp(e_nan, f64_from(1), f64_from(2))), 0,
+  "f64_clamp passes NaN through (the reason the guards exist)");
+assert_eq(f64_clamp(e_pinf, f64_from(1), f64_from(2)), f64_from(2),
+  "f64_clamp DOES bound +inf -- infinities are not the clamp-site hazard");
+assert_eq(f64_clamp(e_ninf, f64_from(1), f64_from(2)), f64_from(1), "f64_clamp bounds -inf");
+assert_eq(f64_to(e_nan), f64_to(e_pinf), "f64_to(NaN) == f64_to(+inf) (both i64::MIN)");
+assert_eq(f64_to(e_pinf) < 0, 1, "f64_to(+inf) is NEGATIVE, not i64::MAX -- so loop bounds go negative");
+
+assert_eq(prani_finite2(F64_ONE, F64_ONE), 1, "finite2 accepts two finite");
+assert_eq(prani_finite2(F64_ONE, e_nan), 0, "finite2 rejects a NaN second");
+assert_eq(prani_finite2(e_pinf, F64_ONE), 0, "finite2 rejects an inf first");
+assert_eq(prani_finite3(F64_ONE, F64_ONE, F64_ONE), 1, "finite3 accepts three finite");
+assert_eq(prani_finite3(F64_ONE, F64_ONE, e_ninf), 0, "finite3 rejects a -inf third");
+
+assert_eq(prani_in_range(f64_from(5), F64_ONE, f64_from(10)), 1, "in_range accepts an interior value");
+assert_eq(prani_in_range(F64_ONE, F64_ONE, f64_from(10)), 1, "in_range is inclusive at lo");
+assert_eq(prani_in_range(f64_from(10), F64_ONE, f64_from(10)), 1, "in_range is inclusive at hi");
+assert_eq(prani_in_range(f64_from(0), F64_ONE, f64_from(10)), 0, "in_range rejects below lo");
+assert_eq(prani_in_range(f64_from(11), F64_ONE, f64_from(10)), 0, "in_range rejects above hi");
+assert_eq(prani_in_range(e_nan, F64_ONE, f64_from(10)), 0, "in_range rejects NaN");
+assert_eq(prani_in_range(e_pinf, F64_ONE, f64_from(10)), 0, "in_range rejects +inf");
+
+assert_eq(prani_is_positive(F64_ONE), 1, "is_positive accepts 1.0");
+assert_eq(prani_is_positive(0), 0, "is_positive rejects exactly 0");
+assert_eq(prani_is_positive(f64_neg(F64_ONE)), 0, "is_positive rejects negative");
+assert_eq(prani_is_positive(e_nan), 0, "is_positive rejects NaN");
+assert_eq(prani_is_non_negative(0), 1, "is_non_negative accepts 0 (a zero duration is legal)");
+assert_eq(prani_is_non_negative(f64_neg(F64_ONE)), 0, "is_non_negative rejects negative");
+assert_eq(prani_is_non_negative(e_nan), 0, "is_non_negative rejects NaN");
+
 var rc = assert_summary();
 syscall(60, rc);

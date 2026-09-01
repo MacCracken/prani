@@ -83,13 +83,13 @@ stdlib = [
 # goonj + sakshi symbols, resolved from THIS manifest below.
 [deps.svara]
 git = "https://github.com/MacCracken/svara.git"
-tag = "3.5.3"
+tag = "3.5.4"
 modules = ["dist/svara.cyr"]
 
 # naad — audio synthesis primitives (noise / biquad / LFO). Referenced by
 # svara's bundle and called directly by tract.cyr (filter_biquad_new /
 # _process_sample + NAAD_FILTER_BANDPASS, the NoiseOnly path). ONE step past
-# the 2.2.1 svara 3.5.3 consumes: 2.2.2 is a pure bugfix (overlap-save
+# the 2.2.1 svara 3.5.4 consumes: 2.2.2 is a pure bugfix (overlap-save
 # streaming in naad_convolution_process_block — a path prani never touches)
 # with identical hisab/goonj pins, so the bundle stays coherent.
 [deps.naad]

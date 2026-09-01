@@ -26,6 +26,7 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0003](0003-failed-fill-reports-zero-and-retires.md) | A failed stream fill reports 0 written and retires the stream | Accepted |
 | [0004](0004-cite-the-oracle-by-tag.md) | Cite the Rust oracle by tag, never by working-tree path | Accepted |
 | [0005](0005-serialized-tract-rebuilds-dsp-state.md) | A serialized `CreatureTract` restores prani's state and rebuilds svara's | Accepted |
+| [0006](0006-reject-non-finite-numeric-input.md) | prani rejects non-finite numeric input the oracle accepted | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a

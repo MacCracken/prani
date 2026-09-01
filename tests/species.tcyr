@@ -29,6 +29,19 @@ var T_0_8  = 0x3fe999999999999a;   # 0.8
 var T_1_5  = 0x3ff8000000000000;   # 1.5
 var T_2_5  = 0x4004000000000000;   # 2.5
 
+# Range-guard test values (2.0.5). Held here, not reused from src/species.cyr's
+# PR_SP_*_MAX, so a boundary assertion cannot pass by agreeing with itself.
+var T_NAN     = 0x7ff8000000000000;   # a quiet NaN
+var T_1_0     = 0x3ff0000000000000;   # 1.0   breathiness ceiling
+var T_0_05    = 0x3fa999999999999a;   # 0.05  jitter ceiling (crvoice_with_jitter clamps here)
+var T_0_06    = 0x3faeb851eb851eb8;   # 0.06  one step over the jitter ceiling
+var T_0_1     = 0x3fb999999999999a;   # 0.1   shimmer ceiling (crvoice_with_shimmer clamps here)
+var T_0_2     = 0x3fc999999999999a;   # 0.2   over the shimmer ceiling
+var T_100_0   = 0x4059000000000000;   # 100.0 tract_scale ceiling
+var T_20000_0 = 0x40d3880000000000;   # 20000.0 Hz -- f0 / formant / bandwidth ceiling
+var T_NEG_1E300 = 0xfe37e43c8800759c; # -1e300 -- huge but FINITE spectral tilt
+var T_I64_MIN = (0 - 9223372036854775807) - 1;   # i64::MIN, a legal PCG seed
+
 alloc_init();
 
 # ---- helpers ---------------------------------------------------------------
@@ -39,6 +52,19 @@ fn t_sp_roundtrip(species) {
     var b = str_builder_new();
     SpeciesParams_to_json(species_params(species), b);
     return SpeciesParams_from_json_str(str_data(str_builder_build(b)));
+}
+
+# t_sp_via_node(p) -- serialize `p` and read it back through the DESERIALIZER
+# path (species_params_from_node), i.e. the path a hostile document travels from
+# crvoice_from_json_str / crtract_from_json_str. Returns the pointer or the
+# negative PRANI_ERR_*. Using a real document (rather than calling the validator
+# directly) is what proves the guard is reachable from outside prani.
+#must_use
+fn t_sp_via_node(p) {
+    var b = str_builder_new();
+    SpeciesParams_to_json(p, b);
+    var js = str_data(str_builder_build(b));
+    return species_params_from_node(bayan_json_v_parse_buf(js, strlen(js)));
 }
 
 # ================================================================
@@ -292,6 +318,207 @@ assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_SNAKE)), PRANI_APP_NOI
 # control: an object with no apparatus key reads back 0 -- the exact reason the
 # five assertions above use species whose apparatus discriminant is not 0.
 assert_eq(SpeciesParams_apparatus(SpeciesParams_from_json_str("{}")), 0, "control: absent apparatus key reads 0");
+
+# ================================================================
+# Roadmap 2.0.5 -- input-range validation. ADR-0002 stopped at the parse
+# boundary ("a document that parses but carries nonsense still produces a
+# struct"); these groups close that gap for SpeciesParams, which is the ONE
+# struct reachable from BOTH hostile deserializer entry points
+# (crvoice_from_json_str and crtract_from_json_str embed it as a sub-object).
+#
+# Every group below asserts the acceptance side too: the guard is only correct if
+# it lets through everything prani itself writes.
+test_group("2.0.5 range guard -- the whole 13-row table is accepted");
+var vg_mask = 0;
+var vg_seen = 0;
+var vg_s = 0;
+while (vg_s < PRANI_SP_COUNT) {
+    if (prani_is_err(species_params_validate(species_params(vg_s))) == 1) {
+        vg_mask = vg_mask | (1 << vg_s);
+    }
+    vg_seen = vg_seen + 1;
+    vg_s = vg_s + 1;
+}
+assert_eq(vg_seen, 13, "the sweep visited all 13 species");
+assert_eq(vg_mask, 0, "no species' own params are rejected by the guard");
+# control: the same predicate DOES reject a table row with one field corrupted --
+# without this, a validator that returned PRANI_ERR_NONE unconditionally passes.
+var vg_ctrl = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(vg_ctrl, T_NAN);
+assert_eq(prani_is_err(species_params_validate(vg_ctrl)), 1, "control: a NaN tract_scale IS rejected");
+
+# ================================================================
+# apparatus is an enum in the oracle, so serde rejected an unknown variant
+# outright; the port stores it as a plain i64 that bayan will hand back for any
+# integer in the document. Range is the five declared discriminants, 0..4.
+test_group("2.0.5 range guard -- apparatus is one of the five discriminants");
+var ap_ok = species_params(PRANI_SP_SNAKE);
+assert_eq(prani_is_err(species_params_validate(ap_ok)), 0, "apparatus 4 (NOISE_ONLY) accepted -- upper boundary");
+var ap_hi = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_apparatus(ap_hi, 5);
+assert_eq(prani_is_err(species_params_validate(ap_hi)), 1, "apparatus 5 rejected (one past NOISE_ONLY)");
+var ap_lo = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_apparatus(ap_lo, (0 - 1));
+assert_eq(prani_is_err(species_params_validate(ap_lo)), 1, "apparatus -1 rejected");
+
+# ================================================================
+# f0_min/f0_max/f0_default: finite, [0, 20000] Hz, and ORDERED. The ordering is a
+# guard in its own right, and the two pins below are why.
+test_group("2.0.5 range guard -- f0 is finite, non-negative and ordered");
+var f0_w = species_params(PRANI_SP_WOLF);
+# MEASURED, 2026-08-31 -- the two facts the f0 guard rests on.
+assert_eq(prani_is_finite(f64_clamp(T_NAN, SpeciesParams_f0_min(f0_w), SpeciesParams_f0_max(f0_w))), 0,
+  "pin: NaN survives the species' own f0 clamp (F11)");
+assert_eq(f64_clamp(f64_from(300), f64_from(1200), f64_from(150)), f64_from(1200),
+  "pin: f64_clamp with lo > hi silently returns LO (the oracle's f32::clamp panics)");
+assert_eq(prani_is_err(species_params_validate(species_params(PRANI_SP_SNAKE))), 0,
+  "f0 0/0/0 accepted -- the snake ships it, and the oracle's zero-duration rule says 0 is data");
+var f0_nan = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_min(f0_nan, T_NAN);
+assert_eq(prani_is_err(species_params_validate(f0_nan)), 1, "NaN f0_min rejected");
+var f0_neg = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_min(f0_neg, f64_neg(f64_from(1)));
+assert_eq(prani_is_err(species_params_validate(f0_neg)), 1, "negative f0_min rejected");
+var f0_inf = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_max(f0_inf, PRANI_POS_INF);
+assert_eq(prani_is_err(species_params_validate(f0_inf)), 1, "+inf f0_max rejected");
+var f0_top = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_max(f0_top, T_20000_0);
+assert_eq(prani_is_err(species_params_validate(f0_top)), 0, "f0_max 20000 accepted -- upper boundary");
+var f0_over = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_max(f0_over, f64_from(20001));
+assert_eq(prani_is_err(species_params_validate(f0_over)), 1, "f0_max 20001 rejected");
+var f0_inv = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_min(f0_inv, f64_from(1300));
+assert_eq(prani_is_err(species_params_validate(f0_inv)), 1, "f0_min > f0_max rejected");
+var f0_def = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_default(f0_def, f64_from(1300));
+assert_eq(prani_is_err(species_params_validate(f0_def)), 1, "f0_default above f0_max rejected");
+
+# ================================================================
+# tract_scale: strictly positive. 0 is not a small tract, it is no tract, and it
+# is what an ABSENT key deserializes to (bayan's accessors are null-safe).
+test_group("2.0.5 range guard -- tract_scale is strictly positive and bounded");
+var ts_zero = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(ts_zero, 0);
+assert_eq(prani_is_err(species_params_validate(ts_zero)), 1, "tract_scale 0.0 rejected");
+var ts_neg = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(ts_neg, f64_neg(T_1_0));
+assert_eq(prani_is_err(species_params_validate(ts_neg)), 1, "negative tract_scale rejected");
+var ts_inf = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(ts_inf, PRANI_POS_INF);
+assert_eq(prani_is_err(species_params_validate(ts_inf)), 1, "+inf tract_scale rejected");
+var ts_top = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(ts_top, T_100_0);
+assert_eq(prani_is_err(species_params_validate(ts_top)), 0, "tract_scale 100.0 accepted -- upper boundary");
+var ts_over = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(ts_over, f64_from(101));
+assert_eq(prani_is_err(species_params_validate(ts_over)), 1, "tract_scale 101.0 rejected");
+
+# ================================================================
+# formants and bandwidths are resonances of that same tube. A 0 Hz formant is not
+# a resonance, and a 0 Hz bandwidth is an infinite-Q (unstable) pole.
+test_group("2.0.5 range guard -- formants and bandwidths");
+var fm_zero = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_formant0(fm_zero, 0);
+assert_eq(prani_is_err(species_params_validate(fm_zero)), 1, "formant0 0 Hz rejected");
+var fm_nan = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_formant1(fm_nan, T_NAN);
+assert_eq(prani_is_err(species_params_validate(fm_nan)), 1, "NaN formant1 rejected");
+var fm_over = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_formant2(fm_over, f64_from(20001));
+assert_eq(prani_is_err(species_params_validate(fm_over)), 1, "formant2 20001 Hz rejected");
+assert_eq(prani_is_err(species_params_validate(species_params(PRANI_SP_CRICKET))), 0,
+  "cricket F3 13500 Hz accepted -- the widest formant prani ships");
+var bw_zero = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_bandwidth0(bw_zero, 0);
+assert_eq(prani_is_err(species_params_validate(bw_zero)), 1, "bandwidth0 0 Hz rejected (infinite-Q pole)");
+var bw_neg = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_bandwidth1(bw_neg, f64_neg(f64_from(10)));
+assert_eq(prani_is_err(species_params_validate(bw_neg)), 1, "negative bandwidth1 rejected");
+var bw_nan = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_bandwidth2(bw_nan, T_NAN);
+assert_eq(prani_is_err(species_params_validate(bw_nan)), 1, "NaN bandwidth2 rejected");
+
+# ================================================================
+# breathiness / jitter / shimmer ranges are the ORACLE'S OWN doc comments
+# (git show 2.0.3:rust-old/src/species.rs -- "(0.0-1.0)", "(0.0-0.05)",
+# "(0.0-0.1)"), and each ceiling is exactly where the matching crvoice_with_*
+# builder clamps, so a builder-set value is accepted by construction.
+test_group("2.0.5 range guard -- breathiness / jitter / shimmer, the oracle's ranges");
+var br_one = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_breathiness(br_one, T_1_0);
+assert_eq(prani_is_err(species_params_validate(br_one)), 0, "breathiness 1.0 accepted -- the snake ships it");
+var br_over = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_breathiness(br_over, f64_from(2));
+assert_eq(prani_is_err(species_params_validate(br_over)), 1, "breathiness 2.0 rejected");
+var br_neg = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_breathiness(br_neg, f64_neg(T_1_0));
+assert_eq(prani_is_err(species_params_validate(br_neg)), 1, "negative breathiness rejected");
+var br_nan = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_breathiness(br_nan, T_NAN);
+assert_eq(prani_is_err(species_params_validate(br_nan)), 1, "NaN breathiness rejected");
+var ji_top = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_jitter(ji_top, T_0_05);
+assert_eq(prani_is_err(species_params_validate(ji_top)), 0, "jitter 0.05 accepted -- the with_jitter clamp ceiling");
+var ji_over = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_jitter(ji_over, T_0_06);
+assert_eq(prani_is_err(species_params_validate(ji_over)), 1, "jitter 0.06 rejected");
+var sh_top = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_shimmer(sh_top, T_0_1);
+assert_eq(prani_is_err(species_params_validate(sh_top)), 0, "shimmer 0.1 accepted -- the with_shimmer clamp ceiling");
+var sh_over = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_shimmer(sh_over, T_0_2);
+assert_eq(prani_is_err(species_params_validate(sh_over)), 1, "shimmer 0.2 rejected");
+
+# ================================================================
+# Two fields are deliberately NOT magnitude-bounded, and both need a test saying
+# so -- otherwise a later tightening looks like a bug fix rather than a change.
+test_group("2.0.5 range guard -- spectral_tilt is finite-only, resonance_seed is unchecked");
+var st_nan = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_spectral_tilt(st_nan, T_NAN);
+assert_eq(prani_is_err(species_params_validate(st_nan)), 1, "NaN spectral_tilt rejected");
+var st_inf = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_spectral_tilt(st_inf, PRANI_NEG_INF);
+assert_eq(prani_is_err(species_params_validate(st_inf)), 1, "-inf spectral_tilt rejected");
+var st_big = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_spectral_tilt(st_big, T_NEG_1E300);
+assert_eq(prani_is_err(species_params_validate(st_big)), 0,
+  "-1e300 spectral_tilt ACCEPTED -- apply_spectral_tilt already clamps -tilt/12 into [0, 0.85]");
+var sd_min = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_resonance_seed(sd_min, T_I64_MIN);
+assert_eq(prani_is_err(species_params_validate(sd_min)), 0, "resonance_seed i64::MIN accepted -- every seed is legal");
+var sd_neg = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_resonance_seed(sd_neg, (0 - 1));
+assert_eq(prani_is_err(species_params_validate(sd_neg)), 0, "resonance_seed -1 accepted (the table carries negatives)");
+
+# ================================================================
+# The deserializer path itself. species_params_from_node is what a hostile
+# document actually reaches, via crvoice_from_json_str and crtract_from_json_str.
+test_group("2.0.5 species_params_from_node reports instead of fabricating");
+var nd_ok = t_sp_via_node(species_params(PRANI_SP_WOLF));
+assert_eq(prani_is_err(nd_ok), 0, "a document prani wrote is NOT rejected");
+assert_eq(SpeciesParams_tract_scale(nd_ok), PR_TS_1_2, "and it still roundtrips tract_scale 1.2 exactly");
+assert_eq(SpeciesParams_resonance_seed(nd_ok), PR_SEED_WOLF, "and resonance_seed exactly");
+assert_eq(prani_is_err(t_sp_via_node(species_params(PRANI_SP_SNAKE))), 0,
+  "the snake's all-zero f0 document is NOT rejected");
+# An absent `params` key hands from_node a null node; every field then reads back
+# 0 (bayan's accessors are null-safe), which is tract_scale 0.0 -- no tract.
+assert_eq(prani_is_err(species_params_from_node(0)), 1, "a null node (absent \"params\" key) -> error");
+var nd_empty = bayan_json_v_parse_buf("{}", 2);
+assert_eq(prani_is_err(species_params_from_node(nd_empty)), 1, "an empty object -> error, not an all-zero struct");
+assert_eq(species_params_from_node(nd_empty), PRANI_ERR_INVALID_SPECIES, "and the code is INVALID_SPECIES");
+var nd_nan = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_tract_scale(nd_nan, T_NAN);
+assert_eq(prani_is_err(t_sp_via_node(nd_nan)), 1, "a document with a NaN tract_scale -> error");
+var nd_inv = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_f0_min(nd_inv, f64_from(1300));
+assert_eq(prani_is_err(t_sp_via_node(nd_inv)), 1, "a document with f0_min > f0_max -> error");
+# from_node's failure is a negative code, so a caller that forwards it into
+# species_params_validate must not dereference it. Pinning that keeps the
+# two-call-site contract (voice.cyr, tract.cyr) safe to write either way round.
+assert_eq(species_params_validate(species_params_from_node(0)), PRANI_ERR_INVALID_SPECIES,
+  "validate(from_node(...)) rejects a negative pointer instead of dereferencing it");
 
 var rc = assert_summary();
 syscall(60, rc);

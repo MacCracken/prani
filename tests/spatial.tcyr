@@ -22,6 +22,14 @@ var SP_E_NEAR = 0x40A718FD9A07A7AA;   # 2956.4953157798927  energy @ 1 m
 var SP_E_FAR  = 0x3FE48CFBC21121FB;   # 0.642209891354525   energy @ 50 m
 var SP_E_TOL  = 0x3EB0C6F7A0B5ED8D;   # 1e-6, generous against a 400-term sum
 
+# 2.0.5 range-guard fixtures. PRANI_POS_INF / PRANI_NEG_INF come from error.cyr;
+# there is no NaN sentinel there (nothing in prani produces one deliberately),
+# so the quiet-NaN pattern is spelled out here. SP_BOUND is the Doppler clamp
+# bound, built from the module's own PR_SP_0_9 rather than a literal 308.7 so
+# the test cannot drift from the constant it is checking.
+var SP_NAN   = 0x7FF8000000000000;   # quiet NaN
+var SP_BOUND = f64_mul(f64_from(343), PR_SP_0_9);   # 343 * 0.9 = 308.7
+
 # ---- helpers ---------------------------------------------------------------
 # t_energy(v) -- sum of s^2 over v, accumulated low index to high (the oracle's
 # `samples.iter().map(|s| s * s).sum()`).
@@ -208,6 +216,112 @@ test_group("doppler: empty input -> empty output");
 var e2 = vec_new();
 var dop_e = spatial_apply_doppler_shift(e2, 0, f64_from(48000));
 assert_eq(vec_len(dop_e), 0, "empty in -> empty out");
+
+# ================================================================
+# 2.0.5 -- input-range validation (audit finding F11). Both functions return
+# "a vec handle OR a negative PRANI_ERR_*"; the ranges are tabulated in the
+# spatial.cyr header. Three groups: the primitive behaviours the guards rest
+# on, then one group per function.
+# ================================================================
+
+# ================================================================
+test_group("range guards: the primitive behaviours they rest on");
+# Pinned here (not in hardening.tcyr) because these are the facts that make
+# spatial's guards necessary, and they are toolchain behaviour, not prani's.
+# f64_max is `if (f64_gt(a, b)) a else b` (lib/math.cyr:422) and every compare
+# against NaN is false -- so NaN LOSES in argument 1 and WINS in argument 2.
+assert_eq(f64_eq(f64_max(SP_NAN, F64_ONE), F64_ONE), 1, "f64_max(NaN, b) == b (NaN loses as arg 1)");
+assert_eq(prani_is_finite(f64_max(F64_ONE, SP_NAN)), 0, "f64_max(a, NaN) == NaN (NaN wins as arg 2)");
+# That asymmetry is why a NaN `distance` and a NaN `reference_distance` had
+# two DIFFERENT symptoms before the guards: full-volume audio vs a NaN buffer.
+assert_eq(prani_is_finite(f64_div(F64_ONE, 0x0000000000000001)), 0, "1/5e-324 overflows to inf (the dt guard)");
+assert_eq(prani_is_finite(f64_div(F64_ONE, 0x01a56e1fc2f8f359)), 1, "1/1e-300 is finite (accepted, not an invented floor)");
+# The Doppler empty-buffer symptom: a NaN ratio truncates to i64::MIN, so the
+# loop bound is NEGATIVE -- an empty result, never a runaway allocation.
+assert_lt(f64_to(f64_div(f64_from(100), SP_NAN)), 0, "f64_to(len/NaN) is negative (empty, not runaway)");
+# +/-inf ARE bounded by f64_clamp -- the reason inf is rejected is that it
+# renders as 308.7 m/s, NOT that it would overflow.
+assert_eq(f64_eq(f64_clamp(PRANI_POS_INF, f64_neg(SP_BOUND), SP_BOUND), SP_BOUND), 1, "f64_clamp(+inf) == +308.7 (inf is bounded)");
+assert_eq(prani_is_finite(f64_clamp(SP_NAN, f64_neg(SP_BOUND), SP_BOUND)), 0, "f64_clamp(NaN) stays NaN (NaN is NOT bounded)");
+
+# ================================================================
+test_group("distance attenuation: out-of-range input is rejected");
+# `one` (a single 1.0 sample) and `alpha_expected` are reused from the groups
+# above, so a REJECTED call and an ACCEPTED one are compared on one input.
+var sr48 = f64_from(48000);
+# -- samples handle. A null handle, or an unchecked negative code chained in
+# from a fallible call, reaches vec_len as load64(v+8) -> SIGSEGV.
+assert_eq(spatial_apply_distance_attenuation(0, F64_ONE, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION, "null samples handle rejected");
+assert_eq(spatial_apply_distance_attenuation(PRANI_ERR_SVARA, F64_ONE, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION, "a chained-in error code is rejected, not dereferenced");
+# -- distance: finite, >= 0.
+assert_eq(spatial_apply_distance_attenuation(one, SP_NAN, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION, "NaN distance rejected");
+assert_eq(spatial_apply_distance_attenuation(one, PRANI_POS_INF, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION, "+inf distance rejected");
+assert_eq(spatial_apply_distance_attenuation(one, PRANI_NEG_INF, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION, "-inf distance rejected");
+# DELIBERATE DIVERGENCE: the oracle clamped a negative distance up to the
+# reference and returned full-volume audio (measured: == alpha, i.e. bit-equal
+# to the distance-1.0 result). A negative distance is not a distance.
+assert_eq(spatial_apply_distance_attenuation(one, f64_neg(f64_from(5)), F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION, "negative distance rejected (divergence: oracle clamped it)");
+# CONTROL -- distance 0 stays VALID: it clamps up to reference exactly as 0.5
+# does, so it must still produce the gain-1.0 result and not an error.
+var d_zero = spatial_apply_distance_attenuation(one, 0, F64_ONE, sr48);
+assert_eq(prani_is_err(d_zero), 0, "distance 0 accepted (clamps up to reference)");
+assert_eq(f64_eq(vec_get(d_zero, 0), alpha_expected), 1, "distance 0 gives the gain-1.0 result, unchanged");
+# -- reference_distance: finite, > 0.
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, SP_NAN, sr48), PRANI_ERR_INVALID_VOCALIZATION, "NaN reference rejected (was an all-NaN buffer)");
+assert_eq(spatial_apply_distance_attenuation(one, f64_from(5), 0, sr48), PRANI_ERR_INVALID_VOCALIZATION, "reference 0 rejected (was silence: gain 0)");
+assert_eq(spatial_apply_distance_attenuation(one, 0, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION, "reference 0 with distance 0 rejected (was 0/0 = NaN)");
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, f64_neg(F64_ONE), sr48), PRANI_ERR_INVALID_VOCALIZATION, "negative reference rejected (was a phase-inverted buffer)");
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, PRANI_POS_INF, sr48), PRANI_ERR_INVALID_VOCALIZATION, "+inf reference rejected");
+# -- sample_rate: finite, > 0, with a finite reciprocal. INVALID_TRACT, not
+# INVALID_VOCALIZATION: a bad sample rate is the same code library-wide.
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, SP_NAN), PRANI_ERR_INVALID_TRACT, "NaN sample_rate rejected (was an all-NaN buffer)");
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, 0), PRANI_ERR_INVALID_TRACT, "sample_rate 0 rejected (was dt=inf -> alpha=NaN)");
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, f64_neg(sr48)), PRANI_ERR_INVALID_TRACT, "negative sample_rate rejected (was alpha > 1: an overshooting filter)");
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, PRANI_POS_INF), PRANI_ERR_INVALID_TRACT, "+inf sample_rate rejected (was silence: alpha 0)");
+assert_eq(spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, 0x0000000000000001), PRANI_ERR_INVALID_TRACT, "subnormal sample_rate rejected (1/rate overflows)");
+# CONTROL -- the reciprocal guard is exactly "1/rate is finite", not a made-up
+# floor: an absurd-but-representable 1e-300 Hz is still accepted.
+assert_eq(prani_is_err(spatial_apply_distance_attenuation(one, F64_ONE, F64_ONE, 0x01a56e1fc2f8f359)), 0, "1e-300 Hz accepted (guard is 1/rate finite, not a threshold)");
+# -- the guards run before the length check, so an empty buffer with a bad
+# parameter is an ERROR, while an empty buffer with valid ones stays empty.
+var sp_empty = vec_new();
+assert_eq(spatial_apply_distance_attenuation(sp_empty, F64_ONE, F64_ONE, SP_NAN), PRANI_ERR_INVALID_TRACT, "empty buffer + bad parameter is an error");
+assert_eq(vec_len(spatial_apply_distance_attenuation(sp_empty, F64_ONE, F64_ONE, sr48)), 0, "empty buffer + valid parameters still empty out");
+
+# ================================================================
+test_group("doppler: out-of-range input is rejected");
+var s100 = vec_new();
+var sp_i = 0;
+while (sp_i < 100) { vec_push(s100, F64_ONE); sp_i = sp_i + 1; }
+# -- samples handle.
+assert_eq(spatial_apply_doppler_shift(0, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION, "null samples handle rejected");
+assert_eq(spatial_apply_doppler_shift(PRANI_ERR_SVARA, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION, "a chained-in error code is rejected, not dereferenced");
+# -- velocity: any FINITE value. NaN was the live defect (out_len = i64::MIN
+# -> empty buffer); +/-inf are clamped to +/-308.7, a fabricated answer.
+assert_eq(spatial_apply_doppler_shift(s100, SP_NAN, sr48), PRANI_ERR_INVALID_VOCALIZATION, "NaN velocity rejected (was a silently EMPTY buffer)");
+assert_eq(spatial_apply_doppler_shift(s100, PRANI_POS_INF, sr48), PRANI_ERR_INVALID_VOCALIZATION, "+inf velocity rejected (was rendered as +308.7)");
+assert_eq(spatial_apply_doppler_shift(s100, PRANI_NEG_INF, sr48), PRANI_ERR_INVALID_VOCALIZATION, "-inf velocity rejected (was rendered as -308.7)");
+assert_eq(spatial_apply_doppler_shift(sp_empty, SP_NAN, sr48), PRANI_ERR_INVALID_VOCALIZATION, "empty buffer + NaN velocity is an error");
+assert_eq(vec_len(spatial_apply_doppler_shift(sp_empty, 0, sr48)), 0, "empty buffer + valid velocity still empty out");
+# CONTROLS -- supersonic velocities stay VALID. The +/-0.9c clamp is the model
+# (the v = +343 group above locks it), so v = -343, -1e6 and -308.7 must all
+# give the SAME saturated result: ratio 9.999999999999996, out_len 100/10.
+var dop_sat = spatial_apply_doppler_shift(s100, f64_neg(SP_BOUND), sr48);
+assert_eq(vec_len(dop_sat), 10, "v = -308.7 (the clamp bound) -> out_len 10");
+assert_eq(vec_len(spatial_apply_doppler_shift(s100, f64_neg(f64_from(343)), sr48)), 10, "v = -343 (AT the speed of sound) -> out_len 10, not the 0 the raw ratio gives");
+assert_eq(vec_len(spatial_apply_doppler_shift(s100, f64_neg(f64_from(1000000)), sr48)), 10, "v = -1e6 (far beyond it) -> out_len 10, not the negative the raw ratio gives");
+assert_eq(vec_len(spatial_apply_doppler_shift(s100, SP_BOUND, sr48)), 190, "v = +308.7 -> out_len 190 (the 1.9x upper bound)");
+# The raw arithmetic the clamp is protecting, evaluated here so the claim in
+# the spatial.cyr header is checked rather than asserted in prose.
+var sp_speed = f64_from(343);
+assert_eq(prani_is_finite(f64_div(sp_speed, f64_add(sp_speed, f64_neg(sp_speed)))), 0, "unclamped ratio at v = -343 is +inf (division by zero)");
+assert_eq(f64_lt(f64_div(sp_speed, f64_add(sp_speed, f64_neg(f64_from(500)))), 0), 1, "unclamped ratio at v = -500 is NEGATIVE");
+# CONTROL -- `_sample_rate` is deliberately NOT guarded: the oracle ignores it
+# and so does this port, so a NaN there cannot reach the output.
+var dop_nan_sr = spatial_apply_doppler_shift(s100, 0, SP_NAN);
+assert_eq(prani_is_err(dop_nan_sr), 0, "NaN _sample_rate NOT rejected (the parameter is unused)");
+assert_eq(vec_len(dop_nan_sr), 100, "NaN _sample_rate gives the identity resample, unchanged");
+assert_eq(f64_eq(vec_get(dop_nan_sr, 42), F64_ONE), 1, "NaN _sample_rate leaves the samples themselves untouched");
 
 var rc = assert_summary();
 syscall(60, rc);

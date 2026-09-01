@@ -328,5 +328,264 @@ assert_eq(bt_err_mask, 0, "every bout_template synthesizes (bitmask of failed sp
 assert_eq(bt_empty_mask, 0, "every bout_template is non-empty (bitmask)");
 assert_eq(bt_inf_mask, 0, "every bout_template is all-finite (bitmask)");
 
+# ================================================================
+# 2.0.5 -- INPUT-RANGE VALIDATION. Ranges (src/sequence.cyr, top):
+#   seconds (duration/gap/interval/spread)  finite, [0, 3600]
+#   count / elements / voices               [0, 1024] syntheses per call
+#   sample_rate                             finite, > 0
+#   requested samples per buffer            [0, 2^24]
+# Zero stays VALID -- the oracle's test_zero_duration_synthesis asserts an empty
+# buffer, not an error. Every group below carries a valid-input control, because
+# the failure mode of a range guard is rejecting something that used to work.
+test_group("2.0.5 range helpers -- the boundaries are inclusive at both ends");
+var T_NAN  = 0x7FF8000000000000;   # canonical quiet NaN
+var T_3600 = f64_from(3600);       # PRANI_SEQ_MAX_SECONDS
+var T_3601 = f64_from(3601);
+assert_eq(prani_seq_seconds_ok(f64_from(0)), 1, "0 s accepted (zero duration is valid)");
+assert_eq(prani_seq_seconds_ok(T_3600), 1, "3600 s accepted (upper bound inclusive)");
+assert_eq(prani_seq_seconds_ok(T_3601), 0, "3601 s rejected");
+assert_eq(prani_seq_seconds_ok(f64_neg(F64_ONE)), 0, "-1 s rejected");
+assert_eq(prani_seq_seconds_ok(T_NAN), 0, "NaN rejected (F11: it passes every clamp)");
+assert_eq(prani_seq_seconds_ok(PRANI_POS_INF), 0, "+inf rejected");
+assert_eq(prani_seq_seconds_ok(PRANI_NEG_INF), 0, "-inf rejected");
+assert_eq(prani_seq_count_ok(0), 1, "count 0 accepted (the oracle's u32 accepts it)");
+assert_eq(prani_seq_count_ok(1024), 1, "count 1024 accepted (upper bound inclusive)");
+assert_eq(prani_seq_count_ok(1025), 0, "count 1025 rejected");
+assert_eq(prani_seq_count_ok((0 - 1)), 0, "count -1 rejected (unrepresentable in the oracle)");
+assert_eq(prani_seq_samples_ok(f64_from(16777216)), 1, "2^24 samples accepted (bound inclusive)");
+assert_eq(prani_seq_samples_ok(f64_from(16777217)), 0, "2^24 + 1 samples rejected");
+
+# ================================================================
+# The constructors return "pointer or negative code" -- the port's existing
+# convention, so no signature changed. A heap pointer is never negative.
+test_group("2.0.5 sequence_call_element_new rejects a bad span");
+assert_eq(sequence_call_element_new(PRANI_VOC_CHIRP, T_NAN, F64_HALF), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN duration -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_element_new(PRANI_VOC_CHIRP, PRANI_POS_INF, F64_HALF), PRANI_ERR_INVALID_VOCALIZATION,
+  "+inf duration -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_element_new(PRANI_VOC_CHIRP, f64_neg(F64_ONE), F64_HALF), PRANI_ERR_INVALID_VOCALIZATION,
+  "negative duration -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_element_new(PRANI_VOC_CHIRP, T_3601, F64_HALF), PRANI_ERR_INVALID_VOCALIZATION,
+  "duration past 3600 s -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_element_new(PRANI_VOC_CHIRP, F64_ONE, T_NAN), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN gap -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_element_new(PRANI_VOC_CHIRP, F64_ONE, f64_neg(F64_HALF)), PRANI_ERR_INVALID_VOCALIZATION,
+  "negative gap -> INVALID_VOCALIZATION");
+# controls: the two valid edges still build, with the fields untouched
+var e_zero = sequence_call_element_new(PRANI_VOC_CHIRP, f64_from(0), f64_from(0));
+assert_eq(prani_is_err(e_zero), 0, "control: a zero-duration element still builds");
+assert_eq(CallElement_duration(e_zero), f64_from(0), "control: its duration is 0");
+var e_max = sequence_call_element_new(PRANI_VOC_TRILL, T_3600, T_3600);
+assert_eq(prani_is_err(e_max), 0, "control: a 3600 s element still builds");
+assert_eq(CallElement_gap(e_max), T_3600, "control: its gap roundtrips");
+
+# ================================================================
+test_group("2.0.5 sequence_call_bout_new rejects a bad count or span");
+assert_eq(sequence_call_bout_new(PRANI_VOC_HOWL, (0 - 1), CALL_D, GAP_I, PRANI_INTENT_SOCIAL),
+  PRANI_ERR_INVALID_VOCALIZATION, "count -1 -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_bout_new(PRANI_VOC_HOWL, 1025, CALL_D, GAP_I, PRANI_INTENT_SOCIAL),
+  PRANI_ERR_INVALID_VOCALIZATION, "count 1025 -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_bout_new(PRANI_VOC_HOWL, 2, T_NAN, GAP_I, PRANI_INTENT_SOCIAL),
+  PRANI_ERR_INVALID_VOCALIZATION, "NaN call_duration -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, PRANI_POS_INF, PRANI_INTENT_SOCIAL),
+  PRANI_ERR_INVALID_VOCALIZATION, "+inf interval -> INVALID_VOCALIZATION");
+# controls: count 0 and count 1024 are both legal, and count 0 still renders an
+# EMPTY buffer as a success (the oracle's u32 could hold 0 and looped zero times)
+var b_zero = sequence_call_bout_new(PRANI_VOC_HOWL, 0, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+assert_eq(prani_is_err(b_zero), 0, "control: count 0 still builds");
+var b_zero_buf = sequence_call_bout_synthesize(b_zero, crvoice_new(PRANI_SP_WOLF), SR);
+assert_eq(prani_is_err(b_zero_buf), 0, "control: count 0 synthesizes as a SUCCESS");
+assert_eq(vec_len(b_zero_buf), 0, "control: count 0 renders an empty buffer, not an error");
+assert_eq(prani_is_err(sequence_call_bout_new(PRANI_VOC_HOWL, 1024, CALL_D, GAP_I, PRANI_INTENT_SOCIAL)), 0,
+  "control: count 1024 still builds");
+
+# ================================================================
+# The synthesize entry points re-check the struct rather than trusting the
+# constructor: CallBout_from_json_str and the derived setters have no error
+# channel, so these fields can arrive unvalidated. Each "was" note below was
+# MEASURED against this module's pre-guard source on the same tree, not assumed.
+test_group("2.0.5 sequence_call_bout_synthesize -- sample_rate and the field recheck");
+var g_wolf = crvoice_new(PRANI_SP_WOLF);
+var g_bout = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+assert_eq(sequence_call_bout_synthesize(g_bout, g_wolf, T_NAN), PRANI_ERR_INVALID_TRACT,
+  "NaN sample_rate -> INVALID_TRACT");
+assert_eq(sequence_call_bout_synthesize(g_bout, g_wolf, f64_from(0)), PRANI_ERR_INVALID_TRACT,
+  "0 Hz -> INVALID_TRACT");
+assert_eq(sequence_call_bout_synthesize(g_bout, g_wolf, f64_neg(SR)), PRANI_ERR_INVALID_TRACT,
+  "negative sample_rate -> INVALID_TRACT");
+# A NaN smuggled past the constructor through the derived setter. The voice
+# layer reports a NaN duration too, so this assertion is DEFENSE IN DEPTH on
+# today's tree rather than the only report: what the recheck adds is that the
+# bout is rejected before a single call is synthesized or a gap appended, and
+# that sequence keeps saying so if the layer below ever stops.
+var g_smuggled = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+CallBout_set_call_duration(g_smuggled, T_NAN);
+assert_eq(sequence_call_bout_synthesize(g_smuggled, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN call_duration set after construction -> INVALID_VOCALIZATION");
+# A negative count, by contrast, was reported by NOTHING: measured pre-guard, it
+# returned an EMPTY buffer as a success -- F11's "silent empty where an error
+# belongs", and a state the oracle's u32 count could not even hold.
+var g_negcount = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+CallBout_set_count(g_negcount, (0 - 5));
+assert_eq(sequence_call_bout_synthesize(g_negcount, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "count -5 set after construction -> INVALID_VOCALIZATION (was empty + success)");
+# allocation bound: 1024 calls of 3600 s at 44100 Hz is 1.6e11 samples, and a
+# vec past 2^28 elements ABORTS the process ("vec: capacity overflow", exit 1),
+# so this has to be reported before the first push rather than attempted
+var g_huge = sequence_call_bout_new(PRANI_VOC_HOWL, 1024, T_3600, T_3600, PRANI_INTENT_SOCIAL);
+assert_eq(prani_is_err(g_huge), 0, "1024 x 3600 s passes the per-parameter ranges");
+assert_eq(sequence_call_bout_synthesize(g_huge, g_wolf, T_SR_44100), PRANI_ERR_INVALID_VOCALIZATION,
+  "... and is rejected by the 2^24-sample allocation ceiling");
+# control: the ordinary bout is untouched, same length as the group above
+assert_eq(vec_len(sequence_call_bout_synthesize(g_bout, crvoice_new(PRANI_SP_WOLF), SR)), 1600,
+  "control: the 8 kHz wolf bout still renders 1600 samples");
+
+# ================================================================
+test_group("2.0.5 sequence_call_phrase_synthesize -- sample_rate and the element pre-pass");
+var g_pel = vec_new();
+vec_push(g_pel, sequence_call_element_new(PRANI_VOC_HOWL, CALL_D, GAP_I));
+vec_push(g_pel, sequence_call_element_new(PRANI_VOC_HOWL, CALL_D, f64_from(0)));
+var g_phrase = sequence_call_phrase_new(g_pel, PRANI_INTENT_SOCIAL);
+assert_eq(sequence_call_phrase_synthesize(g_phrase, g_wolf, T_NAN), PRANI_ERR_INVALID_TRACT,
+  "NaN sample_rate -> INVALID_TRACT");
+assert_eq(sequence_call_phrase_synthesize(g_phrase, g_wolf, f64_from(0)), PRANI_ERR_INVALID_TRACT,
+  "0 Hz -> INVALID_TRACT");
+# The bad element is the LAST one, so the pre-pass is what makes the report
+# arrive before the first synthesis instead of after most of the buffer is
+# already built (the voice layer also rejects a NaN duration, one element too
+# late to stop the work).
+CallElement_set_duration(vec_get(g_pel, 1), T_NAN);
+assert_eq(sequence_call_phrase_synthesize(g_phrase, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN duration on the LAST element -> INVALID_VOCALIZATION");
+CallElement_set_duration(vec_get(g_pel, 1), CALL_D);
+CallElement_set_gap(vec_get(g_pel, 0), PRANI_POS_INF);
+assert_eq(sequence_call_phrase_synthesize(g_phrase, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "+inf gap -> INVALID_VOCALIZATION");
+CallElement_set_gap(vec_get(g_pel, 0), GAP_I);
+# control: with the fields restored the phrase renders exactly as before
+assert_eq(vec_len(sequence_call_phrase_synthesize(g_phrase, crvoice_new(PRANI_SP_WOLF), SR)), 1600,
+  "control: the restored phrase still renders (400+800)+(400+0)");
+# 1025 elements is one synthesis too many for a single call
+var g_many = vec_new();
+var g_m = 0;
+while (g_m < 1025) {
+    vec_push(g_many, sequence_call_element_new(PRANI_VOC_HOWL, f64_from(0), f64_from(0)));
+    g_m = g_m + 1;
+}
+assert_eq(sequence_call_phrase_synthesize(sequence_call_phrase_new(g_many, PRANI_INTENT_SOCIAL), g_wolf, SR),
+  PRANI_ERR_INVALID_VOCALIZATION, "1025 elements -> INVALID_VOCALIZATION");
+
+# ================================================================
+# Audit F10, and it is worse than "overflows i64 at ~1e14 s". MEASURED on this
+# tree: a timing_spread of 1e6 s at 44100 Hz asks for 4.41e10 offset samples, so
+# the mix ALONE demands 705.6 GB -- eight orders of magnitude below the audit's
+# overflow threshold. The reachable failure is exhaustion (a vec past 2^28
+# elements dies "vec: capacity overflow", exit 1, which a library cannot
+# report), so the guard bounds the ALLOCATION, not the arithmetic.
+test_group("2.0.5 F10 -- synthesize_chorus bounds the allocation before it is made");
+# the demand itself, computed the way the function computes it (nothing is
+# allocated here -- this is the measurement the guard exists for)
+var f10_offset = f64_to(f64_mul(f64_from(1000000), T_SR_44100));
+assert_eq(f10_offset, 44100000000, "1e6 s spread @44100 = 4.41e10 offset samples");
+assert_eq(f10_offset * 2 * 8, 705600000000, "-> the mix alone demands 705.6 GB");
+var g_voices = vec_new();
+vec_push(g_voices, crvoice_new(PRANI_SP_WOLF));
+vec_push(g_voices, crvoice_new(PRANI_SP_WOLF));
+var g_1e6 = f64_from(1000000);
+var g_600 = f64_from(600);
+var g_0s = f64_from(0);
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR_44100, F64_ONE, g_1e6),
+  PRANI_ERR_INVALID_VOCALIZATION, "1e6 s spread -> INVALID_VOCALIZATION, not 705.6 GB");
+# 600 s at 44100 is 26.46 M samples for the mix and twice that once both voices
+# render their own call buffer: inside every per-parameter range, still past the
+# 2^24 ceiling. The ceiling counts the whole call, not the longest buffer --
+# a bump allocator never gives the per-voice buffers back.
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR_44100, g_600, g_0s),
+  PRANI_ERR_INVALID_VOCALIZATION, "600 s @44100 -> rejected by the sample ceiling");
+# 300 s at 44100 is 13.23 M for the mix alone -- under the ceiling -- and 26.46 M
+# once the two voices are counted, which is what makes this one a rejection
+var g_300 = f64_from(300);
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR_44100, g_300, g_0s),
+  PRANI_ERR_INVALID_VOCALIZATION, "300 s x 2 voices -> rejected (the mix alone would have fit)");
+# the NaN path was a SILENT SUCCESS, not a silent empty: f64_to(NaN) is i64::MIN
+# and i64::MIN * 2 WRAPS TO 0, so total_len collapsed to base_samples and the
+# chorus returned a correct-LENGTH buffer with the spread quietly dropped
+assert_eq(f64_to(T_NAN) * 2, 0, "i64::MIN * 2 wraps to 0 -- why the NaN spread looked correct");
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, CALL_D, T_NAN),
+  PRANI_ERR_INVALID_VOCALIZATION, "NaN timing_spread -> INVALID_VOCALIZATION (was a 400-sample SUCCESS)");
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, T_NAN, CALL_D),
+  PRANI_ERR_INVALID_VOCALIZATION, "NaN duration -> INVALID_VOCALIZATION");
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, T_3601, CALL_D),
+  PRANI_ERR_INVALID_VOCALIZATION, "duration past 3600 s -> INVALID_VOCALIZATION");
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_NAN, CALL_D, CALL_D),
+  PRANI_ERR_INVALID_TRACT, "NaN sample_rate -> INVALID_TRACT");
+assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_from(0), CALL_D, CALL_D),
+  PRANI_ERR_INVALID_TRACT, "0 Hz -> INVALID_TRACT");
+# 1025 voices is one synthesis too many (each leaves per-call state behind)
+var g_crowd = vec_new();
+var g_c = 0;
+while (g_c < 1025) {
+    vec_push(g_crowd, crvoice_new(PRANI_SP_WOLF));
+    g_c = g_c + 1;
+}
+assert_eq(sequence_synthesize_chorus(g_crowd, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, CALL_D, CALL_D),
+  PRANI_ERR_INVALID_VOCALIZATION, "1025 voices -> INVALID_VOCALIZATION");
+# controls: the empty-voices short circuit still precedes every guard (the
+# oracle returns Ok(vec![]) before it reads a number), and the ordinary
+# two-wolf chorus is bit-for-bit unaffected
+assert_eq(vec_len(sequence_synthesize_chorus(vec_new(), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_NAN, T_NAN, T_NAN)), 0,
+  "control: empty voices still short-circuits to an empty vec, ahead of the guards");
+var g_ok = sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, CALL_D, CALL_D);
+assert_eq(prani_is_err(g_ok), 0, "control: the ordinary chorus still synthesizes");
+assert_eq(vec_len(g_ok), 1200, "control: still 400 + 2*400");
+
+# ================================================================
+# ADR-0002 left field ranges to roadmap 2.0.5: a document that PARSES can still
+# carry nonsense. prani's own sequence_call_phrase_to_json output always
+# satisfies these ranges, so only documents prani did not write are rejected.
+# duration/gap are i64 BIT PATTERNS in the JSON, so 9221120237041090560 is
+# 0x7FF8000000000000 (NaN) and -4611686018427387904 is 0xBFF0000000000000 (-1.0).
+test_group("2.0.5 sequence_call_phrase_from_json_str -- field ranges, not just parse success");
+var J_INTENT7 = "{\"intent\":7,\"elements\":[]}";
+var J_INTENTN = "{\"intent\":-1,\"elements\":[]}";
+var J_VOC14 = "{\"intent\":6,\"elements\":[{\"vocalization\":14,\"duration\":0,\"gap\":0}]}";
+var J_VOCN = "{\"intent\":6,\"elements\":[{\"vocalization\":-1,\"duration\":0,\"gap\":0}]}";
+var J_DUR_NAN = "{\"intent\":6,\"elements\":[{\"vocalization\":0,\"duration\":9221120237041090560,\"gap\":0}]}";
+var J_GAP_NEG = "{\"intent\":6,\"elements\":[{\"vocalization\":0,\"duration\":0,\"gap\":-4611686018427387904}]}";
+var J_OK = "{\"intent\":6,\"elements\":[{\"vocalization\":5,\"duration\":4602678819172646912,\"gap\":0}]}";
+assert_eq(sequence_call_phrase_from_json_str(J_INTENT7), PRANI_ERR_INVALID_VOCALIZATION,
+  "intent 7 (== PRANI_INTENT_COUNT) -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_phrase_from_json_str(J_INTENTN), PRANI_ERR_INVALID_VOCALIZATION,
+  "intent -1 -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_phrase_from_json_str(J_VOC14), PRANI_ERR_INVALID_VOCALIZATION,
+  "vocalization 14 (== PRANI_VOC_COUNT) -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_phrase_from_json_str(J_VOCN), PRANI_ERR_INVALID_VOCALIZATION,
+  "vocalization -1 -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_phrase_from_json_str(J_DUR_NAN), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN duration bit pattern -> INVALID_VOCALIZATION");
+assert_eq(sequence_call_phrase_from_json_str(J_GAP_NEG), PRANI_ERR_INVALID_VOCALIZATION,
+  "gap of -1.0 s -> INVALID_VOCALIZATION");
+# an oversized document allocates one element per entry before anything looks at
+# it, so the array length is checked before the loop runs
+var g_sb = str_builder_new();
+str_builder_add_cstr(g_sb, "{\"intent\":6,\"elements\":[");
+var g_j = 0;
+while (g_j < 1025) {
+    if (g_j > 0) { str_builder_add_cstr(g_sb, ","); }
+    str_builder_add_cstr(g_sb, "{\"vocalization\":0,\"duration\":0,\"gap\":0}");
+    g_j = g_j + 1;
+}
+str_builder_add_cstr(g_sb, "]}");
+assert_eq(sequence_call_phrase_from_json_str(str_data(str_builder_build(g_sb))), PRANI_ERR_INVALID_VOCALIZATION,
+  "1025 elements in one document -> INVALID_VOCALIZATION");
+# controls: a hand-written IN-RANGE document still parses, and prani's own
+# output still roundtrips (the serde group above is the full roundtrip control)
+var g_doc = sequence_call_phrase_from_json_str(J_OK);
+assert_eq(prani_is_err(g_doc), 0, "control: an in-range hand-written document parses");
+assert_eq(CallPhrase_intent(g_doc), PRANI_INTENT_SOCIAL, "control: its intent is Social");
+assert_eq(vec_len(CallPhrase_elements(g_doc)), 1, "control: one element");
+assert_eq(CallElement_duration(vec_get(CallPhrase_elements(g_doc), 0)), F64_HALF, "control: duration 0.5 s");
+assert_eq(prani_is_err(sequence_call_phrase_from_json_str("nope")), 1, "control: garbage still fails to parse");
+
 var rc = assert_summary();
 syscall(60, rc);

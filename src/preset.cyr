@@ -23,6 +23,13 @@
 # NAME FIELD: Rust's `name: Cow<'static, str>` is a display string, RESTORED as
 # a cstring stored in the `name` field (e.g. "Alpha Wolf"). preset_build ignores
 # it (matching the oracle). serde RESTORED — see preset_to_json below.
+#
+# RANGES (2.0.5): preset_from_json_str is the only entry point in this module
+# that can report a failure, and it validates every field of an untrusted
+# document — see its comment for the range per field and why that range. The 11
+# built-ins are trusted input and sit inside every range; the codec is not
+# trusted. preset_make / preset_build hand back a struct with no error channel
+# and are deliberately left unguarded (roadmap 2.1.0's constructor contract).
 
 # ================================================================
 # Non-integer literal constants (IEEE-754 hex; decimals in comments).
@@ -42,7 +49,7 @@ var PR_P_0_12 = 0x3fbeb851eb851eb8;   # 0.12  Wolf Pup / Male Lion breathiness
 var PR_P_0_08 = 0x3fb47ae147ae147b;   # 0.08  House Cat breathiness
 var PR_P_0_15 = 0x3fc3333333333333;   # 0.15  Kitten / Young Dragon breathiness
 var PR_P_0_25 = 0x3fd0000000000000;   # 0.25  Ancient Dragon breathiness
-var PR_P_0_1  = 0x3fb999999999999a;   # 0.1   Bald Eagle breathiness
+var PR_P_0_1  = 0x3fb999999999999a;   # 0.1   Bald Eagle breathiness; size floor
 var PR_P_0_2  = 0x3fc999999999999a;   # 0.2   Raven breathiness
 var PR_P_0_18 = 0x3fc70a3d70a3d70a;   # 0.18  American Alligator breathiness
 
@@ -62,6 +69,14 @@ struct VoicePreset {
 
 # Internal builder -- fills every field in declaration order. `name` is the
 # display string (a cstring literal), restoring the Rust `name: Cow<str>` field.
+#
+# DELIBERATELY UNVALIDATED (2.0.5): this returns a VoicePreset with no error
+# channel, exactly like the crvoice_with_* builders it feeds, so a guard here
+# would have to invent one -- the constructor-contract change is roadmap 2.1.0.
+# The two ways a caller's number becomes a preset are ranged instead where an
+# error CAN be reported: preset_from_json_str above validates every field of an
+# untrusted document, and a NaN handed straight to preset_make survives into
+# preset_build (see there).
 #must_use
 fn preset_make(name, species, size, f0_offset, breathiness) {
     var self = alloc(sizeof(VoicePreset));
@@ -98,24 +113,82 @@ fn preset_to_json(self, sb) {
 # from_json_str(json) -- rebuild a VoicePreset from preset_to_json output.
 # `json` is a NUL-terminated cstring; the display `name` is restored as a real
 # string and the f64 fields as exact i64 bit patterns.
-# Returns the VoicePreset ptr, or a NEGATIVE PRANI_ERR_INVALID_SPECIES if `json`
-# is 0 or does not parse.
+#
+# Returns the VoicePreset ptr, or a NEGATIVE PRANI_ERR_INVALID_SPECIES if the
+# document is not a valid preset. ONE code for the whole codec, matching
+# ADR-0002's table: a VoicePreset *is* a voice configuration, so every rejection
+# says the same thing -- "this is not a species/voice config prani can build".
+#
+# WHAT IS REJECTED (2.0.5 -- the field-level half ADR-0002 left open):
+#   json == 0, or the document does not parse                        (2.0.3)
+#   `name` missing or not a JSON string. This was a LIVE SIGSEGV, not a range
+#     question: bayan_json_v_obj_get returns 0 for a missing key and
+#     bayan_json_v_str returns 0 for a non-string node, and str_data(0) then
+#     dereferences address 0 (measured 2026-08-31: `{"species":0,...}` with no
+#     "name" key exits 139). An array root reaches it the same way.
+#   any of the four scalars missing or not a JSON integer. A missing key and a
+#     wrong-typed key are one rejection -- obj_get gives 0 and is_int(0) is 0.
+#     The oracle required every field too: no `#[serde(default)]` anywhere on
+#     VoicePreset, so serde failed on a missing field. Reading the scalars with
+#     bayan_json_v_int alone could not tell an absent field from a present 0,
+#     and 0 is a legal bit pattern (+0.0) for f0_offset and breathiness.
+#   `species` outside [0, PRANI_SP_COUNT). species_params falls THROUGH to the
+#     Fantasy row for an unknown discriminant, so an unnamed species would come
+#     back as a plausible creature instead of an error.
+#   `size` outside [0.1, 10.0]         -- crvoice_with_size's clamp domain
+#   `f0_offset` outside +/-(f0_max - f0_min) FOR THIS SPECIES
+#                                      -- crvoice_with_f0_offset's clamp domain
+#   `breathiness` outside [0.0, 1.0]   -- crvoice_with_breathiness's clamp domain
+#
+# Each numeric range is exactly the domain the builder that consumes the field
+# PRESERVES, so an accepted document reaches the voice unchanged. Outside it,
+# preset_build would silently substitute the clamp bound (ADR-0001: never
+# fabricate a plausible answer) -- and a NaN would pass the clamp untouched
+# (audit F11) into svara. The 11 built-in presets all sit inside these ranges,
+# so prani's own preset_to_json output always roundtrips (asserted per-preset in
+# tests/preset.tcyr); only documents prani did not write can be rejected.
 fn preset_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var self = alloc(sizeof(VoicePreset));
-    VoicePreset_set_name(self, str_data(bayan_json_v_str(bayan_json_v_obj_get(root, "name"))));
-    VoicePreset_set_species(self, bayan_json_v_int(bayan_json_v_obj_get(root, "species")));
-    VoicePreset_set_size(self, bayan_json_v_int(bayan_json_v_obj_get(root, "size")));
-    VoicePreset_set_f0_offset(self, bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset")));
-    VoicePreset_set_breathiness(self, bayan_json_v_int(bayan_json_v_obj_get(root, "breathiness")));
-    return self;
+    var name = bayan_json_v_str(bayan_json_v_obj_get(root, "name"));
+    if (name == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var n_species = bayan_json_v_obj_get(root, "species");
+    var n_size = bayan_json_v_obj_get(root, "size");
+    var n_f0 = bayan_json_v_obj_get(root, "f0_offset");
+    var n_br = bayan_json_v_obj_get(root, "breathiness");
+    if (bayan_json_v_is_int(n_species) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (bayan_json_v_is_int(n_size) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (bayan_json_v_is_int(n_f0) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (bayan_json_v_is_int(n_br) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var species = bayan_json_v_int(n_species);
+    if (species < 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (species >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
+    var size = bayan_json_v_int(n_size);
+    if (prani_in_range(size, PR_P_0_1, f64_from(10)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    # f0_offset's bound is species-dependent because with_f0_offset's clamp is.
+    var params = species_params(species);
+    var f0_span = f64_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
+    var f0_offset = bayan_json_v_int(n_f0);
+    if (prani_in_range(f0_offset, f64_neg(f0_span), f0_span) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    var breathiness = bayan_json_v_int(n_br);
+    if (prani_in_range(breathiness, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    return preset_make(str_data(name), species, size, f0_offset, breathiness);
 }
 
 # build(self) -- VoicePreset::build. Creates a CreatureVoice from this preset via
 # the crvoice_* builder chain, matching the oracle order:
 #   new(species).with_size(size).with_f0_offset(f0_offset).with_breathiness(br)
+#
+# NOT a validation point (2.0.5). It returns a CreatureVoice and nothing else --
+# the same shape as the three builders it chains -- so it has no channel to
+# report a bad field on, and giving it one is the 2.1.0 constructor-contract
+# work, not this milestone. A preset built by preset_from_json_str cannot carry
+# an out-of-range field (that codec rejects them); a preset assembled by hand
+# through preset_make can, and a NaN there passes every f64_clamp in the chain
+# (audit F11). It is caught at the fallible point of use downstream --
+# crvoice_vocalize and the tract constructor, which return PRANI_ERR_* -- which
+# covers every path to svara without changing this signature.
 #must_use
 fn preset_build(self) {
     return crvoice_with_breathiness(

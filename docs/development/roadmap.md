@@ -43,33 +43,6 @@ Measured facts this arc rests on, all verified 2026-08-31:
 > gates. Every number in this table now carries the command that reproduces it;
 > a gate figure with no reproducible command does not belong here.
 
-### 2.0.5 — Input-range validation beyond parse success
-
-**Source**: [ADR-0002](../adr/0002-deserializers-report-parse-failure.md)
-("Deferred, not rejected"), audit findings **F10** and **F11**.
-
-2.0.3 made the deserializers reject input that does not *parse*. A document that
-parses but carries nonsense still produces a struct, and the same gap shows up in
-two other places, so it is one piece of work rather than three:
-
-- **Deserializer field ranges.** `crvoice_from_json_str` will accept
-  `size_scale` = 0.0 or a negative `f0_min`; the builders (`crvoice_with_size`
-  et al.) clamp, the deserializers do not. Decide whether prani validates its own
-  serialized output, then apply it uniformly to all four codecs.
-- **F11 — NaN propagation.** `f64_clamp` returns NaN for a NaN input (measured;
-  both comparisons are false), so a NaN `sample_rate`, `duration`, `velocity` or
-  `distance` passes every clamp in the tree. Bounded today rather than open —
-  `f64_to(NaN)` saturates to i64::MIN, so affected loop bounds go negative and
-  simply do not run, and ADR-0001's guard rejects a NaN sample rate outright —
-  but the result is a silent empty buffer where an error code belongs.
-- **F10 — chorus length overflow.** `base_samples + max_offset_samples * 2`
-  overflows i64 at a `timing_spread` around 1e14 seconds.
-
-**Done when**: every public entry point rejects non-finite and out-of-range
-numeric input with a `PRANI_ERR_*` instead of returning empty or NaN, with the
-range for each parameter written down; `tests/hardening.tcyr` grows a group per
-entry point.
-
 ### 2.0.6 — Runnable examples
 
 **Source**: `CLAUDE.md` advertises *"[`docs/examples/`](../examples/) — Runnable

@@ -126,19 +126,70 @@ fn emotion_set(self, valence, arousal) {
     PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
 }
 
+# ================================================================
+# Input-range guards (2.0.5; audit finding F11).
+#
+# Every setter in this module clamps, and f64_clamp(NaN, lo, hi) -> NaN
+# (measured, pinned in tests/error.tcyr), so a NaN valence/arousal/smoothing
+# passes every clamp here and is STORED. Nothing downstream notices: the zone
+# classifiers below compare NaN against their bounds, both comparisons are
+# false, and the state silently reads as Neutral/Mid while evaluate() hands a
+# NaN vocal_effort, pitch_scale and breathiness_delta to whatever drives
+# synthesis. That is a fabricated plausible answer -- exactly what ADR-0001
+# rejected -- with no way for the caller to tell.
+#
+# with_values / with_smoothing / set / update return the struct or nothing, so
+# they have no error channel and are left alone (the constructor contract is
+# roadmap 2.1.0). The guard therefore sits at the point of USE: every function
+# here that already returns "value or negative code" -- the two zone
+# classifiers, the two selectors, evaluate -- checks the state before deriving
+# anything from it. That covers every way a bad value can arrive (a clamped
+# NaN, a raw PrEmotion_set_*, a PrEmotion_from_json_str document) with no
+# signature change.
+#
+# Ranges, as documented on PrEmotion above and already enforced by its clamps:
+#   valence    [-1.0, 1.0 ]   PRE_NEG_1_0 .. PRE_1_0
+#   arousal    [ 0.0, 1.0 ]   PRE_0_0     .. PRE_1_0
+#   smoothing  [ 0.0, 0.95]   PRE_0_0     .. PRE_0_95
+# These are the module's own clamp bounds, not new numbers, and the test is
+# EXACT (no tolerance) because nothing this module produces can land outside
+# them: update() is a convex blend of two in-range values, and 748800 update
+# steps -- smoothing k/64 for k = 0..64, a 9x5 grid of start states, all four
+# target corners, 64 steps each -- never left [-1,1] x [0,1], landing exactly on
+# +/-1.0, 0.0 and 1.0 at the extremes (measured 2026-08-31, pinned in
+# tests/emotion.tcyr). Out-of-range values reach a PrEmotion only through
+# PrEmotion_from_json_str (derive-generated, so unguardable from here) or a raw
+# PrEmotion_set_* -- i.e. only from a document prani did not write.
+#
+# All five sites report PRANI_ERR_INVALID_VOCALIZATION: everything this module
+# produces is a Vocalization, a CallIntent, or their modulation, and the
+# oracle's PraniError::InvalidVocalization is "a vocalization parameter is
+# invalid".
+#
+# DIVERGENCE from rust-old: EmotionState::evaluate() returns EmotionOutput, not
+# Result, and the oracle stores a NaN just as happily (Rust's f32::clamp
+# propagates NaN) while serde's derived Deserialize accepts any float for any
+# field. Rejecting is deliberate, and the same call the port already made in
+# ADR-0001 for crtract_new: report the failure, never fabricate an answer.
+# ================================================================
+
 # valence_zone(self) -- Negative if valence < -0.2, Positive if > 0.2, else Neutral.
+# PRANI_ERR_INVALID_VOCALIZATION if valence is not in [-1.0, 1.0] (NaN included).
 #must_use
 fn emotion_valence_zone(self) {
     var v = PrEmotion_valence(self);
+    if (prani_in_range(v, PRE_NEG_1_0, PRE_1_0) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (f64_lt(v, PRE_NEG_0_2)) { return PRE_VZ_NEGATIVE; }
     if (f64_gt(v, PRE_0_2))     { return PRE_VZ_POSITIVE; }
     return PRE_VZ_NEUTRAL;
 }
 
 # arousal_zone(self) -- Low if arousal < 0.33, High if > 0.66, else Mid.
+# PRANI_ERR_INVALID_VOCALIZATION if arousal is not in [0.0, 1.0] (NaN included).
 #must_use
 fn emotion_arousal_zone(self) {
     var a = PrEmotion_arousal(self);
+    if (prani_in_range(a, PRE_0_0, PRE_1_0) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (f64_lt(a, PRE_0_33)) { return PRE_AZ_LOW; }
     if (f64_gt(a, PRE_0_66)) { return PRE_AZ_HIGH; }
     return PRE_AZ_MID;
@@ -146,10 +197,15 @@ fn emotion_arousal_zone(self) {
 
 # select_vocalization(self) -- most appropriate Vocalization for the current
 # (valence_zone, arousal_zone). Verbatim from the Rust match arms.
+# PRANI_ERR_INVALID_VOCALIZATION if valence or arousal is out of range: the two
+# zone calls range-check the field each one reads, so their code propagates
+# rather than being re-tested here.
 #must_use
 fn emotion_select_vocalization(self) {
     var vz = emotion_valence_zone(self);
+    if (prani_is_err(vz) == 1) { return vz; }
     var az = emotion_arousal_zone(self);
+    if (prani_is_err(az) == 1) { return az; }
     var v = PrEmotion_valence(self);
 
     # High arousal, negative valence -> alarm/threat sounds
@@ -180,10 +236,14 @@ fn emotion_select_vocalization(self) {
 
 # select_intent(self) -- CallIntent for the current (valence_zone, arousal_zone).
 # Verbatim from the Rust match arms.
+# PRANI_ERR_INVALID_VOCALIZATION if valence or arousal is out of range (same
+# propagation as select_vocalization above).
 #must_use
 fn emotion_select_intent(self) {
     var vz = emotion_valence_zone(self);
+    if (prani_is_err(vz) == 1) { return vz; }
     var az = emotion_arousal_zone(self);
+    if (prani_is_err(az) == 1) { return az; }
     var v = PrEmotion_valence(self);
 
     if (vz == PRE_VZ_NEGATIVE) {
@@ -230,12 +290,32 @@ struct PrEmotionOut {
 }
 
 # evaluate(self) -- core mapping from the 2D emotion space to concrete
-# vocalization choices and parameter values. Returns a fresh PrEmotionOut.
+# vocalization choices and parameter values. Returns a fresh PrEmotionOut, or
+# PRANI_ERR_INVALID_VOCALIZATION if the state is out of contract.
+#
+# This is the module's outermost entry point -- the one a PrEmotion that came
+# from PrEmotion_from_json_str reaches -- so it checks all THREE fields, not
+# just the two it reads. smoothing does not affect the output, but a smoothing
+# outside [0.0, 0.95] cannot have come from with_smoothing (which clamps), only
+# from a foreign document, and it turns update() from a convex blend into a
+# divergence (s = 3.0 gives v' = 3v - 2*tv): the state is then guaranteed to
+# leave contract on the next tick. Reporting it at the one checkable point
+# beats letting it surface a tick later as an out-of-range valence.
+#
+# Validation happens BEFORE the allocation: a rejected state costs no arena.
 #must_use
 fn emotion_evaluate(self) {
+    if (prani_in_range(PrEmotion_smoothing(self), PRE_0_0, PRE_0_95) == 0) {
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
+    var voc = emotion_select_vocalization(self);
+    if (prani_is_err(voc) == 1) { return voc; }
+    var intent = emotion_select_intent(self);
+    if (prani_is_err(intent) == 1) { return intent; }
+
     var out = alloc(sizeof(PrEmotionOut));
-    PrEmotionOut_set_vocalization(out, emotion_select_vocalization(self));
-    PrEmotionOut_set_intent(out, emotion_select_intent(self));
+    PrEmotionOut_set_vocalization(out, voc);
+    PrEmotionOut_set_intent(out, intent);
 
     var arousal = PrEmotion_arousal(self);
     var valence = PrEmotion_valence(self);

@@ -5,6 +5,118 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.5] - Input-range validation, and a crash in the whole low-sample-rate band
+
+Closes [ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)'s deferral
+and audit findings **F10** and **F11**. Suite **1219 → 1894 assertions / 17
+suites**, `cyrius audit` exit 0. **109 guards across 11 modules**, with the
+accepted range of every numeric parameter written down in
+[`docs/architecture/input-ranges.md`](docs/architecture/input-ranges.md) —
+something the library never had.
+
+### Fixed — CRITICAL: every sample rate in (1000, 7500] aborted the process
+
+⭐ **The headline, and it was not prani's bug.** `crvoice_vocalize(voice, HOWL,
+4000.0, …)` — an ordinary low sample rate, reachable from
+`prani_ffi_stream_start` where a host passes the rate straight in — **killed the
+process**. Bisected: 1000 rejected cleanly, **1001–7500 aborted**, 7501+ fine.
+
+`crtract_new` was doing everything right. It checked `svara_tract_new`'s return
+exactly as [ADR-0001](docs/adr/0001-check-svara-tract-constructor.md) requires,
+and the return was a **valid pointer** — the tract simply could not survive its
+own next call, for two independent reasons inside svara:
+
+1. Every svara vowel target carries F5 = 3750 Hz, so at or below 7500 Hz svara
+   fell back to a **single** 500 Hz formant and stored that one-element vec as
+   the tract's record — then wrote five formants into it.
+2. `svara_tract_new` stored two **unchecked naad error codes as filter
+   pointers**; its fixed 600 Hz subglottal bandpass needs a rate above 1200 Hz.
+
+Both are repaired in **svara 3.5.4**, found from here and fixed there rather than
+worked around: a prani-side floor would have left the defect live for every other
+svara consumer *and* rejected rates that actually work. prani bumps its pin
+3.5.3 → 3.5.4 and adds an **F12** group to `tests/hardening.tcyr` that aborts on
+the old tree.
+
+**The working range widened.** 1201–7500 Hz never worked and now renders, via the
+warn-then-continue path — which is the oracle's own semantics, so parity improves.
+
+This is ADR-0001's lesson one level deeper. That ADR made the *constructor's*
+return checkable; here a **later** call aborted instead of returning a code, and
+no amount of checking at the constructor could see it coming.
+
+### Fixed — HIGH: NaN was rendered as audio and returned as success
+
+`f64_clamp(NaN, lo, hi)` is NaN — both comparisons are false — so a NaN passed
+every clamp in the tree. The audit filed this as *"a silent empty buffer where an
+error code belongs"*. Measured, the worst case is considerably worse:
+
+> `crvoice_vocalize` on a **syringeal, stridulatory or vibratile** species
+> returned a **full-length, all-NaN buffer as a success**. A host plays that.
+
+It hid because the species you reach for first is the one that reports: on a
+**laryngeal** species svara refuses the NaN f0 and it surfaces as an error.
+
+Two of the audit's own notes were wrong and are corrected, both now pinned as
+assertions in `tests/error.tcyr`: **infinities *are* bounded by `f64_clamp`** (so
+the clamp-site hazard is NaN specifically), and **all three** non-finite values
+convert to i64::MIN — not just NaN, and not saturating high.
+
+### Fixed — F10: the chorus allocation, understated by eight orders of magnitude
+
+The audit filed `base_samples + max_offset_samples * 2` as an i64 overflow at a
+`timing_spread` around 1e14 seconds. Measured, a spread of **1e6 seconds** —
+11.6 days, eight orders of magnitude below that — already demands over **700 GB**.
+The reachable failure was arena exhaustion; a guard against the overflow alone
+would have missed nearly the whole range. Separately, a NaN spread gave i64::MIN
+and `i64::MIN * 2` **wraps to 0**, so the chorus quietly returned a
+correct-length buffer — a silent *success*, not the silent-empty on file.
+
+### Fixed — three more live crashes
+
+- `crvoice_apply_nasal_antiformant`: `nasal_len = f64_to(len * nasal_fraction)`
+  with no `min(len)` clamp — a fraction above 1.0 indexed past the buffer and
+  terminated the process.
+- `preset_from_json_str`: `str_data(bayan_json_v_str(…))` on a missing or
+  non-string `name` dereferenced address 0.
+- Five functions documented *"never fails"* became fallible, and **every in-tree
+  call site was audited**: `crtract_synthesize_purr`'s two callers used the
+  result as a pointer (`vec_len` on a negative code), and four `crvoice_apply_*`
+  post-processing steps **discarded** their returns, silently leaving a buffer
+  un-post-processed and returning it as success. All now propagate — their
+  arguments cannot fail today, but "the caller already proved it" is exactly the
+  assumption ADR-0001 was written about.
+
+### Fixed — ADR-0002's deferral: deserializers reject nonsense that parses
+
+All four hand-written codecs now range-check every field. A document with
+`size_scale` 0 (it divides in `effective_f0`), a species tag out of range, or
+`f0_min > f0_max` is rejected instead of producing a struct. prani's own
+`to_json` output always satisfies the ranges — asserted as a control, because a
+guard that rejected prani's own documents would be a worse bug than the one it
+fixed.
+
+### Filed upstream — `#derive(Serialize)`'s generated deserializer
+
+Five of prani's codecs are **generated**, and the generated
+`<Name>_from_json_str` opens with `load8(json + _p)` and no null guard, so
+`X_from_json_str(0)` SIGSEGVs in any Cyrius project, and malformed input returns
+the `memset`-zeroed struct as success — ADR-0002's exact defect, in codecs
+ADR-0002 could not reach because they are emitted rather than written. Filed as a
+cycc issue with a reproducer; not fixable from prani.
+
+Found alongside it: **`cyrius test` reports `1 passed, 0 failed` for a `.tcyr`
+whose process dies of SIGSEGV**, which is why these survived both the 2.0.3 sweep
+and the 2.0.4 parity audit.
+
+### Deferred — the builders, to 2.1.0
+
+The 7 `crvoice_with_*` builders return `self` with no error channel, so rejecting
+a NaN there is an API break. Roadmap 2.1.0 must already put a fallible return on
+every constructor for the allocation contract, so the signature change happens
+once, there. Until then a NaN smuggled in through a builder is caught at the
+**point of use**. Written down rather than left to be rediscovered.
+
 ## [2.0.4] - Parity re-verification: the oracle's tests, not just its source
 
 The port was verified module-by-module against `rust-old/`'s **source**. It had

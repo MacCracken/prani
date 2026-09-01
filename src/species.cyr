@@ -134,6 +134,33 @@ var PR_SEED_DRAGON      = 4739032052804616193;
 var PR_SEED_FANTASY     = 3551275586278653953;
 
 # ================================================================
+# Input ranges (roadmap 2.0.5; audit finding F11). Every bound below is either
+# transcribed from the oracle's own doc comments on `struct SpeciesParams`
+# (git show 2.0.3:rust-old/src/species.rs:70-101 -- "Default breathiness
+# (0.0-1.0)", "Default jitter (0.0-0.05)", "Default shimmer (0.0-0.1)") or
+# derived from the 13-row table in species_params_into below. The whole table
+# and every builder-clamped mutation of it satisfy these by construction, so the
+# ranges only ever reject a document prani did NOT write.
+#
+# The two magnitude ceilings that are NOT in the oracle:
+#   PR_SP_F0_MAX / PR_SP_FORMANT_MAX / PR_SP_BW_MAX = 20000 Hz -- the top of the
+#     audio band. The table's widest is 13500 Hz (cricket F3), so this is ~1.5x
+#     headroom over anything prani ships, and above it no partial survives any
+#     sample rate prani runs at.
+#   PR_SP_TRACT_MAX = 100 -- 100x the human-male reference tract. The table's
+#     longest is 3.0 (dragon), so ~33x headroom.
+# Both are deliberately loose: their job is to bound nonsense, not to second-
+# guess a host that configures a Fantasy creature.
+# ================================================================
+var PR_SP_F0_MAX      = 0x40d3880000000000;   # 20000.0 Hz
+var PR_SP_FORMANT_MAX = 0x40d3880000000000;   # 20000.0 Hz
+var PR_SP_BW_MAX      = 0x40d3880000000000;   # 20000.0 Hz
+var PR_SP_TRACT_MAX   = 0x4059000000000000;   # 100.0 x human-male reference
+var PR_SP_BREATH_MAX  = 0x3ff0000000000000;   # 1.0
+var PR_SP_JITTER_MAX  = 0x3fa999999999999a;   # 0.05  (== voice.cyr PR_V_0_05)
+var PR_SP_SHIMMER_MAX = 0x3fb999999999999a;   # 0.1   (== voice.cyr PR_V_0_1)
+
+# ================================================================
 # SpeciesParams -- species-specific vocal parameters. The Rust `formants: [f32;3]`
 # and `bandwidths: [f32;3]` fixed arrays become the three formant0..2 /
 # bandwidth0..2 scalar fields (direct parity with the fixed arrays).
@@ -404,11 +431,100 @@ fn species_bout_template(species) {
     return sequence_call_bout_new(PRANI_VOC_GROWL, 3, f64_from(1), f64_from(1), PRANI_INTENT_IDLE);
 }
 
+# ================================================================
+# Range validation (roadmap 2.0.5). See the PR_SP_*_MAX block at file top for
+# where each bound comes from.
+# ================================================================
+
+# species_range_positive(x, hi) -- 1 iff x is finite, strictly > 0, and <= hi.
+# tract_scale, the three formants and the three bandwidths are all geometry of a
+# physical tube: 0 and negative are not small values, they are no tube at all
+# (and a zero bandwidth is an infinite-Q pole, i.e. an unstable resonator).
+#must_use
+fn species_range_positive(x, hi) {
+    if (prani_is_positive(x) == 0) { return 0; }
+    return f64_le(x, hi);
+}
+
+# species_params_in_range(p) -- 1 iff every field of `p` is inside its documented
+# range, 0 otherwise. Split from species_params_validate so the predicate and the
+# error code stay separate (there is no generic "bad parameter" code; the caller
+# picks by category). A p of 0 or a negative PRANI_ERR_* passed in by mistake is
+# rejected rather than dereferenced, so
+#   species_params_validate(species_params_from_node(node))
+# is safe even when from_node itself failed.
+#must_use
+fn species_params_in_range(p) {
+    if (p <= 0) { return 0; }
+    var app = SpeciesParams_apparatus(p);
+    if (app < PRANI_APP_LARYNGEAL) { return 0; }
+    if (app > PRANI_APP_NOISE_ONLY) { return 0; }
+
+    # f0: non-negative Hz (snake is legitimately 0/0/0), ordered min <= default
+    # <= max. The ordering matters on its own: f64_clamp with lo > hi returns lo
+    # (measured), so an inverted pair silently pins every request to f0_min --
+    # where the oracle's f32::clamp panics on min > max instead.
+    var f0_min = SpeciesParams_f0_min(p);
+    var f0_max = SpeciesParams_f0_max(p);
+    var f0_def = SpeciesParams_f0_default(p);
+    if (prani_in_range(f0_min, 0, PR_SP_F0_MAX) == 0) { return 0; }
+    if (prani_in_range(f0_max, 0, PR_SP_F0_MAX) == 0) { return 0; }
+    if (prani_in_range(f0_def, 0, PR_SP_F0_MAX) == 0) { return 0; }
+    if (f64_le(f0_min, f0_def) == 0) { return 0; }
+    if (f64_le(f0_def, f0_max) == 0) { return 0; }
+
+    if (species_range_positive(SpeciesParams_tract_scale(p), PR_SP_TRACT_MAX) == 0) { return 0; }
+
+    if (species_range_positive(SpeciesParams_formant0(p), PR_SP_FORMANT_MAX) == 0) { return 0; }
+    if (species_range_positive(SpeciesParams_formant1(p), PR_SP_FORMANT_MAX) == 0) { return 0; }
+    if (species_range_positive(SpeciesParams_formant2(p), PR_SP_FORMANT_MAX) == 0) { return 0; }
+    if (species_range_positive(SpeciesParams_bandwidth0(p), PR_SP_BW_MAX) == 0) { return 0; }
+    if (species_range_positive(SpeciesParams_bandwidth1(p), PR_SP_BW_MAX) == 0) { return 0; }
+    if (species_range_positive(SpeciesParams_bandwidth2(p), PR_SP_BW_MAX) == 0) { return 0; }
+
+    if (prani_in_range(SpeciesParams_breathiness(p), 0, PR_SP_BREATH_MAX) == 0) { return 0; }
+    if (prani_in_range(SpeciesParams_jitter(p), 0, PR_SP_JITTER_MAX) == 0) { return 0; }
+    if (prani_in_range(SpeciesParams_shimmer(p), 0, PR_SP_SHIMMER_MAX) == 0) { return 0; }
+
+    # spectral_tilt: FINITE ONLY, deliberately unbounded in magnitude. Its sole
+    # consumer is crtract_apply_spectral_tilt, which computes
+    # f64_clamp(-tilt/12, 0, 0.85) -- already saturating for every finite input,
+    # so a huge tilt is harmless and only NaN reaches the coefficient (F11).
+    if (prani_is_finite(SpeciesParams_spectral_tilt(p)) == 0) { return 0; }
+
+    # resonance_seed is NOT range-checked: it is a PCG seed, and every one of the
+    # 2^64 bit patterns is a legal seed (the table itself carries negative ones).
+    return 1;
+}
+
+# species_params_validate(p) -- PRANI_ERR_NONE if every field of `p` is in range,
+# PRANI_ERR_INVALID_SPECIES otherwise. The category code is the oracle's
+# `PraniError::InvalidSpecies` ("species configuration invalid"), which is what a
+# SpeciesParams carrying nonsense is.
+#must_use
+fn species_params_validate(p) {
+    if (species_params_in_range(p) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    return PRANI_ERR_NONE;
+}
+
 # species_params_from_node -- rebuild a SpeciesParams from a parsed bayan JSON
 # object node (all 16 fields are i64: enum consts / f64 bit patterns). Shared by
 # the nested-serde reconstruction in voice.cyr (CreatureVoice) and tract.cyr
 # (CreatureTract), which embed a SpeciesParams as a sub-object. (SpeciesParams_
 # from_json_str parses a top-level string; this reads an already-parsed node.)
+#
+# RETURN CONTRACT (roadmap 2.0.5): the SpeciesParams pointer, or a NEGATIVE
+# PRANI_ERR_INVALID_SPECIES when any field is out of range. This extends
+# ADR-0002 ("report the failure, never fabricate") from "the document did not
+# parse" to "the document parsed and carries nonsense": bayan's accessors are
+# null-safe, so an absent `params` key or an absent field reads back as 0, and an
+# all-zero SpeciesParams has tract_scale 0.0 -- no vocal tract at all.
+#
+# CALLERS MUST CHECK prani_is_err BEFORE USING THE RESULT AS A POINTER. The two
+# call sites are crvoice_from_json_str (voice.cyr) and crtract_from_json_str
+# (tract.cyr); the latter feeds it straight to crtract_new, which dereferences
+# it. species_params_validate rejects a negative p rather than dereferencing it,
+# so validating the result again is also safe.
 #must_use
 fn species_params_from_node(node) {
     var p = alloc(sizeof(SpeciesParams));
@@ -428,5 +544,6 @@ fn species_params_from_node(node) {
     SpeciesParams_set_shimmer(p, bayan_json_v_int(bayan_json_v_obj_get(node, "shimmer")));
     SpeciesParams_set_spectral_tilt(p, bayan_json_v_int(bayan_json_v_obj_get(node, "spectral_tilt")));
     SpeciesParams_set_resonance_seed(p, bayan_json_v_int(bayan_json_v_obj_get(node, "resonance_seed")));
+    if (species_params_in_range(p) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     return p;
 }

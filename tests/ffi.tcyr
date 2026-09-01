@@ -14,6 +14,26 @@
 # confirm they never crash. fill_buffer accounting + is_finished flip are checked
 # through the ffi surface; the sample values themselves are svara-dependent and
 # covered structurally (finite) in stream.tcyr.
+#
+# INPUT RANGES (2.0.5, audit finding F11): ffi is THE untrusted boundary -- a C
+# host passes these f64s directly with no type safety -- so the last seven groups
+# pin the range contract of every numeric entry point. Two shapes, matching the
+# two return conventions the surface already uses:
+#
+#   * the RTPC setters return a constant 0 and have no error channel, so
+#     "rejected" is asserted as THE VOICE DID NOT CHANGE -- read back through
+#     crvoice_vocal_effort / CreatureVoice_size_scale / crvoice_effective_f0;
+#   * stream_start returns handle-or-0 and stream_fill returns a count, so
+#     "rejected" is asserted as 0, which is what each already returns on a null
+#     handle.
+#
+# Three of the groups exist to prove the guards did NOT overreach, and they are
+# as load-bearing as the rejections: a finite out-of-range effort still CLAMPS
+# (the oracle's RTPC saturation), a ZERO duration is still VALID and still yields
+# an empty buffer rather than an error (the oracle's test_zero_duration_synthesis),
+# and a finite 999 Hz sample rate still starts a stream that svara rejects at the
+# first fill (ADR-0001 leaves the floor with svara; ADR-0003 reports 0 and
+# retires). Those three are the parity edge of this milestone.
 
 include "lib/hisab.cyr"
 include "lib/goonj.cyr"
@@ -39,6 +59,13 @@ var T_0_9      = 0x3feccccccccccccd;   # 0.9  effort (in range, passes through)
 var T_1_5      = 0x3ff8000000000000;   # 1.5  effort (out of range -> clamps to 1.0)
 var T_1_0      = 0x3ff0000000000000;   # 1.0  effort clamp ceiling
 var T_60       = 0x404e000000000000;   # 60.0 dB SPL ambient (Lombard test)
+
+# ---- 2.0.5 range-guard constants -------------------------------------------
+var T_NAN      = 0x7ff8000000000000;   # NaN -- the value that walks every clamp
+var T_0_0      = 0;                    # +0.0 (valid duration, invalid rate)
+var T_999      = 0x408f380000000000;   # 999.0 Hz -- finite, positive, under svara's floor
+var T_DUR_NEG  = 0xbff0000000000000;   # -1.0 s duration (rejected -- divergence)
+var T_SR_NEG   = 0xc0e5888000000000;   # -44100.0 sample rate (rejected)
 
 alloc_init();
 
@@ -152,6 +179,131 @@ prani_ffi_voice_destroy(vs);
 prani_ffi_stream_destroy(0);
 prani_ffi_stream_destroy(st);
 assert_eq(1, 1, "destroy no-ops completed without crashing");
+
+# ================================================================
+test_group("voice_set_effort -- non-finite rejected, finite clamp preserved");
+# NaN is the live defect: f64_clamp(NaN, 0, 1) -> NaN, so before the guard a
+# single bad RTPC frame left vocal_effort NaN and every later synthesis on this
+# voice produced NaN samples with nothing reporting an error. The setter has no
+# error channel (it returns a constant 0), so "rejected" is asserted as the voice
+# being byte-for-byte what the last accepted call left it.
+var vnf = prani_ffi_voice_create(PRANI_SP_WOLF);
+prani_ffi_voice_set_effort(vnf, T_0_9);
+assert_eq(crvoice_vocal_effort(vnf), T_0_9, "baseline: finite 0.9 accepted");
+prani_ffi_voice_set_effort(vnf, T_NAN);
+assert_eq(crvoice_vocal_effort(vnf), T_0_9, "set_effort(NaN) rejected -- effort unchanged");
+assert_eq(prani_is_finite(crvoice_vocal_effort(vnf)), 1, "effort still finite after a NaN frame");
+prani_ffi_voice_set_effort(vnf, PRANI_POS_INF);
+assert_eq(crvoice_vocal_effort(vnf), T_0_9, "set_effort(+inf) rejected -- effort unchanged");
+prani_ffi_voice_set_effort(vnf, PRANI_NEG_INF);
+assert_eq(crvoice_vocal_effort(vnf), T_0_9, "set_effort(-inf) rejected -- effort unchanged");
+# NOT overreach: a FINITE out-of-range effort still saturates, as the oracle's
+# set_vocal_effort does. Rejecting that instead is 2.1.0's constructor contract.
+prani_ffi_voice_set_effort(vnf, T_1_5);
+assert_eq(crvoice_vocal_effort(vnf), T_1_0, "finite 1.5 still clamps to 1.0 (not rejected)");
+
+# ================================================================
+test_group("voice_set_size -- non-finite rejected before the reset");
+# The worst of the three: size_scale is crvoice_effective_f0's DIVISOR, so a NaN
+# here poisons f0 for every later vocalization. The guard also has to run before
+# crvoice_reset_individual, or a rejected call would still have wiped the voice's
+# individual fields on its way out.
+var vsz = prani_ffi_voice_create(PRANI_SP_WOLF);
+prani_ffi_voice_set_size(vsz, T_1_5);
+prani_ffi_voice_set_effort(vsz, T_0_9);
+var f0_before = crvoice_effective_f0(vsz);
+prani_ffi_voice_set_size(vsz, T_NAN);
+assert_eq(CreatureVoice_size_scale(vsz), T_1_5, "set_size(NaN) rejected -- size_scale unchanged");
+assert_eq(prani_is_finite(crvoice_effective_f0(vsz)), 1, "effective_f0 still finite (NaN divisor averted)");
+assert_eq(crvoice_effective_f0(vsz), f0_before, "effective_f0 unchanged by the rejected call");
+assert_eq(crvoice_vocal_effort(vsz), T_0_9, "rejected set_size did not wipe effort (guard precedes reset)");
+prani_ffi_voice_set_size(vsz, PRANI_POS_INF);
+assert_eq(CreatureVoice_size_scale(vsz), T_1_5, "set_size(+inf) rejected -- size_scale unchanged");
+prani_ffi_voice_set_size(vsz, PRANI_NEG_INF);
+assert_eq(CreatureVoice_size_scale(vsz), T_1_5, "set_size(-inf) rejected -- size_scale unchanged");
+
+# ================================================================
+test_group("voice_apply_lombard -- non-finite ambient rejected");
+# bridge_lombard_effort_boost(NaN) is NaN (the <= 40 dB early-out is false for
+# NaN and the [0, 0.5] clamp passes it), so the additive update stored NaN.
+var vlb = prani_ffi_voice_create(PRANI_SP_WOLF);
+prani_ffi_voice_set_effort(vlb, T_0_9);
+prani_ffi_voice_apply_lombard(vlb, T_NAN);
+assert_eq(crvoice_vocal_effort(vlb), T_0_9, "apply_lombard(NaN) rejected -- effort unchanged");
+assert_eq(prani_is_finite(crvoice_vocal_effort(vlb)), 1, "effort still finite after a NaN ambient reading");
+prani_ffi_voice_apply_lombard(vlb, PRANI_POS_INF);
+assert_eq(crvoice_vocal_effort(vlb), T_0_9, "apply_lombard(+inf) rejected -- effort unchanged");
+prani_ffi_voice_apply_lombard(vlb, PRANI_NEG_INF);
+assert_eq(crvoice_vocal_effort(vlb), T_0_9, "apply_lombard(-inf) rejected -- effort unchanged");
+# NOT overreach: any FINITE dB SPL is still accepted -- the boost is total over
+# the finite reals, so there is no out-of-range dB value to reject.
+prani_ffi_voice_apply_lombard(vlb, T_60);
+assert_eq(f64_ge(crvoice_vocal_effort(vlb), T_0_9), 1, "finite 60 dB still raises (or holds) effort");
+
+# ================================================================
+test_group("stream_start -- sample_rate (0,inf) and duration [0,inf) ranges");
+# Unguarded, every one of these returned a NON-NULL handle to a stream born
+# retired: total_samples = f64_to(NaN) is i64::MIN and f64_to(0.0) is 0, so
+# samples_rendered >= total_samples on the first call. The host drained nothing
+# and no error was raised anywhere -- F11's silently-empty-buffer signature.
+# 0 (null) is already this function's documented error return.
+var vst = prani_ffi_voice_create(PRANI_SP_WOLF);
+assert_eq(prani_ffi_stream_start(vst, 0, 6, T_NAN, T_DUR_005), 0, "NaN sample_rate -> 0");
+assert_eq(prani_ffi_stream_start(vst, 0, 6, PRANI_POS_INF, T_DUR_005), 0, "+inf sample_rate -> 0");
+assert_eq(prani_ffi_stream_start(vst, 0, 6, PRANI_NEG_INF, T_DUR_005), 0, "-inf sample_rate -> 0");
+assert_eq(prani_ffi_stream_start(vst, 0, 6, T_0_0, T_DUR_005), 0, "0 Hz sample_rate -> 0");
+assert_eq(prani_ffi_stream_start(vst, 0, 6, T_SR_NEG, T_DUR_005), 0, "negative sample_rate -> 0");
+assert_eq(prani_ffi_stream_start(vst, 0, 6, T_SR, T_NAN), 0, "NaN duration -> 0");
+assert_eq(prani_ffi_stream_start(vst, 0, 6, T_SR, PRANI_POS_INF), 0, "+inf duration -> 0");
+# DIVERGENCE: the oracle's `as usize` cast saturated, folding every negative
+# duration into 0 and handing back a stream. i64 can represent the state, so the
+# port reports the caller's bug instead of absorbing it.
+assert_eq(prani_ffi_stream_start(vst, 0, 6, T_SR, T_DUR_NEG), 0, "negative duration -> 0 (divergence)");
+
+# ================================================================
+test_group("stream_start -- ZERO duration stays valid (oracle parity)");
+# rust-old's test_zero_duration_synthesis asserts an EMPTY BUFFER, NOT AN ERROR,
+# so a zero-length request is a legal thing to ask for. The guard is
+# prani_is_non_negative, not prani_is_positive, exactly to keep this.
+var st_zero = prani_ffi_stream_start(vst, 0, 6, T_SR, T_0_0);
+assert_neq(st_zero, 0, "zero duration is VALID -- still returns a handle");
+assert_eq(stream_total_samples(st_zero), 0, "zero duration -> 0 total samples");
+assert_eq(prani_ffi_stream_is_finished(st_zero), 1, "zero-duration stream is immediately finished");
+var zbuf = vec_new();
+var zi = 0;
+while (zi < 32) { vec_push(zbuf, 0); zi = zi + 1; }
+assert_eq(prani_ffi_stream_fill(st_zero, zbuf, 32), 0, "zero-duration fill writes 0 -- empty buffer, not an error");
+
+# ================================================================
+test_group("stream_start -- svara's rate floor stays svara's (ADR-0001/0003)");
+# 999 Hz is finite and positive, so this guard passes it through: prani does not
+# restate svara's ~1000 Hz threshold (ADR-0001 rejected duplicating it). The
+# rejection surfaces at the FIRST FILL, which reports 0 written and retires the
+# stream (ADR-0003). This group is here so the range guard above can never
+# quietly swallow that path.
+var st_low = prani_ffi_stream_start(vst, 0, 6, T_999, T_1_0);
+assert_neq(st_low, 0, "999 Hz passes stream_start -- the floor is svara's rule");
+assert_eq(prani_ffi_stream_is_finished(st_low), 0, "sub-threshold stream starts unfinished");
+var lbuf = vec_new();
+var li = 0;
+while (li < 64) { vec_push(lbuf, 0); li = li + 1; }
+assert_eq(prani_ffi_stream_fill(st_low, lbuf, 64), 0, "first fill reports 0 written (svara rejects the rate)");
+assert_eq(prani_ffi_stream_is_finished(st_low), 1, "and retires the stream (ADR-0003)");
+
+# ================================================================
+test_group("stream_fill -- buffer_len >= 0 range");
+# The oracle's buffer_len was u32, so this state was unrepresentable; the port
+# widened it to i64 and the old `buffer_len == 0` test let a negative straight
+# through to a full-vec fill. Measured before the guard: buffer_len = -1 on a
+# 2205-element vec wrote and reported 2205 samples.
+var st_bl = prani_ffi_stream_start(prani_ffi_voice_create(PRANI_SP_WOLF), 0, 6, T_SR, T_DUR_005);
+var blbuf = vec_new();
+var bl = 0;
+while (bl < 2205) { vec_push(blbuf, 0); bl = bl + 1; }
+assert_eq(prani_ffi_stream_fill(st_bl, blbuf, (0 - 1)), 0, "negative buffer_len -> 0 written");
+assert_eq(stream_samples_rendered(st_bl), 0, "rejected fill did not advance the stream");
+assert_eq(prani_ffi_stream_is_finished(st_bl), 0, "caller mistake does not retire the stream (ADR-0003)");
+assert_eq(prani_ffi_stream_fill(st_bl, blbuf, 2205), 2205, "a corrected buffer_len still drains it");
 
 var rc = assert_summary();
 syscall(60, rc);

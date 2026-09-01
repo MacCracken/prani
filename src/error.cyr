@@ -70,3 +70,63 @@ fn prani_from_svara(svara_code) {
 fn prani_is_finite(x) {
     return f64_lt(f64_abs(x), PRANI_POS_INF);
 }
+
+# ================================================================
+# Input-range guards (2.0.5). Why these exist, measured 2026-08-31:
+#
+#   f64_clamp(NaN, lo, hi) -> NaN          NaN passes every clamp in the tree
+#   f64_clamp(+inf, lo, hi) -> hi          infinities ARE bounded by clamp
+#   f64_clamp(-inf, lo, hi) -> lo
+#   f64_to(NaN) == f64_to(+inf) == f64_to(-inf) == i64::MIN
+#
+# So the hazard at a clamp site is NaN specifically, not non-finiteness in
+# general -- and any loop bound derived from f64_to(non-finite) goes NEGATIVE,
+# which is why the observable symptom is a silently EMPTY buffer rather than a
+# crash or a runaway allocation. Audit finding F11.
+#
+# These return 1 for "acceptable" and 0 for "reject", so a call site reads
+#   if (prani_is_finite(x) == 0) { return PRANI_ERR_INVALID_TRACT; }
+# and the error code stays the caller's choice -- there is no generic
+# "bad parameter" code, deliberately: the oracle's five variants already carry
+# the range meaning by category (PraniError::InvalidTract is documented as
+# "a vocal tract parameter is out of valid range").
+# ================================================================
+
+# 1 iff both are finite.
+#must_use
+fn prani_finite2(a, b) {
+    if (prani_is_finite(a) == 0) { return 0; }
+    return prani_is_finite(b);
+}
+
+# 1 iff all three are finite.
+#must_use
+fn prani_finite3(a, b, c) {
+    if (prani_is_finite(a) == 0) { return 0; }
+    return prani_finite2(b, c);
+}
+
+# 1 iff x is finite and lo <= x <= hi. Rejects NaN (every comparison against
+# NaN is false, so the two f64_ge/f64_le tests both fail).
+#must_use
+fn prani_in_range(x, lo, hi) {
+    if (prani_is_finite(x) == 0) { return 0; }
+    if (f64_ge(x, lo) == 0) { return 0; }
+    return f64_le(x, hi);
+}
+
+# 1 iff x is finite and strictly greater than 0. The common case for a
+# duration, a sample rate, a distance or a scale factor used as a divisor.
+#must_use
+fn prani_is_positive(x) {
+    if (prani_is_finite(x) == 0) { return 0; }
+    return f64_gt(x, 0);
+}
+
+# 1 iff x is finite and >= 0 (a duration of exactly 0 is legal -- the oracle's
+# test_zero_duration_synthesis asserts an empty buffer, not an error).
+#must_use
+fn prani_is_non_negative(x) {
+    if (prani_is_finite(x) == 0) { return 0; }
+    return f64_ge(x, 0);
+}

@@ -4,8 +4,8 @@
 # lowpass) and Doppler pitch shift (linear-interpolated resampling).
 #
 # Requires (from the build/test unit): stdlib alloc/vec/math (F64_TAU,
-# f64_from, f64_clamp, f64_floor, f64_to) + error.cyr for the test include
-# ordering. The module file itself has no `include` lines.
+# f64_from, f64_clamp, f64_floor, f64_to) + error.cyr for PRANI_ERR_* and the
+# prani_is_* range helpers. The module file itself has no `include` lines.
 #
 # FLOATS: the Rust oracle was f32 throughout; the Cyrius port is f64. The
 # per-sample recurrences (alpha filter, interpolation) are therefore evaluated
@@ -14,6 +14,70 @@
 #
 # `&[f32]` sample buffers -> stdlib vec handles (f64 in each slot); both
 # functions build and return a NEW vec (Rust returned `Vec<f32>`).
+#
+# ================================================================
+# INPUT RANGES (2.0.5, audit finding F11). Both functions return "a vec handle
+# OR a negative PRANI_ERR_*", the convention the rest of the library already
+# uses -- no signature changed. Every rejection below is a value that today
+# produces a NaN buffer, a silently EMPTY buffer, silence, or a plausible-
+# looking answer for a different input; per ADR-0001 the library reports the
+# failure instead of fabricating one.
+#
+#   parameter          | accepted            | rejected with
+#   -------------------|---------------------|--------------------------------
+#   samples (both fns) | a live vec handle   | PRANI_ERR_INVALID_VOCALIZATION
+#   distance           | finite, >= 0        | PRANI_ERR_INVALID_VOCALIZATION
+#   reference_distance | finite, > 0         | PRANI_ERR_INVALID_VOCALIZATION
+#   sample_rate (att.) | finite, > 0, and    | PRANI_ERR_INVALID_TRACT
+#                      |   1/rate finite     |
+#   velocity           | any finite value    | PRANI_ERR_INVALID_VOCALIZATION
+#   _sample_rate (dop) | anything -- UNUSED  | (not guarded, see below)
+#
+# Codes are by category, not by module: a bad sample rate is
+# PRANI_ERR_INVALID_TRACT everywhere in prani (the oracle documents that
+# variant as "a vocal tract parameter is out of valid range"), and the spatial
+# placement of a vocalization buffer is PRANI_ERR_INVALID_VOCALIZATION.
+#
+# MEASURED, 2026-08-31 (these are what the guards rest on -- not conjecture):
+#   f64_max(NaN, b) -> b   and   f64_max(a, NaN) -> NaN
+#     (f64_max is `if (f64_gt(a,b)) a else b`, and every NaN compare is false)
+#   NaN distance           -> dist = reference -> output == the gain-1.0 result
+#   NaN reference_distance -> dist = NaN -> an all-NaN buffer
+#   negative distance      -> clamped up to reference -> full-volume audio
+#   +inf distance          -> gain 0 -> a digitally silent buffer
+#   reference_distance 0   -> gain 0 -> silence;  with distance 0 too: 0/0 = NaN
+#   negative reference     -> negative gain -> a phase-inverted buffer
+#   sample_rate 0 or NaN   -> dt = inf -> alpha = inf/inf = NaN -> NaN buffer
+#   negative sample_rate   -> alpha ~ 1.64 (> 1): an overshooting filter
+#   +inf sample_rate       -> alpha 0 -> a digitally silent buffer
+#   sample_rate 5e-324     -> dt overflows to +inf -> alpha NaN -> NaN buffer
+#   NaN velocity           -> ratio NaN -> out_len = f64_to(NaN) = i64::MIN
+#                             -> the loop never runs -> a silently EMPTY buffer
+#   +/-inf velocity        -> f64_clamp bounds them to +/-308.7 -- an infinite
+#                             velocity renders as 308.7 m/s (a fabricated
+#                             answer, NOT an overflow: infinities ARE clamped)
+#
+# NOT guarded, deliberately:
+#   * `_sample_rate` on the Doppler path. The oracle ignores it and so does
+#     this port; measured, a NaN there returns the same 15 finite samples as
+#     48000 does. A guard would reject input that provably cannot reach the
+#     output.
+#   * An upper bound on distance / reference_distance / sample_rate. Once the
+#     guards above hold, every derived value is finite by construction: the
+#     `max` floors dist at reference so gain = ref/dist is in (0, 1] and cannot
+#     overflow, and cutoff is floored at 200 Hz so rc <= 8e-4. Only 1/rate can
+#     overflow, and it is checked where it is computed.
+#   * |velocity| > 343 m/s. The oracle's +/-0.9c clamp is the MODEL, not a
+#     repair -- `tests/spatial.tcyr` locks v = +343 to a 15-sample result -- so
+#     supersonic velocities stay valid and saturate. See the trace on
+#     `spatial_apply_doppler_shift` for what the clamp is protecting.
+#
+# DELIBERATE DIVERGENCE from the oracle: a negative `distance`, a
+# non-positive `reference_distance` and a non-positive `sample_rate` were all
+# accepted by `rust-old/src/spatial.rs` (`git show 2.0.3:rust-old/src/spatial.rs`)
+# because f32 arithmetic gave each of them *some* buffer. None of those buffers
+# is the audio the caller asked for.
+# ================================================================
 
 # ================================================================
 # Float constants (IEEE-754 hex bit patterns; decimal in comment).
@@ -30,7 +94,8 @@ var PR_SP_0_9   = 0x3feccccccccccccd;   # 0.9    Doppler velocity clamp fraction
 #   distance           : meters source->listener (clamped to >= reference)
 #   reference_distance : meters at which gain == 1.0 (typically 1.0)
 #   sample_rate        : Hz
-# Returns a NEW vec of filtered samples (same length as `samples`).
+# Returns a NEW vec of filtered samples (same length as `samples`), or a
+# negative PRANI_ERR_* if an argument is out of the range in the header table.
 #
 # distance = max(distance, reference_distance)
 # gain     = reference_distance / distance
@@ -41,6 +106,17 @@ var PR_SP_0_9   = 0x3feccccccccccccd;   # 0.9    Doppler velocity clamp fraction
 # ================================================================
 #must_use
 fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sample_rate) {
+    # A null handle -- or an unchecked negative code chained in from a fallible
+    # call like crvoice_vocalize -- reaches vec_len as load64(v+8): a SIGSEGV,
+    # the same defect class ADR-0001 repaired in crtract_new.
+    if (samples < 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # distance 0 is VALID: it clamps up to reference, exactly as 0.5 does.
+    if (prani_is_non_negative(distance) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # reference_distance is the numerator of the gain and the floor under dist;
+    # at 0 the gain is 0 (silence) or, with distance 0 as well, 0/0 = NaN.
+    if (prani_is_positive(reference_distance) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+
     var dist = f64_max(distance, reference_distance);
     var gain = f64_div(reference_distance, dist);
 
@@ -50,6 +126,11 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
 
     var rc = f64_div(F64_ONE, f64_mul(F64_TAU, cutoff));
     var dt = f64_div(F64_ONE, sample_rate);
+    # `> 0` is not sufficient: a subnormal rate overflows the reciprocal
+    # (measured, 5e-324 -> dt = +inf -> alpha = inf/inf = NaN -> a NaN buffer).
+    # The bar is "1/sample_rate is finite", i.e. sample_rate >~ 5.6e-309;
+    # checking the quotient states that without hardcoding the exponent.
+    if (prani_is_finite(dt) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var alpha = f64_div(dt, f64_add(rc, dt));
 
     var output = vec_new();
@@ -75,7 +156,8 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
 #   samples      : input vec (f64 per slot); read-only, not mutated
 #   velocity     : radial m/s (positive = moving away, negative = approaching)
 #   _sample_rate : Hz -- UNUSED (kept for signature parity with the oracle)
-# Returns a NEW vec of length out_len = (len / ratio) truncated.
+# Returns a NEW vec of length out_len = (len / ratio) truncated, or a negative
+# PRANI_ERR_* if `samples` is not a handle or `velocity` is not finite.
 #
 # SPEED_OF_SOUND = 343
 # v     = clamp(velocity, -343*0.9, +343*0.9)
@@ -90,9 +172,31 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
 # Approaching (v<0) -> ratio>1 -> out_len < len (shorter, higher pitch).
 # Moving away (v>0) -> ratio<1 -> out_len > len (longer, lower pitch).
 # v == 0 -> ratio == 1 -> out_len == len (identity resample).
+#
+# AT AND BEYOND THE SPEED OF SOUND -- why `velocity` needs no range beyond
+# "finite" (traced, then measured on a 100-sample buffer):
+#   without the clamp, v = -343 makes `speed + v` exactly 0, so ratio = +inf
+#     and out_len = f64_to(100 / inf) = f64_to(0) = 0  -> an empty buffer;
+#   v < -343 makes `speed + v` negative, so ratio is negative and
+#     out_len = -45  -> negative, the loop never runs -> an empty buffer.
+#   The clamp runs FIRST and saturates every such velocity at -308.7, giving
+#     ratio = 9.999999999999996 and out_len = 10 -- measured identical for
+#     v = -308.7, -343, -1e6 and -inf. The singularity is unreachable.
+# So the clamp is the MODEL (Mach 0.9 saturation), not a repair, and every
+# finite velocity keeps ratio inside [0.5264, 10] -- which is what bounds
+# out_len at 1.9x the input (audit 2026-08-30, "What was clean").
 # ================================================================
 #must_use
 fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
+    # See spatial_apply_distance_attenuation for the handle guard.
+    if (samples < 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # NaN is the live defect: it survives the clamp, so out_len becomes
+    # i64::MIN and the caller gets an empty buffer instead of an error.
+    # +/-inf ARE clamped (measured) -- they are rejected because rendering an
+    # infinite velocity as 308.7 m/s is a fabricated answer, not because they
+    # would overflow anything.
+    if (prani_is_finite(velocity) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+
     var speed = f64_from(343);
     # clamp bounds computed as the port would: 343 * 0.9 (= 308.7), negated.
     var bound = f64_mul(speed, PR_SP_0_9);
