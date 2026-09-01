@@ -147,16 +147,25 @@ stays comparable; **do not renumber or reparameterise these.**
 |---|---|---|---|---|---|
 | `dcblocker_process` | **19 ns/sample** | 19 ns | 20 ns | 19 ns | Single-pole DC blocker on every synthesis buffer. |
 | `prani_rng_next_f32` | **14 ns/sample** | 14 ns | 14 ns | 15 ns | PCG32 draw (aspiration / jitter / shimmer). |
-| `emotion_evaluate` (per-frame) | **151 ns** | 69 ns | 70 ns | 83 ns | ⚠ 2.0.5's input-range guards; see below. |
+| `emotion_evaluate` (per-frame) | **118 ns** | 69 ns | 70 ns | 83 ns | 2.0.10 recovered 37 of the 82 ns 2.0.5's guards cost; the rest is guarded evaluation. |
 | `crvoice_vocalize` wolf howl 0.05 s @ 8 kHz | **~213 µs** | 211 µs | 214 µs | 227 µs | Cold call: builds a fresh voice each iteration. |
 
-⚠ **`emotion_evaluate` went 69 → 151 ns between 2.0.3 and 2.0.7** — a 2.2×
-regression, and the only Group A row that moved. It is not noise. The likely
-cause is 2.0.5's input-range guards on the emotion path; it has **not** been
-bisected. Note Group A's row and Group B's `emotion_evaluate` are *different
-states* — Group A uses valence 0.5 / arousal 0.7, the oracle's mirror uses
-−0.5 / 0.8 — and both now measure ~151 ns, so the regression is in the code, not
-the parameters.
+**`emotion_evaluate`: 69 → 155 → 118 ns.** 2.0.5's input-range guards cost 82 ns
+on a per-frame path by validating the same two fields **four times** per call —
+`evaluate` reaches both zone functions twice, through `select_vocalization` and
+`select_intent`. 2.0.10 split each into a public checked wrapper over an internal
+unchecked core (the `species_params_into` shape) and validates once at the entry
+point, recovering 37 ns. **The remaining ~45 ns is the entry-point validation
+itself and is not a defect** — guarded evaluation costs what it costs. Output is
+bit-identical across a 6,451-state sweep.
+
+⚠ **This row is why the benchmark harness cannot be trusted without a fresh
+bundle.** `tests/prani.bcyr` measures `dist/prani.cyr` — deliberately, since that
+is what consumers get — so a stale bundle reports the last bundled code. While
+fixing this, `cyrius audit` read **155 ns** from a stale `dist/` for a change that
+actually measured **114 ns**. CI now runs bundle coherence *before* the audit;
+locally, run `cyrius distlib` before believing a bench number after editing
+`src/`. Roadmap 2.0.11.
 
 ## Allocation budget
 

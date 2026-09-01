@@ -171,41 +171,100 @@ fn emotion_set(self, valence, arousal) {
 # propagates NaN) while serde's derived Deserialize accepts any float for any
 # field. Rejecting is deliberate, and the same call the port already made in
 # ADR-0001 for crtract_new: report the failure, never fabricate an answer.
+#
+# ---- CHECKED / UNCHECKED SPLIT (2.0.10) ----
+# As first written, every one of the five public entry points validated for
+# itself -- and because evaluate reaches both zone classifiers through BOTH
+# selectors, one evaluate() ran prani_in_range FIVE times, range-checking the
+# same valence and the same arousal four times over. Measured cost: 69 ns ->
+# 154 ns, a 2.2x regression on a per-frame game-AI path (docs/benchmarks.md).
+#
+# So each classifier and each selector is now split in two:
+#
+#   emotion_<name>            public, checked   -- validates, then delegates
+#   emotion_<name>_unchecked  internal, no check -- classification only
+#
+# The public wrappers are unchanged in behaviour: they still reject exactly what
+# they rejected before, with the same code. Only the INTERNAL path skips the
+# re-check, and it is entered solely by a caller that has already validated the
+# very fields it reads -- evaluate validates all three up front, then calls the
+# unchecked selectors; each unchecked selector calls the unchecked classifiers.
+# That is the same shape 2.0.3 used for species_params / species_params_into:
+# one copy of the logic, an allocating/validating wrapper over it.
+#
+# The invariant that keeps this honest: an `_unchecked` function must never be
+# reachable from outside this module, and every internal call to one must sit
+# below a validation of the fields it reads. There are exactly three such call
+# sites, all in this file -- evaluate -> the two unchecked selectors, and each
+# unchecked selector -> the two unchecked classifiers.
 # ================================================================
 
-# valence_zone(self) -- Negative if valence < -0.2, Positive if > 0.2, else Neutral.
-# PRANI_ERR_INVALID_VOCALIZATION if valence is not in [-1.0, 1.0] (NaN included).
+# emotion_state_in_range(self) -- 1 iff valence AND arousal are both inside
+# their documented ranges, 0 otherwise. The precondition of the `_unchecked`
+# classifiers, in one place, so the two checked selectors and evaluate cannot
+# drift apart on what "validated" means. Does NOT cover smoothing: nothing that
+# reads a zone reads smoothing, and evaluate checks it separately for its own
+# stated reason (see below).
 #must_use
-fn emotion_valence_zone(self) {
+fn emotion_state_in_range(self) {
+    if (prani_in_range(PrEmotion_valence(self), PRE_NEG_1_0, PRE_1_0) == 0) { return 0; }
+    return prani_in_range(PrEmotion_arousal(self), PRE_0_0, PRE_1_0);
+}
+
+# valence_zone_unchecked(self) -- the classification alone, verbatim from the
+# Rust match arms. INTERNAL: the caller must have established that valence is in
+# [-1.0, 1.0] (emotion_state_in_range). Never returns an error code, so callers
+# do not test one. On an unvalidated NaN this would answer Neutral -- which is
+# precisely the fabricated answer the guards exist to prevent, hence the
+# precondition.
+#must_use
+fn emotion_valence_zone_unchecked(self) {
     var v = PrEmotion_valence(self);
-    if (prani_in_range(v, PRE_NEG_1_0, PRE_1_0) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (f64_lt(v, PRE_NEG_0_2)) { return PRE_VZ_NEGATIVE; }
     if (f64_gt(v, PRE_0_2))     { return PRE_VZ_POSITIVE; }
     return PRE_VZ_NEUTRAL;
 }
 
-# arousal_zone(self) -- Low if arousal < 0.33, High if > 0.66, else Mid.
-# PRANI_ERR_INVALID_VOCALIZATION if arousal is not in [0.0, 1.0] (NaN included).
+# valence_zone(self) -- Negative if valence < -0.2, Positive if > 0.2, else Neutral.
+# PRANI_ERR_INVALID_VOCALIZATION if valence is not in [-1.0, 1.0] (NaN included).
+# Public checked wrapper over emotion_valence_zone_unchecked.
 #must_use
-fn emotion_arousal_zone(self) {
+fn emotion_valence_zone(self) {
+    if (prani_in_range(PrEmotion_valence(self), PRE_NEG_1_0, PRE_1_0) == 0) {
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
+    return emotion_valence_zone_unchecked(self);
+}
+
+# arousal_zone_unchecked(self) -- the classification alone. INTERNAL: the caller
+# must have established that arousal is in [0.0, 1.0] (emotion_state_in_range).
+# Never returns an error code.
+#must_use
+fn emotion_arousal_zone_unchecked(self) {
     var a = PrEmotion_arousal(self);
-    if (prani_in_range(a, PRE_0_0, PRE_1_0) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (f64_lt(a, PRE_0_33)) { return PRE_AZ_LOW; }
     if (f64_gt(a, PRE_0_66)) { return PRE_AZ_HIGH; }
     return PRE_AZ_MID;
 }
 
-# select_vocalization(self) -- most appropriate Vocalization for the current
-# (valence_zone, arousal_zone). Verbatim from the Rust match arms.
-# PRANI_ERR_INVALID_VOCALIZATION if valence or arousal is out of range: the two
-# zone calls range-check the field each one reads, so their code propagates
-# rather than being re-tested here.
+# arousal_zone(self) -- Low if arousal < 0.33, High if > 0.66, else Mid.
+# PRANI_ERR_INVALID_VOCALIZATION if arousal is not in [0.0, 1.0] (NaN included).
+# Public checked wrapper over emotion_arousal_zone_unchecked.
 #must_use
-fn emotion_select_vocalization(self) {
-    var vz = emotion_valence_zone(self);
-    if (prani_is_err(vz) == 1) { return vz; }
-    var az = emotion_arousal_zone(self);
-    if (prani_is_err(az) == 1) { return az; }
+fn emotion_arousal_zone(self) {
+    if (prani_in_range(PrEmotion_arousal(self), PRE_0_0, PRE_1_0) == 0) {
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
+    return emotion_arousal_zone_unchecked(self);
+}
+
+# select_vocalization_unchecked(self) -- the match arms alone, verbatim from the
+# Rust. INTERNAL: the caller must have established emotion_state_in_range(self)
+# == 1. Never returns an error code, so callers do not test one.
+#must_use
+fn emotion_select_vocalization_unchecked(self) {
+    var vz = emotion_valence_zone_unchecked(self);
+    var az = emotion_arousal_zone_unchecked(self);
     var v = PrEmotion_valence(self);
 
     # High arousal, negative valence -> alarm/threat sounds
@@ -234,16 +293,25 @@ fn emotion_select_vocalization(self) {
     return PRANI_VOC_WHINE;                              # mid arousal, neutral -> idle
 }
 
-# select_intent(self) -- CallIntent for the current (valence_zone, arousal_zone).
-# Verbatim from the Rust match arms.
-# PRANI_ERR_INVALID_VOCALIZATION if valence or arousal is out of range (same
-# propagation as select_vocalization above).
+# select_vocalization(self) -- most appropriate Vocalization for the current
+# (valence_zone, arousal_zone).
+# PRANI_ERR_INVALID_VOCALIZATION if valence or arousal is out of range. Public
+# checked wrapper: it validates both fields ONCE and then runs the unchecked
+# match arms, instead of reaching them through two checked zone calls. Same
+# inputs rejected, same code, one range check per field instead of one per read.
 #must_use
-fn emotion_select_intent(self) {
-    var vz = emotion_valence_zone(self);
-    if (prani_is_err(vz) == 1) { return vz; }
-    var az = emotion_arousal_zone(self);
-    if (prani_is_err(az) == 1) { return az; }
+fn emotion_select_vocalization(self) {
+    if (emotion_state_in_range(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    return emotion_select_vocalization_unchecked(self);
+}
+
+# select_intent_unchecked(self) -- the match arms alone, verbatim from the Rust.
+# INTERNAL: same precondition as select_vocalization_unchecked above. Never
+# returns an error code.
+#must_use
+fn emotion_select_intent_unchecked(self) {
+    var vz = emotion_valence_zone_unchecked(self);
+    var az = emotion_arousal_zone_unchecked(self);
     var v = PrEmotion_valence(self);
 
     if (vz == PRE_VZ_NEGATIVE) {
@@ -263,6 +331,15 @@ fn emotion_select_intent(self) {
     if (az == PRE_AZ_HIGH) { return PRANI_INTENT_ALARM; }  # high, neutral -> Alarm
     if (az == PRE_AZ_LOW)  { return PRANI_INTENT_IDLE; }   # low, neutral -> Idle
     return PRANI_INTENT_SOCIAL;                            # mid, neutral -> Social
+}
+
+# select_intent(self) -- CallIntent for the current (valence_zone, arousal_zone).
+# PRANI_ERR_INVALID_VOCALIZATION if valence or arousal is out of range. Public
+# checked wrapper, same shape as select_vocalization above.
+#must_use
+fn emotion_select_intent(self) {
+    if (emotion_state_in_range(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    return emotion_select_intent_unchecked(self);
 }
 
 # ================================================================
@@ -303,15 +380,22 @@ struct PrEmotionOut {
 # beats letting it surface a tick later as an out-of-range valence.
 #
 # Validation happens BEFORE the allocation: a rejected state costs no arena.
+#
+# It also happens ONCE (2.0.10). This is the entry point, so it validates all
+# three fields here and then takes the `_unchecked` path -- the two selectors
+# read only valence and arousal, both of which emotion_state_in_range has just
+# established, so re-checking them inside each selector and again inside each
+# zone call was four redundant range checks per call and a measured 2.2x
+# regression. The unchecked selectors cannot return an error code, so there is
+# nothing to propagate and no prani_is_err test on their results.
 #must_use
 fn emotion_evaluate(self) {
     if (prani_in_range(PrEmotion_smoothing(self), PRE_0_0, PRE_0_95) == 0) {
         return PRANI_ERR_INVALID_VOCALIZATION;
     }
-    var voc = emotion_select_vocalization(self);
-    if (prani_is_err(voc) == 1) { return voc; }
-    var intent = emotion_select_intent(self);
-    if (prani_is_err(intent) == 1) { return intent; }
+    if (emotion_state_in_range(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var voc = emotion_select_vocalization_unchecked(self);
+    var intent = emotion_select_intent_unchecked(self);
 
     var out = alloc(sizeof(PrEmotionOut));
     PrEmotionOut_set_vocalization(out, voc);

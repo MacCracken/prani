@@ -53,6 +53,27 @@ jobs:
         # run costs seconds.
         run: cyrius test
 
+      # ORDER MATTERS: this runs BEFORE the audit, not after. tests/prani.bcyr
+      # benchmarks `dist/prani.cyr` — the generated bundle, deliberately, since
+      # that is what a consumer gets. So a stale bundle makes the audit's bench
+      # stage measure the LAST BUNDLED code rather than this commit's, and
+      # report it as green. That happened in 2.0.10: the bench read 155 ns from
+      # a stale dist/ while the actual fix measured 114 ns. Fail on staleness
+      # first, then measure.
+      - name: Bundle coherence — dist/ matches src/
+        # dist/prani.cyr and dist/prani.deps are TRACKED build products,
+        # regenerated from [lib].modules. A PR that edits src/ without
+        # re-running `cyrius distlib` ships a bundle that disagrees with the
+        # source — and consumers (kiran, joshua) build against the bundle,
+        # not against src/. `cyrius distlib` is deterministic, so any diff
+        # here is a stale commit, not run-to-run noise.
+        run: |
+          cyrius distlib
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/ is stale — run 'cyrius distlib' and commit the result."
+            exit 1
+          fi
+
       - name: Audit — fmt · lint · docs · tests · bench
         # THE gate. CONTRIBUTING.md names this as the single command a PR
         # must pass, and until 2.0.4 it ran only on contributors' machines —
@@ -71,17 +92,3 @@ jobs:
         # Each one includes dist/prani.cyr exactly as a consumer would, so this
         # also proves the published bundle is usable from outside the library.
         run: sh scripts/run-examples.sh
-
-      - name: Bundle coherence — dist/ matches src/
-        # dist/prani.cyr and dist/prani.deps are TRACKED build products,
-        # regenerated from [lib].modules. A PR that edits src/ without
-        # re-running `cyrius distlib` ships a bundle that disagrees with the
-        # source — and consumers (kiran, joshua) build against the bundle,
-        # not against src/. `cyrius distlib` is deterministic, so any diff
-        # here is a stale commit, not run-to-run noise.
-        run: |
-          cyrius distlib
-          if ! git diff --exit-code -- dist/; then
-            echo "::error::dist/ is stale — run 'cyrius distlib' and commit the result."
-            exit 1
-          fi

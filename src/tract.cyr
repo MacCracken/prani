@@ -344,7 +344,7 @@ fn crtract_from_json_str(json) {
 # (PRANI_ERR_INVALID_TRACT, prani's own parameter, rather than PRANI_ERR_SVARA)
 # and makes the contract the same on all five apparatus paths, four of which had
 # no such backstop.
-fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
+fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sub_amp = SynthesisOptions_subharmonic_amp(options);
@@ -368,7 +368,8 @@ fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
     svara_glottal_set_jitter(glottal, f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05));
     svara_glottal_set_shimmer(glottal, f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1));
 
-    var output = vec_new();
+    var output = out;
+    vec_truncate(output, 0);
     if (f64_gt(sub_amp, 0) == 1) {
         # inject subharmonics into excitation before tract filtering, so the
         # formant resonances shape the subharmonic energy.
@@ -406,7 +407,7 @@ fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
 # A NaN f0 is the sharpest case on this path -- it survives the clamp, and
 # `NaN <= 2000` is false, so it fell through to the raw-oscillator arm and
 # returned an all-NaN buffer as SUCCESS (measured).
-fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
+fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sub_amp = SynthesisOptions_subharmonic_amp(options);
@@ -421,7 +422,8 @@ fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
     var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
     var clamped_f0 = f64_clamp(f0, lo, SpeciesParams_f0_max(params));
 
-    var output = vec_new();
+    var output = out;
+    vec_truncate(output, 0);
     if (f64_le(clamped_f0, f64_from(2000)) == 1) {
         var glottal = svara_glottal_new(clamped_f0, sr);
         if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
@@ -468,7 +470,7 @@ fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
 # rejects the species f0 for the sample rate. Passing that 0 to
 # filter_biquad_process_sample is a null dereference, so the invariant the
 # comment asserted is checked instead of assumed.
-fn crtract_synthesize_noise(self, num_samples) {
+fn crtract_synthesize_noise_into(self, num_samples, out) {
     # 2.0.5: num_samples >= 0. No f0 and no options reach this path, so there is
     # nothing else here with a range. The input check comes BEFORE the filter
     # check so a caller learns about its own bad argument first.
@@ -478,7 +480,8 @@ fn crtract_synthesize_noise(self, num_samples) {
         prani_log_error("prani: noise-only synthesis has no bandpass filter");
         return PRANI_ERR_SYNTHESIS_FAILED;
     }
-    var output = vec_new();
+    var output = out;
+    vec_truncate(output, 0);
     var rng = CreatureTract_rng(self);
     var i = 0;
     while (i < num_samples) {
@@ -493,7 +496,7 @@ fn crtract_synthesize_noise(self, num_samples) {
 # synthesize_stridulatory -- amplitude-modulated tone for insects.
 # High-carrier (cricket, f0 > 1000): discrete pulse-train chirps.
 # Low-carrier (bee, f0 <= 1000): continuous wing-beat modulation.
-fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
+fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
     # 2.0.5: f0 finite, num_samples >= 0. `options` is NOT checked -- this path
     # never reads it (the oracle writes `let _ = options;`), and a function must
     # not reject a value it does not use. f0 here is raw: it multiplies TAU*t
@@ -502,7 +505,8 @@ fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
-    var output = vec_new();
+    var output = out;
+    vec_truncate(output, 0);
 
     if (f64_gt(f0, f64_from(1000)) == 1) {
         # cricket-style discrete pulse-train chirps.
@@ -566,14 +570,15 @@ fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
 # synthesize_vibratile -- continuous wing-beat modulation (bees, flies).
 # Thoracic flight-muscle vibration through wings; steady buzz, AM at half the
 # wing frequency.
-fn crtract_synthesize_vibratile(self, f0, num_samples) {
+fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
     # 2.0.5: f0 finite, num_samples >= 0. Same raw-oscillator hazard as the
     # stridulatory path.
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
     var mod_rate = f64_mul(f0, PR_TR_0_5);
-    var output = vec_new();
+    var output = out;
+    vec_truncate(output, 0);
     var i = 0;
     while (i < num_samples) {
         var t = f64_div(f64_from(i), sr);
@@ -609,22 +614,72 @@ fn crtract_fmod(a, b) {
 # Every path guards `num_samples`, so this entry point rejects a negative count
 # for every apparatus.
 #inline
-fn crtract_synthesize(self, f0, num_samples, options) {
+fn crtract_synthesize_into(self, f0, num_samples, options, out) {
     var apparatus = SpeciesParams_apparatus(CreatureTract_params(self));
     if (apparatus == PRANI_APP_LARYNGEAL) {
-        return crtract_synthesize_laryngeal(self, f0, num_samples, options);
+        return crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out);
     }
     if (apparatus == PRANI_APP_SYRINGEAL) {
-        return crtract_synthesize_syringeal(self, f0, num_samples, options);
+        return crtract_synthesize_syringeal_into(self, f0, num_samples, options, out);
     }
     if (apparatus == PRANI_APP_NOISE_ONLY) {
-        return crtract_synthesize_noise(self, num_samples);
+        return crtract_synthesize_noise_into(self, num_samples, out);
     }
     if (apparatus == PRANI_APP_STRIDULATORY) {
-        return crtract_synthesize_stridulatory(self, f0, num_samples, options);
+        return crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out);
     }
     # PRANI_APP_VIBRATILE
-    return crtract_synthesize_vibratile(self, f0, num_samples);
+    return crtract_synthesize_vibratile_into(self, f0, num_samples, out);
+}
+
+# ---- allocating wrappers -----------------------------------------------------
+# 2.0.9. Each synthesis entry point now has an `_into` form that writes into
+# caller-owned storage and an allocating wrapper that keeps the original
+# signature. Same split as species_params / species_params_into (2.0.3 F7).
+#
+# WHY: the block vec these return was **8,088 of the 8,800 bytes**
+# `stream_fill_buffer` retained per call -- 24 B of header plus six geometric
+# grows to reach 512 slots. On a bump arena that never frees, that is ~757 KB/s
+# for the life of the process on a path advertised for audio callbacks. A caller
+# that hoists ONE vec and reuses it pays the grows once: after the first call its
+# capacity already covers the block, so `vec_truncate` + pushes allocate nothing.
+#
+# The wrappers are NOT deprecated -- a caller that wants a fresh buffer per call
+# should use them. They exist so that a caller in a callback has the choice.
+
+#must_use
+fn crtract_synthesize(self, f0, num_samples, options) {
+    return crtract_synthesize_into(self, f0, num_samples, options, vec_new());
+}
+
+#must_use
+fn crtract_synthesize_laryngeal(self, f0, num_samples, options) {
+    return crtract_synthesize_laryngeal_into(self, f0, num_samples, options, vec_new());
+}
+
+#must_use
+fn crtract_synthesize_syringeal(self, f0, num_samples, options) {
+    return crtract_synthesize_syringeal_into(self, f0, num_samples, options, vec_new());
+}
+
+#must_use
+fn crtract_synthesize_noise(self, num_samples) {
+    return crtract_synthesize_noise_into(self, num_samples, vec_new());
+}
+
+#must_use
+fn crtract_synthesize_stridulatory(self, f0, num_samples, options) {
+    return crtract_synthesize_stridulatory_into(self, f0, num_samples, options, vec_new());
+}
+
+#must_use
+fn crtract_synthesize_vibratile(self, f0, num_samples) {
+    return crtract_synthesize_vibratile_into(self, f0, num_samples, vec_new());
+}
+
+#must_use
+fn crtract_synthesize_purr(self, num_samples, purr_f0) {
+    return crtract_synthesize_purr_into(self, num_samples, purr_f0, vec_new());
 }
 
 # synthesize_purr(num_samples, purr_f0) -- 25-30 Hz laryngeal muscle cycling.
@@ -643,14 +698,15 @@ fn crtract_synthesize(self, f0, num_samples, options) {
 # code, and it cannot be caught anywhere but here.
 #inline
 #must_use
-fn crtract_synthesize_purr(self, num_samples, purr_f0) {
+fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
     if (prani_is_finite(purr_f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
     var tract = CreatureTract_tract(self);
     var rng = CreatureTract_rng(self);
     var phase_inc = f64_div(purr_f0, sr);
-    var output = vec_new();
+    var output = out;
+    vec_truncate(output, 0);
     var i = 0;
     while (i < num_samples) {
         var phase_frac = CreatureTract_phase(self);

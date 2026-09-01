@@ -142,13 +142,24 @@ var PR_ST_MAX_SAMPLES = 0x4340000000000000;   # 9007199254740992.0 == 2^53
 #   effort_amp      : vocal-effort amplitude scale
 #   spectral_tilt   : combined spectral tilt (species + voc + effort)
 #   is_cat_purr     : 1 if this is a cat purr (special path), else 0
+#   urgency         : intent urgency snapshot (perturbation_scale addend)
+#   options         : one reusable SynthesisOptions, re-armed per fill
+#   contour_pts     : one reusable contour-point vec, refilled per fill
+#   block           : one reusable synthesis block vec, rewritten per fill
 # No serde: the Rust `SynthStream` did not derive Serialize (transient state).
+#
+# The last three fields exist ONLY so stream_fill_buffer allocates nothing --
+# see that function's ALLOCATION note (2.0.9). They are per-stream scratch, not
+# state the stream reports: `urgency` is a pure function of `intent`, and `options` /
+# `contour_pts` are storage whose contents are rewritten on every fill. Nothing
+# reads them between calls, so hoisting them here cannot change what a fill
+# produces -- it only moves where the bytes come from.
 # ================================================================
 #derive(accessors)
 struct SynthStream {
     voice; vocalization; intent; sample_rate; total_samples;
     samples_rendered; tract; f0; amplitude_scale; effort_amp;
-    spectral_tilt; is_cat_purr;
+    spectral_tilt; is_cat_purr; urgency; options; contour_pts; block;
 }
 
 # new(voice, voc, intent, sample_rate, duration) -- SynthStream::new. Does not
@@ -233,6 +244,18 @@ fn stream_new(voice, voc, intent, sample_rate, duration) {
     SynthStream_set_effort_amp(self, effort_amp);
     SynthStream_set_spectral_tilt(self, spectral_tilt);
     SynthStream_set_is_cat_purr(self, is_cat_purr);
+    # 2.0.9 per-stream scratch, allocated ONCE here so the fill path allocates
+    # nothing. `urgency` is a snapshot for the same reason f0 and effort_amp are:
+    # `intent` cannot change after construction, so prani_intent_modifiers(intent)
+    # returns the same four numbers on every fill, and the fill only ever read
+    # this one of them. The other two are storage, not values -- see the struct
+    # header. Neither return is checked, exactly as the `alloc` two lines above
+    # is not: F9's arena-exhaustion class is library-wide and accepted (roadmap
+    # 2.1.0), and this adds no new exposure to it.
+    SynthStream_set_urgency(self, IntentModifiers_urgency(modifiers));
+    SynthStream_set_options(self, crtract_options_default());
+    SynthStream_set_contour_pts(self, vec_new());
+    SynthStream_set_block(self, vec_new());   # 2.0.9: reused by every fill
     return self;
 }
 
@@ -262,6 +285,32 @@ fn stream_samples_rendered(self) {
 # EQUIVALENT-RESULT SIMPLIFICATION note: tilt+amp are applied to the freshly
 # synthesized BLOCK vec, then block[0..to_render] is copied into
 # buffer[0..to_render] -- bit-identical to Rust's copy-then-process-buffer.
+#
+# ALLOCATION (2.0.9). This is the module's real-time entry point -- the header
+# advertises it for host audio callbacks -- and `alloc()` is a bump arena that
+# never frees, so a per-call allocation here is retained for the life of the
+# process. Measured at 44100 Hz with a 512-sample buffer (Wolf/HOWL/Idle),
+# steady state, with alloc_used() around ten fills:
+#
+#   crtract_synthesize's block vec   8088 B   (24 B header + six geometric
+#                                              grows 16->512 slots: 128+256+
+#                                              512+1024+2048+4096)
+#   svara_glottal_new, per block      512 B   (inside crtract_synthesize_
+#                                              laryngeal)
+#   stream_pitch_contour_at's vec     152 B   <- removed here
+#   prani_intent_modifiers             32 B   <- removed here
+#   crtract_options_new                16 B   <- removed here
+#                                    ------
+#                                    8800 B
+#
+# The 200 B this module owns are now 0: `options` and `contour_pts` are hoisted
+# into SynthStream and reused (2.0.3's F7/F8 technique -- hoist the storage into
+# the owning struct), and the contour writes through
+# stream_pitch_contour_at_into (the species_params / species_params_into shape).
+# The remaining 8600 B are allocated inside src/tract.cyr and svara, not here;
+# reaching them needs a `crtract_synthesize_into` writing into a caller-owned
+# vec, and a glottal source cached on the CreatureTract. Both are tract.cyr
+# changes with a second caller (voice.cyr's block loop) and are NOT done here.
 fn stream_fill_buffer(self, buffer) {
     # Handle guards. The function's only failure channel is "0 samples written",
     # so neither can be reported as a code -- but both are dereferences today (a
@@ -316,7 +365,11 @@ fn stream_fill_buffer(self, buffer) {
         var total_max = total;
         if (total_max < 1) { total_max = 1; }   # total_samples.max(1)
         var t = f64_div(f64_from(rendered), f64_from(total_max));
-        var contour = stream_pitch_contour_at(SynthStream_vocalization(self), SynthStream_f0(self), t);
+        # into the stream's own reusable point vec rather than a fresh one per
+        # fill (152 B/call). The table is rewritten from scratch every call, so
+        # the reuse is invisible to the result -- see stream_pitch_contour_at_into.
+        var contour = stream_pitch_contour_at_into(SynthStream_contour_pts(self),
+          SynthStream_vocalization(self), SynthStream_f0(self), t);
         # POINT OF USE: stream_new proved f0 finite, but the contour MULTIPLIES
         # it (BARK opens at 1.2x, WHINE closes at 1.6x), so an f0 near f64::MAX
         # can still overflow to +inf on the way to svara. Treat it as a synthesis
@@ -327,7 +380,11 @@ fn stream_fill_buffer(self, buffer) {
             return 0;
         }
 
-        var modifiers = prani_intent_modifiers(SynthStream_intent(self));
+        # `urgency` was snapshotted in stream_new. It used to be re-derived here
+        # as prani_intent_modifiers(intent), which allocates an IntentModifiers
+        # (32 B) per fill to read one of its four fields -- and `intent` is
+        # immutable for the stream's life, so the lookup returned the same number
+        # every time.
         var boundary_boost = F64_ONE;
         if (f64_lt(t, PR_ST_0_1) == 1) {
             # 1 + (1 - t/0.1) * 0.5
@@ -338,10 +395,23 @@ fn stream_fill_buffer(self, buffer) {
             boundary_boost = f64_add(F64_ONE,
               f64_mul(f64_div(f64_sub(t, PR_ST_0_85), PR_ST_0_15), PR_ST_0_5));
         }
-        var perturbation_scale = f64_add(boundary_boost, IntentModifiers_urgency(modifiers));
+        var perturbation_scale = f64_add(boundary_boost, SynthStream_urgency(self));
 
-        var options = crtract_options_new(0, perturbation_scale);
-        block = crtract_synthesize(tract, contour, to_render, options);
+        # `options` is allocated ONCE in stream_new and re-armed per fill, the
+        # same repair 2.0.3's F8 made to voice.cyr's block loop -- one
+        # permanently retained SynthesisOptions per host callback under a bump
+        # allocator that never frees. Both fields are written every call, so the
+        # reused struct carries nothing forward.
+        var options = SynthStream_options(self);
+        SynthesisOptions_set_subharmonic_amp(options, 0);
+        SynthesisOptions_set_perturbation_scale(options, perturbation_scale);
+        # 2.0.9: write into the stream's own reused vec. crtract_synthesize
+        # allocated a fresh one per fill -- 8,088 of the 8,800 bytes this call
+        # retained, being 24 B of header plus six geometric grows to reach 512
+        # slots. The block is COPIED into the caller's buffer below, so nothing
+        # reads it afterwards and reuse is safe.
+        block = crtract_synthesize_into(tract, contour, to_render, options,
+          SynthStream_block(self));
         # Rust used `if let Ok(block)` -- skip the copy on synthesis error.
         if (prani_is_err(block) == 0) { have_block = 1; }
     }
@@ -421,9 +491,27 @@ fn stream_next_block(self, block_size) {
 # ROAR/WHINE/SCREECH/TRILL) transcribed verbatim from the oracle. t is clamped to
 # [0,1]; the point pairs are walked and the interpolated multiplier applied to
 # base_f0.
+#
+# This is the ALLOCATING wrapper. The table and the walk live in
+# stream_pitch_contour_at_into, so there is exactly one copy of them while both
+# an allocating and a non-allocating entry point exist -- the same split
+# `species_params` / `species_params_into` uses, and for the same reason: the
+# per-block caller (stream_fill_buffer) must not allocate.
 #must_use
 fn stream_pitch_contour_at(voc, base_f0, t) {
-    var points = vec_new();
+    return stream_pitch_contour_at_into(vec_new(), voc, base_f0, t);
+}
+
+# pitch_contour_at_into(points, voc, base_f0, t) -- the table + the walk,
+# building the contour in CALLER-OWNED storage. `points` is a vec handle; it is
+# TRUNCATED TO EMPTY first and then refilled, so a reused vec cannot carry a
+# previous call's points into this one and the result depends only on the
+# arguments. vec_truncate preserves capacity (lib/vec.cyr), and the largest
+# table is TRILL's 5 points == 10 slots, under vec_new's 16-slot initial
+# capacity -- so a vec reused across calls never grows and never allocates again.
+#must_use
+fn stream_pitch_contour_at_into(points, voc, base_f0, t) {
+    vec_truncate(points, 0);
     if (voc == PRANI_VOC_HOWL) {
         # HOWL: (0.0,0.8),(0.3,1.3),(0.7,1.2),(1.0,0.6)
         stream_contour_push(points, 0, PR_ST_0_8);

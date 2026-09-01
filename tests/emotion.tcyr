@@ -495,5 +495,68 @@ PrEmotion_set_valence(gb2, T_NEG_1_0);
 PrEmotion_set_smoothing(gb2, T_PAST_0_95);
 assert_eq(emotion_evaluate(gb2), PRANI_ERR_INVALID_VOCALIZATION, "one ulp past 0.95 smoothing rejected");
 
+# ================================================================
+# Checked/unchecked split (2.0.10). evaluate() used to reach both zone
+# classifiers through BOTH selectors, so one call range-checked the same valence
+# and the same arousal four times over -- 69 ns at 2.0.3 became 154 ns. Each
+# classifier and selector is now a public CHECKED wrapper over an internal
+# UNCHECKED core, and evaluate validates all three fields once then takes the
+# unchecked path.
+#
+# The property that makes the split safe: on every state that passes validation,
+# checked and unchecked must agree exactly. Swept over a 17x9 grid of in-range
+# states below -- if the wrapper and the core ever diverge, one of these counters
+# goes non-zero. Counted rather than asserted per-state, matching the sweep
+# above, so the suite's assertion count tracks properties and not grid size.
+test_group("checked/unchecked split -- the two paths agree on every valid state");
+var u_vz = 0;
+var u_az = 0;
+var u_sv = 0;
+var u_si = 0;
+var u_n = 0;
+var u_i = 0;
+while (u_i < 17) {
+    var u_v = f64_sub(f64_div(f64_from(u_i), f64_from(8)), T_1_0);
+    var u_j = 0;
+    while (u_j < 9) {
+        var u_a = f64_div(f64_from(u_j), f64_from(8));
+        var u_e = emotion_with_values(u_v, u_a);
+        if (emotion_valence_zone(u_e) != emotion_valence_zone_unchecked(u_e)) { u_vz = u_vz + 1; }
+        if (emotion_arousal_zone(u_e) != emotion_arousal_zone_unchecked(u_e)) { u_az = u_az + 1; }
+        if (emotion_select_vocalization(u_e) != emotion_select_vocalization_unchecked(u_e)) { u_sv = u_sv + 1; }
+        if (emotion_select_intent(u_e) != emotion_select_intent_unchecked(u_e)) { u_si = u_si + 1; }
+        u_n = u_n + 1;
+        u_j = u_j + 1;
+    }
+    u_i = u_i + 1;
+}
+assert_eq(u_n, 153, "swept 17x9 in-range states");
+assert_eq(u_vz, 0, "valence_zone == valence_zone_unchecked on every valid state");
+assert_eq(u_az, 0, "arousal_zone == arousal_zone_unchecked on every valid state");
+assert_eq(u_sv, 0, "select_vocalization == _unchecked on every valid state");
+assert_eq(u_si, 0, "select_intent == _unchecked on every valid state");
+
+# ================================================================
+# The other half of the split's contract: the unchecked core really is
+# unchecked. On a NaN it answers Neutral/Mid and fabricates a vocalization --
+# the exact ADR-0001 failure the guards exist to prevent. That is why an
+# `_unchecked` function must only ever be called below a validation of the
+# fields it reads, and it is what the public wrappers below it still prevent.
+test_group("checked/unchecked split -- the unchecked core is genuinely unchecked");
+var un = emotion_with_values(f64_div(0, 0), T_0_5);
+assert_eq(prani_is_finite(emotion_valence(un)), 0, "state carries a NaN valence");
+assert_eq(emotion_valence_zone_unchecked(un), PRE_VZ_NEUTRAL, "unchecked core fabricates Neutral on NaN");
+assert_eq(emotion_select_vocalization_unchecked(un), PRANI_VOC_WHINE, "unchecked selector fabricates Whine");
+assert_eq(emotion_select_intent_unchecked(un), PRANI_INTENT_SOCIAL, "unchecked selector fabricates Social");
+# ...and every PUBLIC entry point still refuses it -- 2.0.5's guards intact.
+assert_eq(emotion_valence_zone(un), PRANI_ERR_INVALID_VOCALIZATION, "public valence_zone still rejects");
+assert_eq(emotion_select_vocalization(un), PRANI_ERR_INVALID_VOCALIZATION, "public select_vocalization still rejects");
+assert_eq(emotion_select_intent(un), PRANI_ERR_INVALID_VOCALIZATION, "public select_intent still rejects");
+assert_eq(emotion_evaluate(un), PRANI_ERR_INVALID_VOCALIZATION, "evaluate still rejects");
+# emotion_state_in_range is the single precondition the unchecked path rests on.
+assert_eq(emotion_state_in_range(un), 0, "state_in_range rejects the NaN state");
+assert_eq(emotion_state_in_range(emotion_with_values(T_NEG_1_0, T_0_0)), 1, "state_in_range accepts the -1.0/0.0 corner");
+assert_eq(emotion_state_in_range(emotion_with_values(T_1_0, T_1_0)), 1, "state_in_range accepts the 1.0/1.0 corner");
+
 var rc = assert_summary();
 syscall(60, rc);

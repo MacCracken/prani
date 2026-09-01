@@ -54,75 +54,62 @@ Measured facts this arc rests on, all verified 2026-08-31:
 > now `git grep -o … | wc -l`. **A gate figure needs a re-run, not just a
 > command**: this one drifted 3.6× in four patch releases.
 
-### 2.0.9 — `stream_fill_buffer` allocates on every call
+### 2.0.11 — the benchmark suite has no baseline, so regressions ship silently
 
-**Source**: found by 2.0.6's `streaming.cyr` example — the first thing ever to
-drive the streaming path the way a host does.
+**Source**: 2.0.9 and 2.0.10 both exist because of this. It is the common cause,
+and nothing currently prevents a third.
 
-**Measured 2026-08-31: 8,800 bytes retained per steady-state fill.** At 44100 Hz
-with 512-sample blocks that is 86 callbacks a second — **~757 KB/s retained for
-the life of the process**, on an allocator that never frees. A one-minute
-creature loop retains ~45 MB.
+`cyrius audit` runs `tests/prani.bcyr` on every push and reports
+**`1 passed, 0 failed`** — because all the bench harness checks is that it *ran*.
+It compares nothing. So:
 
-This directly contradicts what `src/stream.cyr`'s own header advertises the
-module for: *"suitable for real-time audio callbacks where the block size is
-determined by the host (Wwise, FMOD, Godot, JACK)."* An allocation inside an
-audio callback is not a leak that grows slowly — it is one that ends the process.
+- **2.0.5** added 109 input-range guards, ran the suite green, and shipped a
+  **2.2× regression** in `emotion_evaluate` that nobody saw for two releases.
+  It was found by 2.0.7 manually diffing a table in `docs/benchmarks.md`.
+- **2.0.6**'s `streaming.cyr` found `stream_fill_buffer` retaining 8,800 B/call —
+  by *writing an example*, not by any gate.
 
-Three per-call sources are visible: the block vec `crtract_synthesize` returns,
-the `SynthesisOptions` built at `src/stream.cyr:337`, and the contour vec in
-`stream_pitch_contour_at`. All three are the **same pattern 2.0.3 already fixed
-twice** (F7 removed 168 B/call from `prani_ffi_voice_set_size`; F8 removed one
-`SynthesisOptions` per 20 ms block from the `voice.cyr` loop) — hoist the
-storage into `SynthStream` and reuse it across fills.
+Both were caught by a human reading numbers. That is not a process.
 
-Patch-level: no API change, no behaviour change on any valid input. It is
-numbered after 2.0.8 only because the numbers below it are taken; **it does not
-gate `rust-old/`'s retirement** — the oracle has nothing to say about it, since
-the Rust allocated per call too and simply had an allocator that freed.
+**And it can measure the wrong code entirely.** `tests/prani.bcyr` benchmarks
+`dist/prani.cyr` — the generated bundle, deliberately, since that is what a
+consumer gets. But **a stale bundle makes the bench report on the last bundled
+code**, not the commit under test. This is not hypothetical: while fixing 2.0.10
+the audit read **155 ns** from a stale `dist/` while the actual change measured
+**114 ns**. The fix ran, the suite went green, and the benchmark disagreed with
+reality by 36%.
 
-**Done when**: `alloc_used()` before and after a steady-state fill differs by 0,
-asserted in `tests/hardening.tcyr` alongside 2.0.3's two existing allocation
-budgets.
+CI's step order has been corrected so bundle coherence fails *before* the audit
+measures anything (2.0.10). But a developer running `cyrius audit` locally after
+editing `src/` still measures the old bundle unless they remember
+`cyrius distlib` first — worth a note in CONTRIBUTING at minimum.
 
-### 2.0.10 — `emotion_evaluate` validates its inputs five times per call
+**The shape of the fix**: `scripts/bench-history.sh` already appends every run to
+`benches/history.csv` with a timestamp and git rev. What is missing is a committed
+**baseline** and a comparison that fails on regression.
 
-**Source**: 2.0.7's benchmark run — the only historical-series row that moved.
+⚠ **The hard part is the threshold, not the plumbing.** A perf gate on a shared
+CI runner is notoriously flaky — GitHub's runners are noisy neighbours and a 20%
+swing between runs on an unchanged tree is ordinary. A gate that cries wolf gets
+disabled within a month, which is worse than no gate. Options, and this needs a
+decision before implementation:
 
-**Measured: 69 ns → 151 ns between 2.0.3 and 2.0.7, a 2.2× regression** on a path
-`docs/benchmarks.md` describes as a *"per-frame game-AI call"*. At 60 fps across
-100 creatures that is 6,000 calls a second.
+1. **Gate on allocation only, not time.** `alloc_used()` is *deterministic* —
+   2.0.3's two existing budgets in `tests/hardening.tcyr` already assert it and
+   have never been flaky. This would have caught 2.0.9 (8,800 B/call) with zero
+   false-positive risk, and misses 2.0.10.
+2. **Gate on time with a wide band** (say 1.5×) so only gross regressions fire.
+   Catches both, at the cost of missing a 2.2× regression's early stages — though
+   2.0.10 was 2.2× and would have fired.
+3. **Record, do not gate**: CI appends to the history CSV and posts the delta as
+   a comment, leaving the judgement to a human. No flakiness, no enforcement.
 
-Introduced by **2.0.5's own input-range guards**, and the shape is the point:
+**Recommendation: 1 now, 3 alongside it, and 2 only if the runner proves quiet.**
+Allocation budgets are free and deterministic; time gates should earn their place
+by demonstrating a low false-positive rate against recorded history first.
 
-    emotion_evaluate
-      ├── prani_in_range(smoothing)                    1
-      ├── emotion_select_vocalization
-      │     ├── emotion_valence_zone -> prani_in_range 2
-      │     └── emotion_arousal_zone -> prani_in_range 3
-      └── emotion_select_intent
-            ├── emotion_valence_zone -> prani_in_range 4
-            └── emotion_arousal_zone -> prani_in_range 5
-
-The zone functions are *individually* correct to validate — they are public. But
-`evaluate` reaches them twice each, so the same two fields are range-checked
-**four times** on one call, and `prani_in_range` is not free: `prani_is_finite`
-(`f64_abs` + `f64_lt`) then `f64_ge` then `f64_le`, ~4 float ops, ×5.
-
-**Validate once at the entry point.** Split each zone function into a public
-checked wrapper and an internal unchecked one, and have `evaluate` validate the
-state once then call the unchecked path — the same shape 2.0.3 used for
-`species_params` / `species_params_into`.
-
-⚠ **This is the correctness-costs-performance trade landing on a hot path
-without anyone measuring it.** 2.0.5 added 109 guards and ran the benchmark suite
-green, because the suite did not *compare against a baseline* — it only checked
-the harness ran. The lesson is not "fewer guards": it is that a guard on a
-per-frame path needs a benchmark delta attached before it ships.
-
-**Done when**: `emotion_evaluate` is back within noise of 69 ns, the public zone
-functions still reject out-of-range input (asserted), and `tests/hardening.tcyr`
-keeps a control proving the unchecked internal path is unreachable from outside.
+**Done when**: an allocation regression on any benchmarked path fails CI, and a
+timing delta against the previous run is visible without anyone opening a table.
 
 ### 2.1.0 — two lanes: f32 throughout, and the allocation-failure contract
 

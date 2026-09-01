@@ -518,5 +518,143 @@ assert_eq(stream_fill_buffer(g_sbig, g_bbuf), 0,
   "but the fill reports 0 written -- 1.7e308 * 1.2 is +inf, never handed to svara");
 assert_eq(stream_is_finished(g_sbig), 1, "and the stream retires (ADR-0003), so a drain loop terminates");
 
+# ================================================================
+# 2.0.9 -- stream_fill_buffer allocates nothing of its own.
+#
+# `alloc()` is a bump arena that NEVER FREES, and src/stream.cyr's header
+# advertises stream_fill_buffer for host audio callbacks (Wwise, FMOD, Godot,
+# JACK). At 44100 Hz with a 512-sample block that is 86 calls a second, every
+# byte of them retained for the life of the process.
+#
+# MEASURED BEFORE the repair, with alloc_used() around ten steady-state fills of
+# a Wolf/HOWL/Idle stream (the exact figures are transcribed in
+# src/stream.cyr's ALLOCATION note):
+#
+#   8800 B/fill  =  8088 (crtract_synthesize's block vec, six geometric grows)
+#                 +  512 (svara_glottal_new, per block, inside that call)
+#                 +  152 (stream_pitch_contour_at's fresh point vec)
+#                 +   32 (prani_intent_modifiers, for one of its four fields)
+#                 +   16 (crtract_options_new)
+#
+# AFTER: 8600 B/fill. The 200 B this module owned are gone; the 8600 that remain
+# are allocated inside src/tract.cyr and svara and cannot be reached from
+# stream.cyr (they need a `crtract_synthesize_into` and a cached glottal source,
+# both of which have a second caller in voice.cyr).
+#
+# So the assertion is a DIFFERENCE, not a constant: a fill must cost exactly what
+# the one crtract_synthesize call inside it costs, and not one byte more. That
+# pins stream.cyr's own share at 0 without going stale the day tract.cyr or svara
+# gets its own repair -- both sides of the subtraction move together.
+test_group("2.0.9 fill_buffer -- allocates nothing of its own (bump arena never frees)");
+var a_st = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, T_SR, T_1_0);
+var a_buf = vec_new();
+prani_vec_push_zeros(a_buf, 512);
+# warm: the first fill builds the tract (crtract_new + species_params). That
+# allocation is expected and is NOT what this group measures.
+stream_fill_buffer(a_st, a_buf);
+var a_b0 = alloc_used();
+var a_i = 0;
+while (a_i < 10) {
+    stream_fill_buffer(a_st, a_buf);
+    a_i = a_i + 1;
+}
+var a_b1 = alloc_used();
+var a_fill = (a_b1 - a_b0) / 10;
+# CONTROL: the one crtract_synthesize call a standard-path fill makes, measured
+# on its own on a second stream's tract so the measurement cannot disturb a_st.
+# `options` is built OUTSIDE the measured window -- inside it, it would re-add
+# the 16 B this repair removed and hide a regression.
+var a_st2 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, T_SR, T_1_0);
+stream_fill_buffer(a_st2, a_buf);
+var a_tr = SynthStream_tract(a_st2);
+var a_opt = crtract_options_new(0, T_1_0);
+var a_c0 = alloc_used();
+var a_j = 0;
+while (a_j < 10) {
+    crtract_synthesize(a_tr, T_400, 512, a_opt);
+    a_j = a_j + 1;
+}
+var a_c1 = alloc_used();
+var a_tract = (a_c1 - a_c0) / 10;
+assert_gt(a_tract, 0, "control: the ALLOCATING crtract_synthesize wrapper still allocates");
+# 2.0.9 second half: the fill now uses crtract_synthesize_INTO against a block vec
+# hoisted into SynthStream, so it no longer pays for that vec at all -- a fill is
+# strictly CHEAPER than a standalone crtract_synthesize call, not equal to it.
+assert_lt(a_fill, a_tract,
+  "a fill is cheaper than an allocating crtract_synthesize -- it reuses its block vec");
+# The absolute figure. 8,800 B/call at 2.0.6; 512 B now. The residual is ONE
+# svara_glottal_new per block inside crtract_synthesize_laryngeal -- svara's
+# allocation, reached through tract.cyr, and NOT removable without caching the
+# glottal source across blocks, which would carry its phase forward and change
+# the audio. That is a behaviour question, not a perf one; see roadmap 2.0.9.
+assert_lte(a_fill, 512, "a steady-state fill retains at most 512 B (was 8,800 at 2.0.6)");
+assert_gt(a_fill, 0, "control: it is not zero yet, and the assertion above is not vacuous");
+# The absolute figure as measured today, as a CEILING rather than an equality: a
+# tract.cyr or svara repair may lower it, and must not fail this suite; a
+# stream.cyr regression raises it, and must.
+assert_lte(a_fill, 8600, "measured 2026-08-31: 8600 B/fill, all of it tract.cyr + svara");
+# and the three sources this repair removed, each pinned at 0 individually.
+var a_p0 = alloc_used();
+var a_pv = stream_pitch_contour_at_into(SynthStream_contour_pts(a_st), PRANI_VOC_HOWL, T_400, T_0_1);
+var a_p1 = alloc_used();
+assert_eq(a_p1 - a_p0, 0, "contour into the stream's reused point vec -- 0 B (was 152)");
+var a_o0 = alloc_used();
+SynthesisOptions_set_subharmonic_amp(SynthStream_options(a_st), 0);
+SynthesisOptions_set_perturbation_scale(SynthStream_options(a_st), T_1_0);
+var a_o1 = alloc_used();
+assert_eq(a_o1 - a_o0, 0, "re-arming the stream's own SynthesisOptions -- 0 B (was 16)");
+var a_u0 = alloc_used();
+var a_uv = SynthStream_urgency(a_st);
+var a_u1 = alloc_used();
+assert_eq(a_u1 - a_u0, 0, "reading the snapshotted urgency -- 0 B (was 32 for a whole IntentModifiers)");
+# and the snapshot is the value the per-call lookup used to produce.
+assert_eq(SynthStream_urgency(a_st), IntentModifiers_urgency(prani_intent_modifiers(PRANI_INTENT_IDLE)),
+  "the urgency snapshot == prani_intent_modifiers(intent).urgency, exactly");
+var a_sa = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_ALARM, T_SR, T_0_1);
+assert_eq(SynthStream_urgency(a_sa), IntentModifiers_urgency(prani_intent_modifiers(PRANI_INTENT_ALARM)),
+  "and for a non-zero urgency (Alarm 0.9), which is what perturbation_scale adds");
+
+# ================================================================
+test_group("2.0.9 stream_pitch_contour_at_into -- the split is result-preserving");
+# The allocating wrapper and the _into form must agree everywhere, and a REUSED
+# point vec must give the same answer as a fresh one -- that is the whole risk of
+# the reuse: a vec that kept a previous call's points would interpolate against
+# the wrong table. Every vocalization tag (incl. the FLAT fallthrough for tags
+# with no table of their own) x 21 values of t across [0,1].
+var a_reuse = vec_new();
+var a_bad = 0;
+var a_vc = 0;
+while (a_vc < 16) {
+    var a_tk = 0;
+    while (a_tk <= 20) {
+        var a_t = f64_div(f64_from(a_tk), f64_from(20));
+        if (stream_pitch_contour_at_into(a_reuse, a_vc, T_400, a_t)
+          != stream_pitch_contour_at(a_vc, T_400, a_t)) { a_bad = a_bad + 1; }
+        a_tk = a_tk + 1;
+    }
+    a_vc = a_vc + 1;
+}
+assert_eq(a_bad, 0, "reused vec == fresh vec for all 16 tags x 21 t (336 comparisons)");
+# and the reuse is what makes it free: the largest table (TRILL, 5 points == 10
+# slots) fits vec_new's 16-slot initial capacity, so no push ever grows it.
+assert_lte(vec_len(a_reuse), 16, "the widest contour table fits the initial capacity -- no grow");
+var a_r0 = alloc_used();
+var a_rk = 0;
+var a_rsum = 0;
+while (a_rk < 100) {
+    a_rsum = a_rsum + stream_pitch_contour_at_into(a_reuse, PRANI_VOC_TRILL, T_400, T_0_1);
+    a_rk = a_rk + 1;
+}
+var a_r1 = alloc_used();
+assert_eq(a_r1 - a_r0, 0, "100 TRILL contours into one reused vec -- 0 B total");
+# the wrapper still allocates, as its contract says (it hands back a fresh vec's
+# worth of work); it is the per-block caller that must not.
+var a_w0 = alloc_used();
+var a_wv = stream_pitch_contour_at(PRANI_VOC_TRILL, T_400, T_0_1);
+var a_w1 = alloc_used();
+assert_gt(a_w1 - a_w0, 0, "the allocating wrapper still allocates -- the split kept both entry points");
+assert_eq(a_wv, stream_pitch_contour_at_into(a_reuse, PRANI_VOC_TRILL, T_400, T_0_1),
+  "and the two entry points still agree on the value they return");
+
 var rc = assert_summary();
 syscall(60, rc);

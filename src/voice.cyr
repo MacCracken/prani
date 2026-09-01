@@ -1049,6 +1049,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
     # one reusable SynthesisOptions for the whole block loop (see below)
     var options = crtract_options_default();
+    var block_buf = vec_new();   # 2.0.9: reused by every block below
 
     var rendered = 0;
     while (rendered < num_samples) {
@@ -1106,7 +1107,13 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
         # it after crtract_synthesize returns, so reuse is safe.
         SynthesisOptions_set_subharmonic_amp(options, 0);
         SynthesisOptions_set_perturbation_scale(options, perturbation_scale);
-        var block = crtract_synthesize(tract, block_f0, block_len, options);
+        # 2.0.9: `block_buf` is allocated ONCE above the loop and written into,
+        # the same reuse `options` above already gets. crtract_synthesize
+        # allocated a fresh vec per block -- 24 B of header plus the geometric
+        # grows to reach block_len -- so a 1 s call at 44100 retained ~400 KB it
+        # never freed. prani_vec_extend COPIES out of it immediately, so nothing
+        # reads the buffer after this line and reuse is safe.
+        var block = crtract_synthesize_into(tract, block_f0, block_len, options, block_buf);
         if (prani_is_err(block) == 1) { return block; }
         prani_vec_extend(samples, block);   # samples.extend_from_slice(&block)
         rendered = rendered + block_len;

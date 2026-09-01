@@ -20,6 +20,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.0.10] - The two performance defects the arc's own measurements found
+
+Closes roadmap **2.0.9** and **2.0.10** together — both were found by the 2.0.x
+arc measuring itself, and both are fixed in one tree state. Suite **1900 → 1931
+assertions / 17 suites**, `cyrius audit` exit 0. No API change; output
+bit-identical on every path.
+
+### Fixed — `stream_fill_buffer` retained 8,800 bytes per call → 512
+
+Found by 2.0.6's `streaming.cyr`, the first thing to drive the streaming path the
+way a host does. At 44100 Hz with 512-sample blocks that was **~757 KB/s retained
+for the life of the process** on a path the module header advertises for *"audio
+callbacks (Wwise, FMOD, Godot, JACK)"*.
+
+**94% removed.** `stream.cyr`'s own share is now **0**: the contour vec, the
+`SynthesisOptions`, and a per-fill `prani_intent_modifiers` — a **fourth** source
+the original analysis had missed, allocating a whole struct to read one immutable
+field — are hoisted into `SynthStream`. The big one, the 8,088-byte block vec,
+needed `crtract_synthesize_into` alongside the allocating wrapper (the
+`species_params_into` split, following 2.0.3's F7/F8 precedent). `voice.cyr`'s
+block loop reuses one buffer too, saving **~400 KB per 1 s call**.
+
+⚠ **Residual 512 B/fill is a behaviour question, not a perf one.** One
+`svara_glottal_new` per block. svara exposes `svara_glottal_set_f`, so caching the
+source looks like a free win — **it is not**: a fresh source per block resets its
+phase and jitter/shimmer state, a cached one carries them forward, and the audio
+changes. The oracle rebuilt per block too, so rebuilding is parity-correct.
+Closing it needs a decision that the continuity change is wanted.
+
+### Fixed — `emotion_evaluate` regressed 2.2×; 37 of the 82 ns recovered
+
+2.0.5's guards validated the same two fields **four times** per call. Split into
+public checked wrappers over internal unchecked cores; `evaluate` validates once.
+**154 → 114 ns**, bit-identical across a 6,451-state sweep.
+
+**The 69 ns baseline was not reached and is not claimed.** The remaining ~45 ns is
+the entry-point validation 2.0.5 correctly added. `docs/benchmarks.md` is
+re-baselined at 118 ns rather than carrying a target nobody intends to hit.
+
+### Fixed — the benchmark harness was measuring stale code
+
+⭐ Found while verifying the above, and the sharpest of the three.
+`tests/prani.bcyr` benchmarks `dist/prani.cyr` — the generated bundle,
+deliberately, since that is what a consumer gets. **So a stale bundle makes the
+bench report on the last bundled code.** `cyrius audit` read **155 ns** for a
+change that actually measured **114 ns**: the fix ran, the suite went green, and
+the benchmark disagreed with reality by 36%.
+
+CI's step order is corrected — bundle coherence now runs **before** the audit, so
+staleness fails before anything measures it. The local hazard remains and is
+documented: run `cyrius distlib` before believing a bench number after editing
+`src/`.
+
+### Filed — 2.0.11: the suite still has no baseline
+
+All three of the above were caught by a human reading numbers. `cyrius audit`
+reports `1 passed, 0 failed` for the bench because **all it checks is that the
+harness ran** — it compares nothing. Filed with three options and a
+recommendation (gate on deterministic `alloc_used()` first; treat timing gates as
+having to earn their place against a noisy shared runner).
+
 ## [2.0.8] - `rust-old/` retired
 
 **The 2.0.x arc's destination.** The frozen Rust oracle prani was ported from —
