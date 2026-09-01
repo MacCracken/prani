@@ -106,6 +106,18 @@ All performance-related changes must include benchmark results. Run:
 cyrius bench tests/prani.bcyr
 ```
 
+⚠ **Run `cyrius distlib` before believing a bench number after editing `src/`.**
+`tests/prani.bcyr` benchmarks `dist/prani.cyr` — the generated bundle,
+deliberately, since that is what a consumer gets — so a stale bundle reports the
+*last bundled* code. 2.0.10 lost time to exactly this: the audit read 155 ns for
+a change that actually measured 114. CI runs bundle coherence before the audit;
+locally nothing stops you.
+
+`sh scripts/bench-check.sh` compares a run against `benches/baseline.csv` and
+prints a delta per benchmark. It is report-only (`BENCH_GATE=1.5` opts into
+failing past a factor). Allocation budgets, which are deterministic, are
+hard-gated instead in `tests/allocbudget.tcyr`.
+
 `./scripts/bench-history.sh` runs the same harness and appends each figure to
 `benches/history.csv` with a timestamp and git rev, so a regression is visible
 across commits. Note that `lib/bench.cyr` measures and subtracts the timer floor

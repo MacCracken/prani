@@ -3,7 +3,11 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 /coverage/
+# Bench history is a local log, not a tracked artifact — but the BASELINE is
+# committed on purpose: scripts/bench-check.sh compares against it in CI, so a
+# fresh checkout must have it.
 *.csv
+!benches/baseline.csv
 .DS_Store
 *.swp
 *.swo

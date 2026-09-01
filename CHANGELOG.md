@@ -20,6 +20,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.0.11] - The benchmark suite compares something now
+
+`cyrius audit` has always run `tests/prani.bcyr` and reported
+**`1 passed, 0 failed`** — because all the bench harness checks is that it *ran*.
+It compared nothing. **Three regressions reached a release through that gap**,
+and every one was caught by a human reading numbers:
+
+- **2.0.5** shipped a 2.2× slowdown in `emotion_evaluate`, found two releases
+  later by diffing a table in `docs/benchmarks.md`.
+- **2.0.6** found `stream_fill_buffer` retaining 8,800 B/call — by someone
+  *writing an example*.
+- **2.0.10** found the harness measuring a **stale `dist/` bundle**: it read
+  155 ns for a change that actually measured 114 ns.
+
+Suite **1931 → 1946 assertions / 18 suites**, `cyrius audit` exit 0.
+
+### The split: allocation is gated, timing is recorded
+
+⭐ **This is the design decision, and it is deliberate asymmetry.**
+
+`alloc_used()` is **deterministic** — same tree, same byte count, any host, any
+load. So allocation is a **hard gate**: `tests/allocbudget.tcyr` (new, 15
+assertions) budgets every benchmarked path, and `cyrius audit` runs it.
+
+Wall-clock on a shared CI runner is **not** deterministic. A 20% swing on an
+unchanged tree is ordinary, and **a gate that cries wolf gets disabled within a
+month, which is worse than no gate.** So timing is *recorded*:
+`scripts/bench-check.sh` compares a run against the committed
+`benches/baseline.csv` and prints a delta per benchmark, exiting 0.
+`BENCH_GATE=<factor>` opts into failing — to be turned on only once recorded
+history shows the runner is quiet enough to earn it.
+
+The cost is stated rather than hidden: **2.0.5's regression would NOT have failed
+this gate.** What it buys is a gate nobody will be tempted to switch off. It does
+fail hard on one timing condition — a baseline benchmark that stops running,
+which is a real regression rather than noise.
+
+### The budgets
+
+| Path | Budget | Why |
+|---|---|---|
+| `dcblocker_process`, `prani_rng_next_f32` | **0 B** | per-sample; one byte here is 44 KB/s retained |
+| `prani_ffi_voice_set_size` | **0 B** | an RTPC a host calls per frame (pins 2.0.3's F7) |
+| `emotion_evaluate` | ≤ **40 B** | one `PrEmotionOut`, which the caller receives |
+| `stream_fill_buffer` | ≤ **512 B** | the audio-callback path (was 8,800 at 2.0.6) |
+| `crvoice_vocalize` | **sub-linear in duration** | allocation may scale with audio produced, never with calls |
+
+Every budget carries a **control** — a `<= N` assertion passes trivially if the
+path never runs. Verified adversarially: injecting one `vec_new()` into
+`dcblocker_process` fails **two** budgets, the per-sample one directly and the
+stream fill it cascades into.
+
+The `crvoice_vocalize` budget is expressed as *the marginal cost of doubling the
+duration*, not an absolute byte count. That cancels fixed setup and survives any
+buffer-growth change, while still catching the 2.0.9 defect — per-block overhead
+being retained.
+
+### Fixed — the baseline was gitignored
+
+Found on the last check before release: `.gitignore`'s `*.csv` would have
+excluded `benches/baseline.csv`, so CI on a fresh checkout would have failed with
+*"no baseline"* — a gate that never ran. Negated explicitly, with the reason.
+
 ## [2.0.10] - The two performance defects the arc's own measurements found
 
 Closes roadmap **2.0.9** and **2.0.10** together — both were found by the 2.0.x

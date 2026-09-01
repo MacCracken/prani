@@ -54,63 +54,6 @@ Measured facts this arc rests on, all verified 2026-08-31:
 > now `git grep -o … | wc -l`. **A gate figure needs a re-run, not just a
 > command**: this one drifted 3.6× in four patch releases.
 
-### 2.0.11 — the benchmark suite has no baseline, so regressions ship silently
-
-**Source**: 2.0.9 and 2.0.10 both exist because of this. It is the common cause,
-and nothing currently prevents a third.
-
-`cyrius audit` runs `tests/prani.bcyr` on every push and reports
-**`1 passed, 0 failed`** — because all the bench harness checks is that it *ran*.
-It compares nothing. So:
-
-- **2.0.5** added 109 input-range guards, ran the suite green, and shipped a
-  **2.2× regression** in `emotion_evaluate` that nobody saw for two releases.
-  It was found by 2.0.7 manually diffing a table in `docs/benchmarks.md`.
-- **2.0.6**'s `streaming.cyr` found `stream_fill_buffer` retaining 8,800 B/call —
-  by *writing an example*, not by any gate.
-
-Both were caught by a human reading numbers. That is not a process.
-
-**And it can measure the wrong code entirely.** `tests/prani.bcyr` benchmarks
-`dist/prani.cyr` — the generated bundle, deliberately, since that is what a
-consumer gets. But **a stale bundle makes the bench report on the last bundled
-code**, not the commit under test. This is not hypothetical: while fixing 2.0.10
-the audit read **155 ns** from a stale `dist/` while the actual change measured
-**114 ns**. The fix ran, the suite went green, and the benchmark disagreed with
-reality by 36%.
-
-CI's step order has been corrected so bundle coherence fails *before* the audit
-measures anything (2.0.10). But a developer running `cyrius audit` locally after
-editing `src/` still measures the old bundle unless they remember
-`cyrius distlib` first — worth a note in CONTRIBUTING at minimum.
-
-**The shape of the fix**: `scripts/bench-history.sh` already appends every run to
-`benches/history.csv` with a timestamp and git rev. What is missing is a committed
-**baseline** and a comparison that fails on regression.
-
-⚠ **The hard part is the threshold, not the plumbing.** A perf gate on a shared
-CI runner is notoriously flaky — GitHub's runners are noisy neighbours and a 20%
-swing between runs on an unchanged tree is ordinary. A gate that cries wolf gets
-disabled within a month, which is worse than no gate. Options, and this needs a
-decision before implementation:
-
-1. **Gate on allocation only, not time.** `alloc_used()` is *deterministic* —
-   2.0.3's two existing budgets in `tests/hardening.tcyr` already assert it and
-   have never been flaky. This would have caught 2.0.9 (8,800 B/call) with zero
-   false-positive risk, and misses 2.0.10.
-2. **Gate on time with a wide band** (say 1.5×) so only gross regressions fire.
-   Catches both, at the cost of missing a 2.2× regression's early stages — though
-   2.0.10 was 2.2× and would have fired.
-3. **Record, do not gate**: CI appends to the history CSV and posts the delta as
-   a comment, leaving the judgement to a human. No flakiness, no enforcement.
-
-**Recommendation: 1 now, 3 alongside it, and 2 only if the runner proves quiet.**
-Allocation budgets are free and deterministic; time gates should earn their place
-by demonstrating a low false-positive rate against recorded history first.
-
-**Done when**: an allocation regression on any benchmarked path fails CI, and a
-timing delta against the previous run is visible without anyone opening a table.
-
 ### 2.1.0 — two lanes: f32 throughout, and the allocation-failure contract
 
 Both are minor-bump work on the same functions, so they share a release. **Lane B

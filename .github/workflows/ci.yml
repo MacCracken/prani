@@ -85,6 +85,22 @@ jobs:
         # paren-aware in 6.5.28). Trust this one.
         run: cyrius audit
 
+      - name: Benchmark baseline — report timing deltas
+        # 2.0.11. `cyrius audit`'s bench stage reports "1 passed, 0 failed"
+        # because all it checks is that the harness RAN — it compares nothing.
+        # This prints a delta per benchmark against benches/baseline.csv.
+        #
+        # REPORT-ONLY on purpose: wall-clock on a shared runner is noisy (a 20%
+        # swing on an unchanged tree is ordinary) and a gate that cries wolf gets
+        # disabled, which is worse than no gate. The DETERMINISTIC half —
+        # allocation — is hard-gated in tests/allocbudget.tcyr, which the audit
+        # above already runs. Set BENCH_GATE=<factor> here only once recorded
+        # history shows this runner is quiet enough to justify it.
+        #
+        # It still fails if a baseline benchmark stops running: a benchmark
+        # disappearing is a real regression, not noise.
+        run: sh scripts/bench-check.sh
+
       - name: Examples — build and run all five
         # Roadmap 2.0.6's gate. `rust-old/` (the frozen Rust oracle) was removed
         # in 2.0.8, after which a worked example is the only executable

@@ -1,0 +1,24 @@
+# prani benchmark baseline -- nanoseconds. Regenerate with scripts/bench-check.sh
+# and a deliberate, reviewed commit. Recorded on x86_64 Linux, AMD Ryzen 7 5800H,
+# single core, cyrius 6.5.36. A number here is a claim about THIS hardware; a
+# different host will differ and that is not a regression.
+# recorded: 2026-08-31 at 6df37a8 (prani 2.0.10)
+benchmark,baseline_ns
+"dcblocker_process (per-sample)",20.0
+"prani_rng_next_f32 (per-sample)",15.0
+"emotion_evaluate (per-frame)",117.0
+"crvoice_vocalize wolf_howl_0.05s@8k",216059.0
+"wolf_howl_1s",22438000.0
+"cat_purr_500ms",8059000.0
+"cricket_stridulate_300ms",2394000.0
+"dragon_roar_1s",23886000.0
+"snake_hiss_500ms",2683000.0
+"songbird_trill_500ms",11612000.0
+"lion_roar_1s",22313000.0
+"wolf_alarm_howl_1s",15514000.0
+"bee_buzz_300ms",2581000.0
+"crow_screech_500ms",9771000.0
+"crocodilian_rumble_1s",22538000.0
+"wolf_howl_shout_1s",21870000.0
+"stream_wolf_howl_1s",18308000.0
+"emotion_evaluate",111.0

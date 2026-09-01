@@ -1,0 +1,178 @@
+# allocbudget.tcyr -- 2.0.11. Allocation budgets for every benchmarked path.
+#
+# WHY THIS SUITE EXISTS
+#
+# `cyrius audit` runs tests/prani.bcyr on every push and reports
+# "1 passed, 0 failed" -- because all the bench harness checks is that it RAN.
+# It compares nothing. Three regressions reached a release through that gap:
+#
+#   2.0.5  added 109 input-range guards and shipped a 2.2x slowdown in
+#          emotion_evaluate. Found two releases later, by a human diffing a
+#          table in docs/benchmarks.md.
+#   2.0.6  found stream_fill_buffer retaining 8,800 B per call -- by someone
+#          WRITING AN EXAMPLE, not by any gate.
+#   2.0.10 found the bench harness measuring a stale dist/ bundle: it read
+#          155 ns for a change that actually measured 114 ns.
+#
+# Every one was caught by a person reading numbers. This suite is the half of
+# that job a machine can do reliably.
+#
+# WHY ALLOCATION AND NOT TIME
+#
+# `alloc_used()` is DETERMINISTIC. The same tree gives the same byte count on
+# any host, in any order, under any load -- so it can be a hard gate with no
+# false-positive risk. Wall-clock on a shared CI runner cannot: a 20% swing
+# between runs on an unchanged tree is ordinary, and a gate that cries wolf gets
+# disabled within a month, which is worse than no gate. Timing is RECORDED by
+# scripts/bench-check.sh instead, and judged by a human.
+#
+# That split is the whole design. It costs the ability to catch a pure-CPU
+# regression automatically -- 2.0.5's would NOT have failed this suite -- and
+# buys a gate nobody will ever be tempted to switch off.
+#
+# Cyrius's allocator is a bump arena that NEVER FREES, which is what makes these
+# budgets matter rather than being a tidiness exercise: an allocation on a
+# per-sample or per-callback path is not a slow leak, it is one that ends the
+# process. At 44100 Hz with 512-sample blocks, one byte per fill is 86 B/s
+# retained for the life of the process; 8,800 was ~757 KB/s.
+#
+# EVERY BUDGET CARRIES A CONTROL. A budget asserting "<= N" passes trivially if
+# the path never runs, so each is paired with an assertion that the work
+# actually happened and that the measurement itself is live.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/spatial.cyr"
+include "src/emotion.cyr"
+include "src/fatigue.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+include "src/preset.cyr"
+include "src/stream.cyr"
+include "src/ffi.cyr"
+
+alloc_init();
+
+var AB_SR    = 0x40e5888000000000;   # 44100.0
+var AB_D005  = 0x3fa999999999999a;   # 0.05 s
+var AB_D010  = 0x3fb999999999999a;   # 0.10 s
+var AB_VAL   = 0xbfe0000000000000;   # -0.5 valence
+var AB_ARO   = 0x3fe999999999999a;   # 0.8  arousal
+
+# ================================================================
+# PER-SAMPLE PATHS -- these must be exactly 0. Anything above zero here is
+# multiplied by the sample rate: one byte per sample is 44 KB/s retained.
+# ================================================================
+test_group("budget: per-sample paths allocate nothing");
+
+var ab_dc = dcblocker_new();
+dcblocker_process(ab_dc, F64_ONE);          # warm
+var ab_m0 = alloc_used();
+var ab_i = 0;
+while (ab_i < 1000) { dcblocker_process(ab_dc, F64_ONE); ab_i = ab_i + 1; }
+assert_eq(alloc_used() - ab_m0, 0, "dcblocker_process: 0 B over 1000 samples");
+# control: the blocker really ran -- its state moved off the reset value
+assert_neq(DcBlocker_y_prev(ab_dc), 0, "control: dcblocker_process actually ran");
+
+var ab_rg = prani_rng_new(42);
+prani_rng_next_f32(ab_rg);
+ab_m0 = alloc_used();
+ab_i = 0;
+while (ab_i < 1000) { prani_rng_next_f32(ab_rg); ab_i = ab_i + 1; }
+assert_eq(alloc_used() - ab_m0, 0, "prani_rng_next_f32: 0 B over 1000 draws");
+var ab_seen = prani_rng_next_f32(ab_rg);
+assert_eq(prani_is_finite(ab_seen), 1, "control: the rng actually produced values");
+
+# control for the MEASUREMENT itself: alloc_used() must move when something does
+# allocate, or every assertion above is vacuous.
+ab_m0 = alloc_used();
+var ab_waste = vec_new();
+vec_push(ab_waste, F64_ONE);
+assert_gt(alloc_used() - ab_m0, 0, "control: alloc_used() detects a real allocation");
+
+# ================================================================
+# PER-FRAME PATHS -- a game calls these once per creature per frame. At 60 fps
+# across 100 creatures that is 6,000 calls a second.
+# ================================================================
+test_group("budget: per-frame paths");
+
+var ab_em = emotion_with_values(AB_VAL, AB_ARO);
+emotion_evaluate(ab_em);
+ab_m0 = alloc_used();
+ab_i = 0;
+while (ab_i < 100) { emotion_evaluate(ab_em); ab_i = ab_i + 1; }
+var ab_em_per = (alloc_used() - ab_m0) / 100;
+# 40 B is one PrEmotionOut, which the caller receives -- it is the RESULT, not
+# waste. The budget exists so a future guard cannot quietly add a second one.
+assert_lte(ab_em_per, 40, "emotion_evaluate: <= 40 B/call (one PrEmotionOut, returned)");
+assert_gt(ab_em_per, 0, "control: it does allocate its result, so the bound is not vacuous");
+var ab_out = emotion_evaluate(ab_em);
+assert_eq(prani_is_err(ab_out), 0, "control: evaluate succeeded (not a fast error path)");
+
+# prani_ffi_voice_set_size is an RTPC a host may call every frame, per creature.
+# 2.0.3's F7 took it from 168 B/call to 0 by rebuilding in place; this pins it.
+var ab_fv = prani_ffi_voice_create(0);
+prani_ffi_voice_set_size(ab_fv, F64_ONE);
+ab_m0 = alloc_used();
+ab_i = 0;
+while (ab_i < 100) { prani_ffi_voice_set_size(ab_fv, F64_ONE); ab_i = ab_i + 1; }
+assert_eq((alloc_used() - ab_m0) / 100, 0, "ffi_voice_set_size: 0 B/call (2.0.3 F7 holds)");
+assert_neq(ab_fv, 0, "control: the FFI voice handle is real");
+
+# ================================================================
+# THE AUDIO-CALLBACK PATH -- the one that ends processes. src/stream.cyr's own
+# header advertises this for Wwise / FMOD / Godot / JACK.
+# ================================================================
+test_group("budget: stream_fill_buffer, the audio-callback path");
+
+var ab_st = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
+var ab_buf = vec_new();
+prani_vec_push_zeros(ab_buf, 512);
+stream_fill_buffer(ab_st, ab_buf);          # warm: this one builds the tract
+ab_m0 = alloc_used();
+ab_i = 0;
+while (ab_i < 10) { stream_fill_buffer(ab_st, ab_buf); ab_i = ab_i + 1; }
+var ab_fill = (alloc_used() - ab_m0) / 10;
+# 8,800 B at 2.0.6 -> 512 at 2.0.10. The residual is ONE svara_glottal_new per
+# block inside crtract_synthesize_laryngeal. Closing it means caching the
+# glottal source, which carries its phase across blocks and CHANGES THE AUDIO --
+# a behaviour decision, not a perf one. See roadmap 2.0.9.
+assert_lte(ab_fill, 512, "stream_fill_buffer: <= 512 B/call (was 8,800 at 2.0.6)");
+assert_eq(stream_samples_rendered(ab_st) > 512, 1, "control: the fills actually rendered audio");
+
+# ================================================================
+# BATCH SYNTHESIS -- allocation here scales with the audio produced, which is
+# legitimate: the caller receives the buffer. What must NOT scale is the
+# PER-CALL overhead, so this measures the MARGINAL cost of doubling the
+# duration. That cancels the fixed setup and is the property that actually
+# matters -- an absolute byte count would go stale on any buffer-growth change.
+# ================================================================
+test_group("budget: crvoice_vocalize scales with samples, not with calls");
+
+var ab_v = crvoice_new(PRANI_SP_WOLF);
+crvoice_vocalize(ab_v, PRANI_VOC_HOWL, AB_SR, AB_D005);   # warm
+ab_m0 = alloc_used();
+crvoice_vocalize(ab_v, PRANI_VOC_HOWL, AB_SR, AB_D005);
+var ab_c5 = alloc_used() - ab_m0;
+ab_m0 = alloc_used();
+crvoice_vocalize(ab_v, PRANI_VOC_HOWL, AB_SR, AB_D010);
+var ab_c10 = alloc_used() - ab_m0;
+# Doubling the duration must at most double the arena cost. Super-linear growth
+# means per-block overhead is being retained -- exactly the 2.0.9 defect, where
+# every 20 ms block allocated its own vec.
+assert_lte(ab_c10, ab_c5 * 2 + 4096, "0.10 s costs at most 2x the 0.05 s call (+slack)");
+assert_gt(ab_c5, 0, "control: synthesis does allocate its returned buffer");
+assert_gt(ab_c10, ab_c5, "control: more audio does cost more, so the ratio is meaningful");
+
+var rc = assert_summary();
+syscall(60, rc);

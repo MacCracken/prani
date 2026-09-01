@@ -5,19 +5,20 @@
 
 ## Version
 
-**2.0.10** — the two performance defects the 2.0.x arc's own measurements found,
-closing roadmap 2.0.9 and 2.0.10 together. **`stream_fill_buffer` retained 8,800 B
-per call → 512** (94%): `stream.cyr`'s share is 0, via `crtract_synthesize_into`
-alongside the allocating wrapper, and `voice.cyr`'s block loop reuses one buffer
-(~400 KB per 1 s call). The residual 512 B is one `svara_glottal_new` per block
-and is a **behaviour question** — caching the source carries its phase forward and
-changes the audio. **`emotion_evaluate` 154 → 114 ns**, recovering 37 of the 82 ns
-2.0.5's guards cost; the 69 ns baseline is not reached and not claimed.
+**2.0.11** — the benchmark suite compares something now. `cyrius audit` had
+always reported `1 passed, 0 failed` for the bench because **all it checked was
+that the harness ran**; three regressions reached a release through that gap
+(2.0.5's 2.2× slowdown, 2.0.6's 8,800 B/call, 2.0.10's stale-bundle reading), each
+caught by a human reading numbers.
 
-⭐ Found while verifying: **the benchmark harness was measuring stale code.**
-`tests/prani.bcyr` benchmarks `dist/prani.cyr`, so a stale bundle reports the last
-bundled code — `cyrius audit` read 155 ns for a change that measured 114 ns. CI now
-runs bundle coherence **before** the audit. **1931 assertions / 17 suites**, exit 0.
+⭐ **Deliberate asymmetry: allocation is hard-gated, timing is recorded.**
+`alloc_used()` is deterministic, so `tests/allocbudget.tcyr` (new, 15 assertions,
+every budget with a control) fails the build. Wall-clock on a shared runner is
+not — a gate that cries wolf gets disabled, which is worse than none — so
+`scripts/bench-check.sh` prints a delta against the committed
+`benches/baseline.csv` and exits 0, with `BENCH_GATE=<factor>` opting in. The
+cost is stated: 2.0.5's regression would not have failed this gate.
+**1946 assertions / 18 suites**, `cyrius audit` exit 0.
 
 ## Toolchain
 
@@ -91,7 +92,7 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.10: fmt · lint · docs · tests · bench,
+`cyrius audit` is green end to end as of 2.0.11: fmt · lint · docs · tests · bench,
 **exit 0**. 17 suites / **1900 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4; before
@@ -119,7 +120,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, current on toolchain and dependencies, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), and with its two measured perf defects repaired (2.0.10).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), and with a gate that would catch the next one (2.0.11).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x is one arc with one destination: retiring `rust-old/`**
@@ -134,7 +135,7 @@ the oracle still holds may be lost:
 | ~~**2.0.7**~~ | ✅ **Done** — the Rust comparison, captured while the oracle still builds. **The arc's only hard ordering constraint.** |
 | ~~**2.0.8**~~ | ✅ **Done** — `rust-old/` retired. **The arc is complete.** |
 | ~~**2.0.9 + 2.0.10**~~ | ✅ **Done** — stream allocation 8,800 → 512 B/call; `emotion_evaluate` 154 → 114 ns. |
-| **2.0.11** | The bench suite has no baseline, so regressions ship silently — and it measures `dist/`, so a stale bundle reports old code. Three options filed. |
+| ~~**2.0.11**~~ | ✅ **Done** — allocation hard-gated (`allocbudget.tcyr`), timing recorded against a committed baseline. |
 | **2.0.8** | Retire `rust-old/`. Gated on the above plus a **297-citation** reference sweep across 53 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
 
 **Decided 2026-08-31: consumer-green is not a hard gate on 2.0.8**, on the
