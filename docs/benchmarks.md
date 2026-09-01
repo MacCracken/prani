@@ -1,29 +1,162 @@
 # prani — Benchmarks
 
-Hot-path benchmarks for the Cyrius port. Run with:
+Run with:
 
 ```sh
 cyrius bench tests/prani.bcyr
 ```
 
-Scalar reference numbers (x86_64 Linux, cyrius 6.5.36, single core). These are
-the inner-loop / per-call functions consumers hit; hosts own any SIMD dispatch.
+Two groups. **Group A** is the historical series tracked since 2.0.0. **Group B**
+mirrors the Rust oracle's criterion suite one-for-one — same species, same
+vocalizations, same durations, same 44100 Hz — so the two harnesses can be lined
+up mechanically. Group B was added in **2.0.7**, the milestone that had to run
+before [`rust-old/`](development/roadmap.md) could be retired.
 
-| Benchmark | Time | 2.0.2 | 2.0.0 | Notes |
-|---|---|---|---|---|
-| `dcblocker_process` | **19 ns/sample** | 20 ns | 19 ns | Single-pole DC blocker applied to every synthesis buffer. |
-| `prani_rng_next_f32` | **14 ns/sample** | 14 ns | 15 ns | PCG32 draw (aspiration / jitter / shimmer noise). |
-| `emotion_evaluate` | **69 ns/frame** | 70 ns | 83 ns | 2D valence/arousal → vocalization + intent + effort + pitch + breathiness (per-frame game-AI call). |
-| `crvoice_vocalize` (Wolf howl, 0.05 s @ 8 kHz = 400 samples) | **211 µs/call** (~0.53 µs/sample) | 214 µs | 227 µs | Full synthesis through the whole svara/naad stack (glottal source → vocal tract → contour → post-processing). **≈ 236× realtime.** |
+## Per-apparatus coverage (Group B)
 
-**2.0.3 makes no performance claim.** Every row is within noise of 2.0.2 (three
-back-to-back runs of the same binary spread 211.3–211.8 µs on the synthesis row);
-its optimization work is measured in bytes retained, not nanoseconds — see the
-allocation budget below. The 2.0.0 column is the same harness on the same host
-under cyrius 6.3.45: `emotion_evaluate` (~16%) and the full synthesis path (~6%)
-came out ahead on the 124-release toolchain bump, while the two per-sample
-figures have only ever moved by one nanosecond in either direction, which is the
-resolution of the measurement rather than a result.
+Every vocal apparatus is now benchmarked. Before 2.0.7 only the laryngeal path
+was, so **a regression in syringeal, stridulatory, vibratile or noise-only
+synthesis was invisible.**
+
+x86_64 Linux, AMD Ryzen 7 5800H, single core, cyrius 6.5.36, prani 2.0.6 on
+svara 3.5.4. Measured 2026-08-31.
+
+| Apparatus | Benchmark | Time | ns/sample | × realtime |
+|---|---|---:|---:|---:|
+| laryngeal | `wolf_howl_1s` | 21.92 ms | 497 | 46× |
+|  | `lion_roar_1s (infrasonic)` | 21.96 ms | 498 | 46× |
+|  | `dragon_roar_1s (subharmonic)` | 23.29 ms | 528 | 43× |
+|  | `crocodilian_rumble_1s (subharmonic)` | 21.93 ms | 497 | 46× |
+|  | `wolf_howl_shout_1s (vocal effort)` | 21.35 ms | 484 | 47× |
+|  | `wolf_alarm_howl_1s (intent)` | 15.29 ms | 495 | 46× |
+|  | `cat_purr_500ms (purr path)` | 7.94 ms | 360 | 63× |
+|  | `stream_wolf_howl_1s (streaming)` | 17.93 ms | 407 | 56× |
+| syringeal | `songbird_trill_500ms` | 11.55 ms | 524 | 43× |
+|  | `crow_screech_500ms` | 9.49 ms | 430 | 53× |
+| stridulatory | `cricket_stridulate_300ms` | 2.36 ms | 178 | 127× |
+| vibratile | `bee_buzz_300ms` | 2.52 ms | 190 | 119× |
+| noise-only | `snake_hiss_500ms` | 2.73 ms | 124 | 183× |
+
+**Per-sample cost is essentially rate-independent**, which is the useful number:
+~497 ns/sample for a full laryngeal howl regardless of duration or rate. The
+apparatus spread is real — noise-only is 4× cheaper per sample than laryngeal
+(124 vs 497 ns) because it has no glottal source and no formant bank, just shaped
+noise through one naad bandpass.
+
+## The Rust comparison
+
+> **Dated 2026-08-31.** Both harnesses on one host, in one sitting. This is the
+> comparison [`roadmap 2.0.7`](development/roadmap.md) required before the oracle
+> could be retired, because after removal it can only be run from a tag.
+
+| Benchmark | Rust oracle (f32) | Cyrius port (f64) | Ratio |
+|---|---:|---:|---:|
+| `crow_screech_500ms` | 546 µs | 9.49 ms | **17.4×** |
+| `stream_wolf_howl_1s` | 1.079 ms | 17.93 ms | **16.6×** |
+| `crocodilian_rumble_1s` | 1.375 ms | 21.93 ms | **16.0×** |
+| `wolf_howl_shout_1s` | 1.338 ms | 21.35 ms | **16.0×** |
+| `dragon_roar_1s` | 1.467 ms | 23.29 ms | **15.9×** |
+| `wolf_howl_1s` | 1.391 ms | 21.92 ms | **15.8×** |
+| `lion_roar_1s` | 1.394 ms | 21.96 ms | **15.7×** |
+| `cat_purr_500ms` | 505 µs | 7.94 ms | **15.7×** |
+| `songbird_trill_500ms` | 741 µs | 11.55 ms | **15.6×** |
+| `wolf_alarm_howl_1s` | 982 µs | 15.29 ms | **15.6×** |
+| `bee_buzz_300ms` | 176 µs | 2.52 ms | **14.3×** |
+| `snake_hiss_500ms` | 191 µs | 2.73 ms | **14.2×** |
+| `cricket_stridulate_300ms` | 238 µs | 2.36 ms | **9.9×** |
+| `emotion_evaluate` | 3.20 ns | 151 ns | **47×** |
+
+**The port is ~16× slower than the oracle**, median **15.7×** across the 13
+synthesis benchmarks, in a tight 9.9×–17.4× band. A uniform ratio across
+unrelated code paths points at something systemic in the substrate rather than
+one slow algorithm.
+
+### Two figures this project has published were wrong
+
+| Claim | Where | Measured |
+|---|---|---|
+| oracle does *~1000× realtime* | this file, since the port began | **719×** |
+| port does *~236× realtime* | this file, 2.0.0–2.0.6 | **45.6×** |
+
+The port's 236× was an **artifact of the 8 kHz benchmark**, not a throughput
+figure. Per-sample cost barely moves with rate — 533 ns/sample at 0.05 s @ 8 kHz
+against 497 ns/sample at 1.0 s @ 44100 Hz — so a benchmark at one eighth the
+rate renders one eighth the samples and looks eight times more real-time than
+the library actually is. **Quote ns/sample, or quote realtime with its rate.**
+
+### What the 15.7× is, and is not
+
+⚠ **Three things differ between those two columns, and only one is the port.**
+
+| | Rust oracle | Cyrius port |
+|---|---|---|
+| float width | **f32** | **f64** |
+| DSP stack | svara 1.0.0 / naad 1.0.0 / hisab 1.2.0 | svara **3.5.4** / naad **2.2.2** / hisab **2.11.2** |
+| compiler | LLVM, `cargo --release` | cycc 6.5.36 |
+
+Three major versions of the DSP dependency sit inside that ratio, and svara 3.x
+added work 1.0.0 never did — subglottal coupling, a nasal antiformant,
+source-filter interaction. **This measures the two stacks as shipped, not one
+algorithm in two languages,** and it is not evidence that Cyrius is 15× slower
+than Rust. The honest prior is that codegen dominates and float width is second.
+
+Closing the float-width variable is [roadmap 2.1.0 Lane A](development/roadmap.md),
+filed as **P0 on naad and svara** — prani cannot convert alone, because the
+per-sample svara calls are f64 on both sides. It is no longer *forced*: ganita
+1.1.4 ships an f32 scalar tier and prani calls nothing outside it.
+
+## Method
+
+- **Host**: x86_64 Linux 7.1.10, AMD Ryzen 7 5800H, single core, no pinning, no
+  governor changes. Both harnesses run back to back on an otherwise idle machine.
+- **Rust**: `cargo bench --bench benchmarks` at `--release`, criterion defaults
+  (3 s warmup, 100 samples), `CARGO_TARGET_DIR` **outside the repo** so
+  `rust-old/` stays unmodified. The point estimate is quoted.
+- **Cyrius**: `cyrius bench tests/prani.bcyr`, batch pattern
+  (`bench_batch_start` / loop / `bench_batch_stop`), one batch mean per benchmark.
+- ⚠ **The two harnesses do not measure identically.** `lib/bench.cyr` **measures
+  the timer floor and subtracts it from every sample** (cyrius 6.5.19+; 1.33 µs
+  on this host); criterion does not. Criterion also warms up, adapts its sample
+  count and rejects outliers; the Cyrius harness reports one batch mean, so its
+  min/max columns equal the mean by construction and must not be read as a
+  distribution. At millisecond scale the floor is noise, but at
+  `emotion_evaluate`'s 3 ns it is **400× the measurement** — which is why that
+  row's 47× ratio is not comparable to the synthesis rows and is reported
+  separately.
+- **Voice construction is outside the timed loop** in Group B, matching
+  criterion. Group A's `wolf_howl_0.05s@8k` deliberately builds a voice per
+  iteration (a cold call from a game engine), which is why the two groups'
+  wolf-howl numbers are not comparable to each other either.
+- **`wolf_alarm_howl_1s` renders 0.7 s, not 1.0 s** — Alarm's `duration_scale`
+  is 0.7. Its realtime figure is computed on the audio actually produced;
+  reading it as a 1.0 s call would overstate it by 43%.
+- **Three known mirror inexactnesses**, all small against a millisecond: the
+  oracle's `voice.clone()` into `SynthStream::new` has no port analogue (the
+  handle is passed directly); `vec![0.0f32; 512]` becomes `vec_new()` + 512
+  pushes, so ~6 doubling reallocs against Rust's one allocation, inside the
+  timed region as criterion has it; and `black_box` has no equivalent, so results
+  are assigned to a sink — cycc's DCE is function-granularity, so a call is never
+  elided, but this is a difference in kind rather than spelling.
+
+## Group A — the historical series
+
+Tracked since 2.0.0 on the same host and harness. Kept unchanged so the series
+stays comparable; **do not renumber or reparameterise these.**
+
+| Benchmark | 2.0.7 | 2.0.3 | 2.0.2 | 2.0.0 | Notes |
+|---|---|---|---|---|---|
+| `dcblocker_process` | **19 ns/sample** | 19 ns | 20 ns | 19 ns | Single-pole DC blocker on every synthesis buffer. |
+| `prani_rng_next_f32` | **14 ns/sample** | 14 ns | 14 ns | 15 ns | PCG32 draw (aspiration / jitter / shimmer). |
+| `emotion_evaluate` (per-frame) | **151 ns** | 69 ns | 70 ns | 83 ns | ⚠ 2.0.5's input-range guards; see below. |
+| `crvoice_vocalize` wolf howl 0.05 s @ 8 kHz | **~213 µs** | 211 µs | 214 µs | 227 µs | Cold call: builds a fresh voice each iteration. |
+
+⚠ **`emotion_evaluate` went 69 → 151 ns between 2.0.3 and 2.0.7** — a 2.2×
+regression, and the only Group A row that moved. It is not noise. The likely
+cause is 2.0.5's input-range guards on the emotion path; it has **not** been
+bisected. Note Group A's row and Group B's `emotion_evaluate` are *different
+states* — Group A uses valence 0.5 / arousal 0.7, the oracle's mirror uses
+−0.5 / 0.8 — and both now measure ~151 ns, so the regression is in the code, not
+the parameters.
 
 ## Allocation budget
 
@@ -42,47 +175,3 @@ permanently. svara's `streaming.cyr` states the rule it broke: *an allocation
 inside an audio callback is not a leak that grows slowly, it is one that ends the
 process.*
 
-## Method
-
-- Batch pattern (`bench_batch_start` / tight loop / `bench_batch_stop`) with
-  N = 1e6 for per-sample ops (amortizes clock-read overhead), 1e5 for
-  `emotion_evaluate`, and 200 for the full-synthesis path.
-- Since cyrius **6.5.19**, `lib/bench.cyr` also *measures* the timer floor and
-  subtracts it from every sample; the harness prints its own figure
-  (`bench_clock_overhead_ns()`, 1.31 µs on this host) rather than quoting a
-  constant. A clock read spans ~15 ns to ~3,550 ns across hosts, so no single
-  written-down number survives the move. The batch pattern already amortized it,
-  which is why the 2.0.0 column above is still comparable.
-- The full-synthesis benchmark builds a fresh `CreatureVoice` each iteration
-  (matching a cold call from a game engine) and synthesizes a complete howl,
-  exercising species params → svara glottal/formant/tract → pitch/formant
-  contours → the post-processing chain (tilt, envelope, DC block).
-
-## Parity note
-
-The Rust oracle (1.1.0) reported ~1000× realtime for full synthesis in f32; the
-Cyrius port is f64 throughout (svara/naad/hisab are f64-only) and routes through
-the ported svara stack, so absolute numbers differ. Until the two are measured on
-one host with one method, neither number means anything next to the other — and
-note that `lib/bench.cyr` has measured and subtracted the timer floor since
-cyrius 6.5.19, which a Rust harness will not.
-
-That comparison, and the coverage gap behind it (no benchmark touches syringeal,
-stridulatory, vibratile or noise-only synthesis, the streaming path, or the
-sequence/chorus paths), are owned by **roadmap 2.0.7** —
-[`development/roadmap.md`](development/roadmap.md).
-
-⚠ **That item gates `rust-old/`'s retirement (roadmap 2.0.8), and it is the only
-one that does.** The comparison needs the oracle present and buildable; after
-removal it can only be run from a tag, and it depends on `svara 1.0.0` /
-`naad 1.0.0` / `hisab 1.2.0` staying published on crates.io. `cargo fetch
---locked` succeeds as of 2026-08-31 — that is a window, not a guarantee. The Rust
-harness's **14** benchmarks also cover every vocal apparatus, so mirroring them
-closes the coverage gap and makes the comparison like-for-like at the same time.
-
-⚠ **The wolf-howl row above is not comparable to the oracle's `wolf_howl_1s`.**
-This harness runs 0.05 s at 8 kHz (400 samples); the Rust runs 1.0 s at 44100 Hz
-(44,100 samples) — 1/880th of the work, at a sample rate that changes which svara
-code path runs. Of the four benchmarks here, only `emotion_evaluate` already
-matches its Rust counterpart. 2.0.7 either adds a 1 s @ 44100 Hz synthesis row
-alongside the existing one or drops wolf howl from the comparison.

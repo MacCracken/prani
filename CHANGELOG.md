@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.7] - The Rust comparison, and two published figures that were wrong
+
+The measurement that had to happen before `rust-old/` could be retired: after
+2.0.8 it can only be run from a tag, against three crates.io releases staying
+published. Benchmarks **4 → 18** (14 mirroring the oracle's criterion suite
+one-for-one), `cyrius audit` exit 0, 1900 assertions. `rust-old/` unmodified —
+built with `CARGO_TARGET_DIR` outside the repo.
+
+### The comparison
+
+Both harnesses on one host, one sitting, 2026-08-31. AMD Ryzen 7 5800H, single
+core. Same species, same durations, same 44100 Hz.
+
+| | Rust oracle (f32) | Cyrius port (f64) | |
+|---|---:|---:|---:|
+| `wolf_howl_1s` | 1.39 ms | 21.9 ms | **15.8× slower** |
+| median, 13 synthesis benchmarks | | | **15.7×** |
+| range | | | 9.9× – 17.4× |
+
+The band is *tight* — every apparatus, every duration. A uniform ratio across
+unrelated code paths is the signature of something systemic in the substrate,
+not one slow algorithm.
+
+⚠ **This measures two stacks as shipped, not one algorithm in two languages.**
+Three things differ and only one is float width: the oracle is prani 1.1.0 on
+svara 1.0.0 / naad 1.0.0 compiled by LLVM `--release`; the port is 2.0.6 on
+svara **3.5.4** / naad **2.2.2** compiled by cycc. svara 3.x added work 1.0.0
+never did. **It is not evidence that Cyrius is 15× slower than Rust**, and the
+honest prior is that codegen dominates and float width is second.
+
+### Fixed — two figures this project has published since the port began
+
+| Claim | Measured |
+|---|---|
+| oracle does *~1000× realtime* | **719×** |
+| port does *~236× realtime* | **45.6×** |
+
+⭐ The port's 236× was an **artifact of the 8 kHz benchmark**. Per-sample cost
+barely moves with rate — 533 ns/sample at 0.05 s @ 8 kHz against 497 ns/sample at
+1.0 s @ 44100 Hz — so a benchmark at one eighth the rate renders one eighth the
+samples and looks eight times more real-time than the library is. Neither figure
+had ever been checked. `docs/benchmarks.md` now quotes **ns/sample**, or realtime
+with its rate attached.
+
+### Added — every vocal apparatus is now benchmarked
+
+Before this, only the laryngeal path was, so **a regression in syringeal,
+stridulatory, vibratile or noise-only synthesis was invisible**. The spread is
+real: noise-only costs 124 ns/sample against laryngeal's 497, having no glottal
+source and no formant bank.
+
+### Found — `emotion_evaluate` regressed 2.2×, and 2.0.5 did it
+
+⭐ The only historical-series row that moved: **69 ns → 151 ns**, on a path this
+file calls a *"per-frame game-AI call"*. Caused by 2.0.5's own input-range
+guards. `evaluate` calls `select_vocalization` and `select_intent`, and **each
+calls both zone functions**, so the same two fields are range-checked **four
+times** per call, plus the smoothing check — five validations where one would do.
+
+The lesson is not "fewer guards". It is that 2.0.5 added 109 of them and ran the
+benchmark suite green, because **the suite never compared against a baseline** —
+it only checked the harness ran. A guard on a per-frame path needs a benchmark
+delta attached before it ships. Filed as roadmap **2.0.10** with the fix
+(validate once at the entry point; split public checked wrappers from internal
+unchecked paths, as 2.0.3 did for `species_params`).
+
+### Note — the f32 constraint this port was built on is gone
+
+`port-audit.md` has said since 2.0.0 that *"f32 → f64 everywhere … widening is
+**forced**"*. **ganita 1.1.4 ships a 23-function f32 scalar tier and is already
+vendored in `lib/`**, and prani calls nothing outside it — no `tanh`, `sinh`,
+`cosh`, `asin` or `acos` anywhere in `src/`. Not forced; a choice nobody had
+revisited.
+
+prani still cannot convert alone: `svara_glottal_next_sample` and
+`svara_tract_process_sample` are f64 on both sides of every per-sample call.
+Filed as **P0 on naad and svara** (naad first — it is the bottom of the stack)
+and as roadmap **2.1.0 Lane A** here. Both P0s carry the caveat above: measure
+one hot path before converting a module, because a measured "no" closes the
+question for everyone downstream.
+
 ## [2.0.6] - Runnable examples, and the two defects they found
 
 Five worked programs in [`docs/examples/`](docs/examples/), built and run by CI on

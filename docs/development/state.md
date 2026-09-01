@@ -5,22 +5,23 @@
 
 ## Version
 
-**2.0.6** — runnable examples, and the two defects they found. Five worked
-programs in [`../examples/`](../examples/), built and run by CI on every push.
-Each includes **`dist/prani.cyr`** rather than `src/`, so they exercise prani as a
-consumer does — the closest thing the project has to a consumer integration test.
+**2.0.7** — the Rust comparison, run before the oracle can be retired.
+Benchmarks **4 → 18**, 14 mirroring criterion one-for-one. Both harnesses on one
+host, 2026-08-31: the port is **~16× slower** than the oracle (median 15.7×,
+range 9.9–17.4×). ⚠ That measures **two stacks as shipped** — f32 vs f64, svara
+1.0.0 vs 3.5.4, LLVM vs cycc — not one algorithm in two languages.
 
-⭐ **The FFI surface has now been driven end to end.** `streaming.cyr` runs
-`voice_create` → `stream_start` → `stream_fill` to completion → `is_finished` →
-destroy, and proves the FFI and Cyrius drains produce **sample-for-sample
-identical audio**. That lifecycle is the condition the consumer-green decision
-rests on.
+⭐ **Two figures this project had published since the port began were wrong**: the
+oracle does **719×** realtime, not ~1000×; the port does **45.6×**, not ~236×.
+The 236× was an artifact of benchmarking at 8 kHz — per-sample cost is nearly
+rate-independent, so an eighth of the rate looks eight times more real-time.
+`docs/benchmarks.md` now quotes ns/sample.
 
-They immediately earned their keep: an **out-of-range species tag rendered audio
-and reported success** (2.0.5 guarded `voc` and `intent` for this exact reason and
-missed `species`) — fixed, pinned as F13; and **`stream_fill_buffer` retains
-8,800 bytes per call** on the path advertised for audio callbacks — filed as
-roadmap 2.0.9. **1900 assertions / 17 suites**, `cyrius audit` exit 0.
+Also found: **`emotion_evaluate` regressed 2.2× (69 → 151 ns)** on a per-frame
+path, caused by 2.0.5's guards validating the same two fields four times per call
+— filed as 2.0.10. And **the f32 constraint the port was built on is gone**
+(ganita 1.1.4, already vendored); filed as P0 on naad and svara, 2.1.0 Lane A
+here. **1900 assertions / 17 suites**, `cyrius audit` exit 0.
 
 ## Toolchain
 
@@ -91,7 +92,7 @@ each integrated and independently re-verified in the main tree against `rust-old
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.6: fmt · lint · docs · tests · bench,
+`cyrius audit` is green end to end as of 2.0.7: fmt · lint · docs · tests · bench,
 **exit 0**. 17 suites / **1900 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4; before
@@ -119,7 +120,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, current on toolchain and dependencies, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), and exercised by runnable examples (2.0.6).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), and measured against the oracle (2.0.7).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x is one arc with one destination: retiring `rust-old/`**
@@ -131,8 +132,9 @@ the oracle still holds may be lost:
 | ~~**2.0.4**~~ | ✅ **Done** — parity re-verification + all 41 shortfalls closed; recovery rule in [ADR-0004](../adr/0004-cite-the-oracle-by-tag.md). Ledger: [`rust-test-parity.md`](rust-test-parity.md). |
 | ~~**2.0.5**~~ | ✅ **Done** — input-range validation (109 guards, [`input-ranges.md`](../architecture/input-ranges.md)), plus the svara 3.5.4 bump that fixed the (1000, 7500] abort. |
 | ~~**2.0.6**~~ | ✅ **Done** — five examples, run by CI; `streaming.cyr` drives the full FFI lifecycle, satisfying the consumer-green condition. |
-| **2.0.7** | Benchmark breadth + the Rust comparison. ⚠ **Must complete before 2.0.8** — it is the only item that must; it needs the oracle buildable. Mirror the oracle's **14** benchmarks (not 10, as previously recorded). |
+| ~~**2.0.7**~~ | ✅ **Done** — the Rust comparison, captured while the oracle still builds. **The arc's only hard ordering constraint, now satisfied.** |
 | **2.0.9** | `stream_fill_buffer` allocates 8,800 B/call on the real-time path (found by 2.0.6's example). Does **not** gate the retirement. |
+| **2.0.10** | `emotion_evaluate` regressed 2.2× — 2.0.5's guards validate the same fields 4× per call (found by 2.0.7). Does **not** gate the retirement. |
 | **2.0.8** | Retire `rust-old/`. Gated on the above plus an **83-citation** reference sweep across 42 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
 
 **Decided 2026-08-31: consumer-green is not a hard gate on 2.0.8**, on the

@@ -1,12 +1,49 @@
-# prani.bcyr -- hot-path benchmarks for prani.
+# prani.bcyr -- benchmarks for prani.
 # Run: cyrius bench tests/prani.bcyr
-# Covers the inner-loop / per-call functions consumers hit: the DC blocker
-# (applied to every synthesis buffer), the PCG32 PRNG (aspiration/jitter noise),
-# emotion evaluation (per-frame game AI), and a full creature-voice synthesis
-# (the headline path, exercising the whole svara/naad stack).
 #
-# Batch pattern: bench_new → bench_batch_start → tight loop → bench_batch_stop
-# → bench_report. Per-sample ops use large N to amortize clock overhead.
+# TWO GROUPS, deliberately kept apart:
+#
+#   GROUP A -- HISTORICAL SERIES (do not rename, do not delete).
+#     dcblocker_process, prani_rng_next_f32, emotion_evaluate (per-frame) and
+#     crvoice_vocalize wolf_howl_0.05s@8k. These four are the series
+#     docs/benchmarks.md tracks across 2.0.0 / 2.0.2 / 2.0.3; the names are the
+#     join key in benches/history.csv, so renaming one breaks the record.
+#     Group A's wolf bench builds a FRESH voice inside its loop on purpose --
+#     it models a cold call from a game engine. That makes it deliberately NOT
+#     comparable to Group B's wolf_howl_1s; see below.
+#
+#   GROUP B -- CRITERION MIRROR (2.0.7). A like-for-like mirror of the frozen
+#     Rust oracle's 14 criterion benchmarks (git show 2.0.3:rust-old/benches/
+#     benchmarks.rs), so the 1.1.0 crate's "~1000x realtime" claim and the
+#     port's number can finally be read under ONE method before rust-old/ is
+#     retired in 2.0.8. Names are the criterion function names VERBATIM
+#     (wolf_howl_1s, cat_purr_500ms, ...) so the two harnesses' output lines up
+#     mechanically. Every parameter -- species, vocalization, intent, sample
+#     rate, duration -- is the oracle's.
+#
+#     Two structural rules Group B follows, because getting either wrong voids
+#     the comparison:
+#       1. criterion constructs the voice ABOVE b.iter(), so voice construction
+#          is NOT measured -- only vocalize is. Every Group B voice is therefore
+#          built before bench_batch_start.
+#       2. stream_wolf_howl_1s is the one exception: criterion builds the
+#          SynthStream and the 512-sample buffer INSIDE b.iter(), so both are
+#          inside the timed region here too.
+#
+#     Every Group B benchmark probes its call ONCE before timing and checks the
+#     result with prani_is_err (bench_probe_ok below). A benchmark that
+#     silently measures a rejected-input error return would report a fast,
+#     meaningless number; a failed probe prints a loud line and makes main
+#     return non-zero, so `cyrius audit` cannot go green on a broken mirror.
+#
+# Iteration counts: chosen per benchmark, from a measured first run, to land
+# each one in a 0.24-0.37 s band (well under the ~2 s CI budget) -- the work
+# is deterministic and CPU-bound, so a few tens of samples give a stable mean.
+# Longer durations get proportionally fewer iterations. Each count is stated at
+# its call site, with the per-call time it was derived from.
+#
+# Batch pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop
+# -> bench_report. Per-sample ops use large N to amortize clock overhead.
 
 include "lib/sakshi.cyr"
 include "lib/hisab.cyr"
@@ -17,12 +54,39 @@ include "lib/bayan.cyr"
 include "lib/svara.cyr"
 include "dist/prani.cyr"
 
-var F_0_05 = 0x3FA999999999999A;   # 0.05 s
+# --- float bit patterns (IEEE-754 hex; decimal in the comment) ---
+var F_0_05    = 0x3FA999999999999A;   #  0.05 s  (Group A duration)
+var F_0_3     = 0x3FD3333333333333;   #  0.3  s  (cricket, bee)
+var F_0_5     = 0x3FE0000000000000;   #  0.5  s  (purr, hiss, trill, screech)
+var F_0_8     = 0x3FE999999999999A;   #  0.8     (oracle emotion arousal)
+var F_NEG_0_5 = 0xBFE0000000000000;   # -0.5     (oracle emotion valence)
+
+# Probe guard. `handle` is whatever the call under test returns: a vec / stream
+# / output-struct pointer on success, or a NEGATIVE PRANI_ERR_* on rejection.
+# Returns 1 when the call really synthesized, 0 (loudly) when it did not.
+fn bench_probe_ok(handle, label) {
+    if (prani_is_err(handle) == 1) {
+        println("  !! BENCH PROBE FAILED -- this benchmark would time an error");
+        println("     return, not synthesis. Benchmark:");
+        println(label);
+        return 0;
+    }
+    return 1;
+}
 
 fn main() {
     alloc_init();
 
-    # --- per-sample: DC blocker ---
+    var rate = f64_from(44100);   # 44100.0 -- the oracle's rate for all 13
+    var one  = f64_from(1);       # 1.0 s / vocal effort 1.0
+    var ok   = 0;                 # count of Group B probes that succeeded
+    var sink = 0;                 # keeps results live (criterion's black_box)
+
+    println("");
+    println("  -- GROUP A, historical series (docs/benchmarks.md 2.0.0 onward) --");
+
+    # --- per-sample: DC blocker --- N = 1,000,000 (19 ns op; needs a large N
+    # to amortize the ~1.3 us clock read across the batch).
     var blk = dcblocker_new();
     var b1 = bench_new("dcblocker_process (per-sample)");
     bench_batch_start(b1);
@@ -31,7 +95,7 @@ fn main() {
     bench_batch_stop(b1, 1000000);
     bench_report(b1);
 
-    # --- per-sample: PCG32 next_f32 ---
+    # --- per-sample: PCG32 next_f32 --- N = 1,000,000 (15 ns op, same reason).
     var rng = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
     var b2 = bench_new("prani_rng_next_f32 (per-sample)");
     bench_batch_start(b2);
@@ -41,7 +105,10 @@ fn main() {
     bench_batch_stop(b2, 1000000);
     bench_report(b2);
 
-    # --- per-frame: emotion evaluate (2D valence/arousal → output) ---
+    # --- per-frame: emotion evaluate (2D valence/arousal -> output) ---
+    # N = 100,000 (159 ns op). NOTE: (0.5, 0.7), NOT the oracle's (-0.5, 0.8).
+    # This is the historical series' own state and is kept as-is; the oracle's
+    # parameters are mirrored separately as Group B's `emotion_evaluate`.
     var em = emotion_with_values(0x3FE0000000000000, 0x3FE6666666666666);   # (0.5, 0.7)
     var b3 = bench_new("emotion_evaluate (per-frame)");
     bench_batch_start(b3);
@@ -52,6 +119,8 @@ fn main() {
     bench_report(b3);
 
     # --- full synthesis: Wolf howl 0.05 s @ 8 kHz (whole svara/naad stack) ---
+    # N = 200 (~214 us op). Voice construction is INSIDE the loop by design --
+    # a cold call from a game engine. Not comparable to wolf_howl_1s.
     var b4 = bench_new("crvoice_vocalize wolf_howl_0.05s@8k");
     bench_batch_start(b4);
     var m = 0;
@@ -63,6 +132,190 @@ fn main() {
     bench_batch_stop(b4, 200);
     bench_report(b4);
 
+    println("");
+    println("  -- GROUP B, criterion mirror of rust-old/benches/benchmarks.rs --");
+    println("  -- (voice built OUTSIDE the timed loop, as criterion does) --");
+
+    # ---- 1. wolf_howl_1s -- Wolf / Howl / default intent / 44100 / 1.0 s ----
+    # N = 16 (21.9 ms measured -> ~0.35 s).
+    var v01 = crvoice_new(PRANI_SP_WOLF);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v01, PRANI_VOC_HOWL, rate, one), "wolf_howl_1s");
+    var b01 = bench_new("wolf_howl_1s");
+    bench_batch_start(b01);
+    var n01 = 0;
+    while (n01 < 16) { sink = crvoice_vocalize(v01, PRANI_VOC_HOWL, rate, one); n01 = n01 + 1; }
+    bench_batch_stop(b01, 16);
+    bench_report(b01);
+
+    # ---- 2. cat_purr_500ms -- Cat / Purr (special purr path) / 0.5 s ----
+    # N = 32 (8.051 ms measured -> ~0.26 s).
+    var v02 = crvoice_new(PRANI_SP_CAT);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v02, PRANI_VOC_PURR, rate, F_0_5), "cat_purr_500ms");
+    var b02 = bench_new("cat_purr_500ms");
+    bench_batch_start(b02);
+    var n02 = 0;
+    while (n02 < 32) { sink = crvoice_vocalize(v02, PRANI_VOC_PURR, rate, F_0_5); n02 = n02 + 1; }
+    bench_batch_stop(b02, 32);
+    bench_report(b02);
+
+    # ---- 3. cricket_stridulate_300ms -- Cricket / Stridulate (stridulatory) ----
+    # N = 100 (2.375 ms measured -> ~0.24 s).
+    var v03 = crvoice_new(PRANI_SP_CRICKET);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v03, PRANI_VOC_STRIDULATE, rate, F_0_3), "cricket_stridulate_300ms");
+    var b03 = bench_new("cricket_stridulate_300ms");
+    bench_batch_start(b03);
+    var n03 = 0;
+    while (n03 < 100) { sink = crvoice_vocalize(v03, PRANI_VOC_STRIDULATE, rate, F_0_3); n03 = n03 + 1; }
+    bench_batch_stop(b03, 100);
+    bench_report(b03);
+
+    # ---- 4. dragon_roar_1s -- Dragon / Roar (subharmonics + fire breath) ----
+    # N = 16 (23.2 ms measured -> ~0.37 s).
+    var v04 = crvoice_new(PRANI_SP_DRAGON);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v04, PRANI_VOC_ROAR, rate, one), "dragon_roar_1s");
+    var b04 = bench_new("dragon_roar_1s");
+    bench_batch_start(b04);
+    var n04 = 0;
+    while (n04 < 16) { sink = crvoice_vocalize(v04, PRANI_VOC_ROAR, rate, one); n04 = n04 + 1; }
+    bench_batch_stop(b04, 16);
+    bench_report(b04);
+
+    # ---- 5. snake_hiss_500ms -- Snake / Hiss (noise-only apparatus) ----
+    # N = 96 (2.719 ms measured -> ~0.26 s).
+    var v05 = crvoice_new(PRANI_SP_SNAKE);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v05, PRANI_VOC_HISS, rate, F_0_5), "snake_hiss_500ms");
+    var b05 = bench_new("snake_hiss_500ms");
+    bench_batch_start(b05);
+    var n05 = 0;
+    while (n05 < 96) { sink = crvoice_vocalize(v05, PRANI_VOC_HISS, rate, F_0_5); n05 = n05 + 1; }
+    bench_batch_stop(b05, 96);
+    bench_report(b05);
+
+    # ---- 6. songbird_trill_500ms -- Songbird / Trill (syringeal) ----
+    # N = 32 (11.316 ms measured -> ~0.36 s).
+    var v06 = crvoice_new(PRANI_SP_SONGBIRD);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v06, PRANI_VOC_TRILL, rate, F_0_5), "songbird_trill_500ms");
+    var b06 = bench_new("songbird_trill_500ms");
+    bench_batch_start(b06);
+    var n06 = 0;
+    while (n06 < 32) { sink = crvoice_vocalize(v06, PRANI_VOC_TRILL, rate, F_0_5); n06 = n06 + 1; }
+    bench_batch_stop(b06, 32);
+    bench_report(b06);
+
+    # ---- 7. lion_roar_1s -- Lion / Roar (infrasonic f0) ----
+    # N = 16 (22.4 ms measured -> ~0.36 s).
+    var v07 = crvoice_new(PRANI_SP_LION);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v07, PRANI_VOC_ROAR, rate, one), "lion_roar_1s");
+    var b07 = bench_new("lion_roar_1s");
+    bench_batch_start(b07);
+    var n07 = 0;
+    while (n07 < 16) { sink = crvoice_vocalize(v07, PRANI_VOC_ROAR, rate, one); n07 = n07 + 1; }
+    bench_batch_stop(b07, 16);
+    bench_report(b07);
+
+    # ---- 8. wolf_alarm_howl_1s -- Wolf / Howl / Alarm via vocalize_with_intent ----
+    # N = 20 (15.244 ms measured -> ~0.30 s). Alarm's duration_scale changes the rendered length; that is the
+    # oracle's behaviour too, so the number is comparable as-is.
+    var v08 = crvoice_new(PRANI_SP_WOLF);
+    ok = ok + bench_probe_ok(crvoice_vocalize_with_intent(v08, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, rate, one), "wolf_alarm_howl_1s");
+    var b08 = bench_new("wolf_alarm_howl_1s");
+    bench_batch_start(b08);
+    var n08 = 0;
+    while (n08 < 20) {
+        sink = crvoice_vocalize_with_intent(v08, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, rate, one);
+        n08 = n08 + 1;
+    }
+    bench_batch_stop(b08, 20);
+    bench_report(b08);
+
+    # ---- 9. bee_buzz_300ms -- Bee / Buzz (vibratile) ----
+    # N = 100 (2.518 ms measured -> ~0.25 s).
+    var v09 = crvoice_new(PRANI_SP_BEE);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v09, PRANI_VOC_BUZZ, rate, F_0_3), "bee_buzz_300ms");
+    var b09 = bench_new("bee_buzz_300ms");
+    bench_batch_start(b09);
+    var n09 = 0;
+    while (n09 < 100) { sink = crvoice_vocalize(v09, PRANI_VOC_BUZZ, rate, F_0_3); n09 = n09 + 1; }
+    bench_batch_stop(b09, 100);
+    bench_report(b09);
+
+    # ---- 10. crow_screech_500ms -- Crow / Screech (syringeal) ----
+    # N = 32 (9.327 ms measured -> ~0.30 s).
+    var v10 = crvoice_new(PRANI_SP_CROW);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v10, PRANI_VOC_SCREECH, rate, F_0_5), "crow_screech_500ms");
+    var b10 = bench_new("crow_screech_500ms");
+    bench_batch_start(b10);
+    var n10 = 0;
+    while (n10 < 32) { sink = crvoice_vocalize(v10, PRANI_VOC_SCREECH, rate, F_0_5); n10 = n10 + 1; }
+    bench_batch_stop(b10, 32);
+    bench_report(b10);
+
+    # ---- 11. crocodilian_rumble_1s -- Crocodilian / Rumble (subharmonics) ----
+    # N = 16 (21.8 ms measured -> ~0.35 s).
+    var v11 = crvoice_new(PRANI_SP_CROCODILIAN);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v11, PRANI_VOC_RUMBLE, rate, one), "crocodilian_rumble_1s");
+    var b11 = bench_new("crocodilian_rumble_1s");
+    bench_batch_start(b11);
+    var n11 = 0;
+    while (n11 < 16) { sink = crvoice_vocalize(v11, PRANI_VOC_RUMBLE, rate, one); n11 = n11 + 1; }
+    bench_batch_stop(b11, 16);
+    bench_report(b11);
+
+    # ---- 12. wolf_howl_shout_1s -- Wolf.with_vocal_effort(1.0) / Howl ----
+    # N = 16 (21.356 ms measured -> ~0.34 s). with_vocal_effort mutates and returns self (the oracle's builder
+    # consumed and returned Self), so the effort is applied once, outside the
+    # timed loop, exactly as criterion does.
+    var v12 = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), one);
+    ok = ok + bench_probe_ok(crvoice_vocalize(v12, PRANI_VOC_HOWL, rate, one), "wolf_howl_shout_1s");
+    var b12 = bench_new("wolf_howl_shout_1s");
+    bench_batch_start(b12);
+    var n12 = 0;
+    while (n12 < 16) { sink = crvoice_vocalize(v12, PRANI_VOC_HOWL, rate, one); n12 = n12 + 1; }
+    bench_batch_stop(b12, 16);
+    bench_report(b12);
+
+    # ---- 13. stream_wolf_howl_1s -- Wolf / Howl / Social, drained 512 at a time ----
+    # N = 20 (17.808 ms measured -> ~0.36 s). THE EXCEPTION: criterion puts SynthStream::new AND
+    # vec![0.0f32; 512] inside b.iter(), so both are inside the timed region
+    # here. The buffer is built with vec_new + 512 pushes (Cyrius has no
+    # fill-constructor); that is 6 doubling reallocs against Rust's single
+    # alloc -- microseconds against a ~24 ms drain.
+    var v13 = crvoice_new(PRANI_SP_WOLF);
+    ok = ok + bench_probe_ok(stream_new(v13, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, rate, one), "stream_wolf_howl_1s");
+    var b13 = bench_new("stream_wolf_howl_1s");
+    bench_batch_start(b13);
+    var n13 = 0;
+    while (n13 < 20) {
+        var st = stream_new(v13, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, rate, one);
+        var buf = vec_new();
+        var bi = 0;
+        while (bi < 512) { vec_push(buf, 0); bi = bi + 1; }
+        while (stream_is_finished(st) == 0) { stream_fill_buffer(st, buf); }
+        sink = buf;
+        n13 = n13 + 1;
+    }
+    bench_batch_stop(b13, 20);
+    bench_report(b13);
+
+    # ---- 14. emotion_evaluate -- EmotionState::with_values(-0.5, 0.8) ----
+    # N = 100,000 (~160 ns op). The state is built outside the loop, as
+    # criterion does. Distinct from Group A's "emotion_evaluate (per-frame)",
+    # which uses (0.5, 0.7) -- these are two different states, not a duplicate.
+    var em14 = emotion_with_values(F_NEG_0_5, F_0_8);
+    ok = ok + bench_probe_ok(emotion_evaluate(em14), "emotion_evaluate");
+    var b14 = bench_new("emotion_evaluate");
+    bench_batch_start(b14);
+    var n14 = 0;
+    while (n14 < 100000) { sink = emotion_evaluate(em14); n14 = n14 + 1; }
+    bench_batch_stop(b14, 100000);
+    bench_report(b14);
+
+    println("");
+    if (ok < 14) {
+        println("  !! one or more Group B probes failed -- the mirror is NOT valid");
+        return 1;
+    }
+    println("  all 14 criterion-mirror probes returned real output (no error paths timed)");
     return 0;
 }
 

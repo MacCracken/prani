@@ -43,42 +43,6 @@ Measured facts this arc rests on, all verified 2026-08-31:
 > gates. Every number in this table now carries the command that reproduces it;
 > a gate figure with no reproducible command does not belong here.
 
-### 2.0.7 — Benchmark breadth and the Rust comparison
-
-**Source**: [`docs/benchmarks.md`](../benchmarks.md) — *"A like-for-like
-Rust-vs-Cyrius comparison on identical hardware is a follow-up"*.
-
-⚠ **This item must complete before 2.0.8. It is the only one that does.** The
-comparison needs `rust-old/` present and buildable; after removal it can only be
-run from a tag, and it depends on three crates.io releases staying published.
-`cargo fetch --locked` succeeds today — that is a window, not a guarantee.
-
-The Rust harness answers both halves of this item at once. Its **14 benchmarks**
-cover exactly the spread prani's 4 miss — every vocal apparatus (songbird trill
-and crow screech for syringeal, cricket for stridulatory, bee for vibratile,
-snake hiss for noise-only), plus the streaming path and a vocal-effort variant —
-so mirroring it broadens coverage *and* makes the comparison like-for-like by
-construction.
-
-- **Mirror the 14 Rust benchmarks** in `tests/prani.bcyr`, same species, same
-  durations, same 44100 Hz. A regression in syringeal, stridulatory, vibratile or
-  noise-only synthesis is currently invisible.
-- **`crvoice_vocalize wolf_howl_0.05s@8k` is not comparable to `wolf_howl_1s`
-  and must not be reported as if it were.** It runs 0.05 s at 8 kHz — 400
-  samples against the Rust's 44,100 — so it is 1/880th of the work, at a sample
-  rate that changes which svara code path runs. Either add a 1 s @ 44100 Hz
-  bench alongside it, or drop the comparison for wolf howl. `emotion_evaluate`
-  is the only existing bench that already matches its Rust counterpart.
-- **Run both harnesses on one host and record the method.** The 1.1.0 crate
-  claimed ~1000× realtime against the port's measured ~236×, and that gap has
-  never been measured under one method. Note that `lib/bench.cyr` measures and
-  subtracts the timer floor (cyrius 6.5.19+) and criterion does not — the
-  comparison must say so or it is not like-for-like.
-- Build into `CARGO_TARGET_DIR` outside the repo; `rust-old/` stays unmodified.
-
-**Done when**: `docs/benchmarks.md` carries a per-apparatus table and a dated
-Rust-vs-Cyrius run with its method written down.
-
 ### 2.0.8 — Retire `rust-old/`
 
 **Source**: this arc. The removal itself.
@@ -95,7 +59,9 @@ after this, parity is asserted by the suites alone.
 - [x] **2.0.6 complete** — five examples exist, CI runs them on every push, and
       `streaming.cyr` drives the full FFI lifecycle (the condition the consumer-green
       decision rests on)
-- [ ] **2.0.7 complete — the comparison captured while the oracle still builds**
+- [x] **2.0.7 complete — the comparison captured while the oracle still builds**
+      (2026-08-31; median 15.7× slower, `docs/benchmarks.md`). **This was the only
+      hard ordering constraint in the arc, and it is now satisfied.**
 - [ ] **Reference sweep**: all **83** `rust-old/…` citations across the 42
       maintained files converted to the tag-qualified form from
       [ADR-0004](../adr/0004-cite-the-oracle-by-tag.md) — `2.0.3:rust-old/src/x.rs:NN`.
@@ -188,7 +154,114 @@ the Rust allocated per call too and simply had an allocator that freed.
 asserted in `tests/hardening.tcyr` alongside 2.0.3's two existing allocation
 budgets.
 
-### 2.1.0 — The allocation-failure contract
+### 2.0.10 — `emotion_evaluate` validates its inputs five times per call
+
+**Source**: 2.0.7's benchmark run — the only historical-series row that moved.
+
+**Measured: 69 ns → 151 ns between 2.0.3 and 2.0.7, a 2.2× regression** on a path
+`docs/benchmarks.md` describes as a *"per-frame game-AI call"*. At 60 fps across
+100 creatures that is 6,000 calls a second.
+
+Introduced by **2.0.5's own input-range guards**, and the shape is the point:
+
+    emotion_evaluate
+      ├── prani_in_range(smoothing)                    1
+      ├── emotion_select_vocalization
+      │     ├── emotion_valence_zone -> prani_in_range 2
+      │     └── emotion_arousal_zone -> prani_in_range 3
+      └── emotion_select_intent
+            ├── emotion_valence_zone -> prani_in_range 4
+            └── emotion_arousal_zone -> prani_in_range 5
+
+The zone functions are *individually* correct to validate — they are public. But
+`evaluate` reaches them twice each, so the same two fields are range-checked
+**four times** on one call, and `prani_in_range` is not free: `prani_is_finite`
+(`f64_abs` + `f64_lt`) then `f64_ge` then `f64_le`, ~4 float ops, ×5.
+
+**Validate once at the entry point.** Split each zone function into a public
+checked wrapper and an internal unchecked one, and have `evaluate` validate the
+state once then call the unchecked path — the same shape 2.0.3 used for
+`species_params` / `species_params_into`.
+
+⚠ **This is the correctness-costs-performance trade landing on a hot path
+without anyone measuring it.** 2.0.5 added 109 guards and ran the benchmark suite
+green, because the suite did not *compare against a baseline* — it only checked
+the harness ran. The lesson is not "fewer guards": it is that a guard on a
+per-frame path needs a benchmark delta attached before it ships.
+
+**Done when**: `emotion_evaluate` is back within noise of 69 ns, the public zone
+functions still reject out-of-range input (asserted), and `tests/hardening.tcyr`
+keeps a control proving the unchecked internal path is unreachable from outside.
+
+### 2.1.0 — two lanes: f32 throughout, and the allocation-failure contract
+
+Both are minor-bump work on the same functions, so they share a release. **Lane B
+(allocation) can start today; Lane A (f32) is blocked on svara and naad.** If
+Lane A is still blocked when Lane B is ready, ship Lane B as 2.1.0 and Lane A
+becomes 2.2.0 — do not hold a finished contract behind a blocked dependency.
+
+#### Lane A — f32 throughout, to match the oracle
+
+**Source**: 2.0.7's measured comparison, and the fact that the constraint this
+port was built on **no longer holds**.
+
+`port-audit.md` has carried this as a standing convention since 2.0.0:
+
+> **f32 → f64 everywhere** (svara/naad/hisab are f64-only; widening is **forced**
+> and improves precision)
+
+**It is not forced any more.** ganita **1.1.4** ships a 23-function f32 scalar
+tier — `sin cos exp ln sqrt pow atan2 hypot cbrt floor ceil trunc round abs neg
+min max clamp lerp sign log2 exp2` — and it is **already vendored in
+`lib/ganita.cyr`**. prani calls nothing outside that set: no `tanh`, `sinh`,
+`cosh`, `asin` or `acos` appears anywhere in `src/`. Every one of prani's own
+190 `f64_mul`s, 69 `f64_add`s, 16 `f64_sin`s and 55 `f64_clamp`s has an f32
+equivalent available today.
+
+**What 2.0.7 measured, on one host, same species, same durations, same 44100 Hz:**
+
+| | Rust oracle (f32) | Cyrius port (f64) | |
+|---|---:|---:|---:|
+| `wolf_howl_1s` | 1.39 ms | 21.9 ms | **15.8× slower** |
+| median across 13 synthesis benchmarks | | | **15.7× slower** |
+| range | | | 9.9× – 17.4× |
+| realtime factor, wolf howl | **719×** | **45.6×** | |
+
+The gap is remarkably *uniform* — every apparatus, every duration, within a
+9.9–17.4× band. That is the signature of something systemic, not one slow path.
+
+⚠ **f32 is not proven to be the cause, and this item must not assume it is.**
+Three things differ between those two columns and only one is float width: the
+oracle is prani 1.1.0 on **svara 1.0.0 / naad 1.0.0** compiled by LLVM at
+`--release`; the port is 2.0.6 on **svara 3.5.4 / naad 2.2.2** compiled by cycc.
+Three major versions of the DSP dependency and a different optimizer sit in that
+15.7×. The honest prior is that **codegen dominates and float width is second**.
+
+What makes f32 worth doing anyway, independent of the ratio:
+
+1. **Parity.** The oracle is f32. The port's whole correctness bar is "matches
+   what Rust did", and every tolerance loosened in the suites
+   (`PRANI_EPSILON` = f32::EPSILON promoted to f64) exists because of the
+   widening. f32 would let those become bit-exact.
+2. **SIMD width.** cycc has `f32v8` — eight lanes against `f64v4`'s four. A
+   vectorised f32 DSP path has twice the lanes of the f64 one.
+3. **Half the memory traffic** on every sample buffer, on a bump allocator that
+   never frees.
+
+**Blocked on the dependencies, and that is the point.** prani cannot do this
+alone: `svara_glottal_next_sample` and `svara_tract_process_sample` are called
+per sample and are f64 on both sides. Filed as **P0 on svara and naad**. Until
+they move, prani could convert only its own arithmetic and would widen at the
+boundary — a hybrid that costs work and buys neither parity nor speed.
+
+**Do not start this before svara and naad have.** Sequence: naad → svara → prani.
+
+**Done when**: prani's arithmetic is f32 end to end, the tolerance-loosened
+assertions are re-tightened to bit-exact against the oracle, and 2.0.7's
+comparison is re-run f32-vs-f32 so the remaining gap is attributable to codegen
+alone.
+
+#### Lane B — the allocation-failure contract
 
 **Source**: audit finding **F9**, accepted rather than repaired in 2.0.3
 precisely because it is this size.
