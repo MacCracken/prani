@@ -1,0 +1,417 @@
+# sequencing.cyr -- call patterns above a single vocalization.
+#
+# One call is rarely what a creature does. It repeats, it varies, and when
+# there is more than one of it, the calls overlap. prani's sequence layer is
+# exactly those three shapes:
+#
+#   BOUT    one vocalization repeated N times, with silence between repeats
+#   PHRASE  an ordered list of DIFFERENT vocalizations, each with its own gap
+#   CHORUS  several voices rendering the same call, mixed with timing jitter
+#
+# All three are "describe it, then render it": you build a plain struct
+# (sequence_call_bout_new / _element_new / _phrase_new), then hand it a voice
+# and a sample rate to get samples. Every one of those calls returns EITHER a
+# handle OR a negative PRANI_ERR_* code, so every one of them is checked below
+# with prani_is_err -- that convention is most of what this file is teaching.
+#
+# Build and run:
+#   cyrius build docs/examples/sequencing.cyr build/examples/sequencing
+#   ./build/examples/sequencing
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+# ---------------------------------------------------------------------------
+# f64 literals. Cyrius has no float syntax: an integer comes from f64_from(n),
+# anything else is its IEEE-754 bit pattern. Every duration here is a multiple
+# of 1/4 second on purpose -- those are exact in binary AND land on a whole
+# number of samples at 44100 Hz, so the sample counts printed below are the
+# arithmetic and not a rounding story. (Try 0.05 s and you get 0.05 * 44100 =
+# 2204.9999... which truncates to 2204, not 2205; the port's own tests carry a
+# case like that.)
+# ---------------------------------------------------------------------------
+var SR      = 0x40e5888000000000;   # 44100.0 Hz -- svara needs > 1200 Hz
+var D_0_25  = 0x3fd0000000000000;   # 0.25
+var D_0_5   = 0x3fe0000000000000;   # 0.5
+var D_0_75  = 0x3fe8000000000000;   # 0.75
+var D_1_5   = 0x3ff8000000000000;   # 1.5
+var SZ_0_8  = 0x3fe999999999999a;   # 0.8
+var SZ_1_2  = 0x3ff3333333333333;   # 1.2
+var SZ_1_4  = 0x3ff6666666666666;   # 1.4
+
+# ---------------------------------------------------------------------------
+# Output helpers. There is no printf: lines are built piece by piece. `print`
+# wants an explicit byte count, so `say` pairs it with strlen and removes the
+# chance of miscounting a literal.
+# ---------------------------------------------------------------------------
+fn say(s) {
+    print(s, strlen(s));
+    return 0;
+}
+
+# Left-align `s` in `width` columns, for the template table.
+fn say_pad(s, width) {
+    say(s);
+    var k = strlen(s);
+    while (k < width) {
+        say(" ");
+        k = k + 1;
+    }
+    return 0;
+}
+
+# A sample count as seconds, which is the unit a reader actually thinks in.
+fn say_secs(samples) {
+    fmt_float(f64_div(f64_from(samples), SR), 3);
+    say(" s");
+    return 0;
+}
+
+# Loudest |sample| in [lo, hi). Used to show that a gap really is silence and
+# that the chorus mix did not clip -- a length alone would be satisfied by a
+# buffer of zeros.
+fn peak_abs(v, lo, hi) {
+    var m = f64_from(0);
+    var k = lo;
+    while (k < hi) {
+        var a = f64_abs(vec_get(v, k));
+        if (f64_gt(a, m) == 1) { m = a; }
+        k = k + 1;
+    }
+    return m;
+}
+
+# The port dropped Rust's Display impls, so the enums are bare integers and
+# these tables live in the consumer. Names are for the transcript only.
+fn voc_name(v) {
+    if (v == PRANI_VOC_HOWL)       { return "howl"; }
+    if (v == PRANI_VOC_BARK)       { return "bark"; }
+    if (v == PRANI_VOC_GROWL)      { return "growl"; }
+    if (v == PRANI_VOC_ROAR)       { return "roar"; }
+    if (v == PRANI_VOC_HISS)       { return "hiss"; }
+    if (v == PRANI_VOC_CHIRP)      { return "chirp"; }
+    if (v == PRANI_VOC_TRILL)      { return "trill"; }
+    if (v == PRANI_VOC_WHINE)      { return "whine"; }
+    if (v == PRANI_VOC_RUMBLE)     { return "rumble"; }
+    if (v == PRANI_VOC_PURR)       { return "purr"; }
+    if (v == PRANI_VOC_YELP)       { return "yelp"; }
+    if (v == PRANI_VOC_SCREECH)    { return "screech"; }
+    if (v == PRANI_VOC_STRIDULATE) { return "stridulate"; }
+    if (v == PRANI_VOC_BUZZ)       { return "buzz"; }
+    return "?";
+}
+
+fn intent_name(i) {
+    if (i == PRANI_INTENT_ALARM)       { return "alarm"; }
+    if (i == PRANI_INTENT_TERRITORIAL) { return "territorial"; }
+    if (i == PRANI_INTENT_MATING)      { return "mating"; }
+    if (i == PRANI_INTENT_DISTRESS)    { return "distress"; }
+    if (i == PRANI_INTENT_IDLE)        { return "idle"; }
+    if (i == PRANI_INTENT_THREAT)      { return "threat"; }
+    if (i == PRANI_INTENT_SOCIAL)      { return "social"; }
+    return "?";
+}
+
+fn species_name(s) {
+    if (s == PRANI_SP_WOLF)        { return "wolf"; }
+    if (s == PRANI_SP_DOG)         { return "dog"; }
+    if (s == PRANI_SP_CAT)         { return "cat"; }
+    if (s == PRANI_SP_LION)        { return "lion"; }
+    if (s == PRANI_SP_SONGBIRD)    { return "songbird"; }
+    if (s == PRANI_SP_CROW)        { return "crow"; }
+    if (s == PRANI_SP_RAPTOR)      { return "raptor"; }
+    if (s == PRANI_SP_SNAKE)       { return "snake"; }
+    if (s == PRANI_SP_CROCODILIAN) { return "crocodilian"; }
+    if (s == PRANI_SP_CRICKET)     { return "cricket"; }
+    if (s == PRANI_SP_BEE)         { return "bee"; }
+    if (s == PRANI_SP_DRAGON)      { return "dragon"; }
+    return "fantasy";
+}
+
+# One line of the bout-template table.
+fn show_template(species) {
+    var t = species_bout_template(species);
+    # Even a built-in template is a constructor result, so it is checked.
+    if (prani_is_err(t) == 1) {
+        say("  "); say(species_name(species)); say(" template failed: ");
+        println(prani_err_name(t));
+        return 1;
+    }
+    say("  ");
+    say_pad(species_name(species), 12);
+    say_pad(voc_name(CallBout_vocalization(t)), 12);
+    say("x"); fmt_int(CallBout_count(t));
+    say("  call ");   fmt_float(CallBout_call_duration(t), 2);
+    say(" s  gap "); fmt_float(CallBout_interval(t), 2);
+    say(" s  ");
+    println(intent_name(CallBout_intent(t)));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    println("prani -- call sequencing: bouts, phrases, and a chorus");
+    println("======================================================");
+    println("Everything below renders at 44100 Hz. svara's fixed 600 Hz");
+    println("subglottal bandpass needs nyquist above 600, so rates at or below");
+    println("1200 Hz are refused by the layer underneath prani.");
+    println("");
+
+    # =======================================================================
+    # 1. A BOUT -- the same call, repeated.
+    # =======================================================================
+    println("1. A BOUT -- one vocalization repeated with silence between");
+    println("-----------------------------------------------------------");
+
+    var wolf = crvoice_new(PRANI_SP_WOLF);
+    say("a default wolf sits at "); fmt_float(crvoice_effective_f0(wolf), 1);
+    println(" Hz (species f0_default / size_scale)");
+
+    # A bout is described before it is rendered: what call, how many, how long
+    # each one is, how much silence sits between them, and why the creature is
+    # calling. Social intent is the "no prosodic stretch" case -- its
+    # duration_scale is 1.0, so a 1.5 s call renders 1.5 s of samples and the
+    # length arithmetic below is legible. (Mating doubles it; see part 2.)
+    var bout = sequence_call_bout_new(PRANI_VOC_HOWL, 3, D_1_5, D_0_75, PRANI_INTENT_SOCIAL);
+    if (prani_is_err(bout) == 1) {
+        say("bout construction failed: "); println(prani_err_name(bout));
+        return 1;
+    }
+    println("bout: howl x3, call 1.5 s, interval 0.75 s, intent social");
+
+    var bout_buf = sequence_call_bout_synthesize(bout, wolf, SR);
+    # The one line every consumer must copy: a vec handle and a negative error
+    # code are the same i64, and prani_is_err is what tells them apart.
+    if (prani_is_err(bout_buf) == 1) {
+        say("bout synthesis failed: "); println(prani_err_name(bout_buf));
+        return 1;
+    }
+
+    # The interval falls BETWEEN calls and not after the last one, so a bout of
+    # N calls carries N-1 gaps. That is the whole reason the rendered length is
+    # not just count * call_duration.
+    var call_samples = f64_to(f64_mul(D_1_5, SR));
+    var gap_samples = f64_to(f64_mul(D_0_75, SR));
+    say("  rendered "); fmt_int(vec_len(bout_buf)); say(" samples = ");
+    say_secs(vec_len(bout_buf)); println("");
+    say("  = 3 calls x "); fmt_int(call_samples);
+    say(" + 2 gaps x "); fmt_int(gap_samples);
+    say(" -- N calls carry N-1 gaps, not N");
+    println("");
+
+    # Length alone would be satisfied by a buffer of zeros. These two peaks say
+    # the layout is real: the first call is audible, the gap after it is not.
+    say("  peak over the first call  (samples 0.."); fmt_int(call_samples);
+    say(")      "); fmt_float(peak_abs(bout_buf, 0, call_samples), 4);
+    println("");
+    say("  peak over the first gap   (samples "); fmt_int(call_samples);
+    say(".."); fmt_int(call_samples + gap_samples); say(")  ");
+    fmt_float(peak_abs(bout_buf, call_samples, call_samples + gap_samples), 4);
+    println("  <- true silence");
+    println("");
+
+    # Not every (species, vocalization) pair exists in nature, and prani says so
+    # rather than synthesizing something plausible. A snake has no larynx.
+    println("not every species can make every call:");
+    say("  species_supports_vocalization(snake, howl) = ");
+    println_int(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HOWL));
+    say("  species_supports_vocalization(snake, hiss) = ");
+    println_int(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HISS));
+    var snake = crvoice_new(PRANI_SP_SNAKE);
+    var snake_buf = sequence_call_bout_synthesize(bout, snake, SR);
+    if (prani_is_err(snake_buf) == 1) {
+        say("  a howl bout on a snake voice returns ");
+        fmt_int(snake_buf); say(" (");
+        say(prani_err_name(snake_buf)); println(") -- refused, not faked");
+    } else {
+        println("  BUG: a snake howled");
+        return 1;
+    }
+    println("");
+
+    # Every species ships a characteristic calling pattern, so a consumer that
+    # just wants "what does this creature sound like" never has to invent one.
+    println("every species carries a natural bout pattern of its own:");
+    if (show_template(PRANI_SP_WOLF) == 1) { return 1; }
+    if (show_template(PRANI_SP_SONGBIRD) == 1) { return 1; }
+    if (show_template(PRANI_SP_SNAKE) == 1) { return 1; }
+    if (show_template(PRANI_SP_CRICKET) == 1) { return 1; }
+
+    # The templates are not arbitrary: each one names a call its own species can
+    # actually produce, so species_bout_template feeds straight into synthesize
+    # without a supports_vocalization check in between. Verified, not asserted.
+    var checked = 0;
+    var sp = 0;
+    while (sp < PRANI_SP_COUNT) {
+        var t = species_bout_template(sp);
+        if (prani_is_err(t) == 1) { println("  BUG: a template failed to build"); return 1; }
+        if (species_supports_vocalization(sp, CallBout_vocalization(t)) == 0) {
+            say("  BUG: "); say(species_name(sp));
+            println("'s own template names a call it cannot make");
+            return 1;
+        }
+        checked = checked + 1;
+        sp = sp + 1;
+    }
+    say("  checked all "); fmt_int(checked);
+    println(" species: every template names a call its species supports");
+    println("");
+
+    # =======================================================================
+    # 2. A PHRASE -- different calls in order.
+    # =======================================================================
+    println("2. A PHRASE -- different vocalizations in order");
+    println("-----------------------------------------------");
+    println("a bout repeats one call; a phrase is a list of elements, each with");
+    println("its own vocalization, duration and trailing gap -- bird song.");
+    println("");
+
+    # An element is (vocalization, duration, gap). Since 2.0.5 the constructor
+    # range-checks the two spans, so it too returns "handle or negative code".
+    var elements = vec_new();
+    var e1 = sequence_call_element_new(PRANI_VOC_CHIRP, D_0_25, D_0_25);
+    var e2 = sequence_call_element_new(PRANI_VOC_TRILL, D_0_5, D_0_25);
+    var e3 = sequence_call_element_new(PRANI_VOC_CHIRP, D_0_25, f64_from(0));
+    if (prani_is_err(e1) == 1) { println("element 1 rejected"); return 1; }
+    if (prani_is_err(e2) == 1) { println("element 2 rejected"); return 1; }
+    if (prani_is_err(e3) == 1) { println("element 3 rejected"); return 1; }
+    vec_push(elements, e1);
+    vec_push(elements, e2);
+    vec_push(elements, e3);
+
+    println("songbird phrase:");
+    var ei = 0;
+    while (ei < vec_len(elements)) {
+        var el = vec_get(elements, ei);
+        say("  "); fmt_int(ei + 1); say(". ");
+        say_pad(voc_name(CallElement_vocalization(el)), 7);
+        fmt_float(CallElement_duration(el), 2); say(" s, then ");
+        fmt_float(CallElement_gap(el), 2); println(" s of silence");
+        ei = ei + 1;
+    }
+
+    # Intent lives on the PHRASE, not the element: one behavioural context
+    # colours every call in the sequence.
+    var phrase = sequence_call_phrase_new(elements, PRANI_INTENT_SOCIAL);
+    var phrase_buf = sequence_call_phrase_synthesize(phrase, crvoice_new(PRANI_SP_SONGBIRD), SR);
+    if (prani_is_err(phrase_buf) == 1) {
+        say("phrase synthesis failed: "); println(prani_err_name(phrase_buf));
+        return 1;
+    }
+    say("  under intent social  -> "); fmt_int(vec_len(phrase_buf));
+    say(" samples = "); say_secs(vec_len(phrase_buf));
+    println("   (0.25+0.25 + 0.5+0.25 + 0.25+0)");
+
+    # The same three elements under a different intent. Mating's duration_scale
+    # is 2.0, and it stretches the CALLS only -- the gaps are the phrase's own
+    # timing and are untouched. That is why this buffer is 1.0 s longer, not 2x.
+    var phrase_mating = sequence_call_phrase_new(elements, PRANI_INTENT_MATING);
+    var mating_buf = sequence_call_phrase_synthesize(phrase_mating, crvoice_new(PRANI_SP_SONGBIRD), SR);
+    if (prani_is_err(mating_buf) == 1) {
+        say("mating phrase failed: "); println(prani_err_name(mating_buf));
+        return 1;
+    }
+    say("  under intent mating  -> "); fmt_int(vec_len(mating_buf));
+    say(" samples = "); say_secs(vec_len(mating_buf));
+    println("   (calls x2.0, gaps unchanged)");
+    println("  -- intent is prosody, and prosody changes how long a call lasts.");
+    println("");
+
+    # 2.0.5: a nonsense span is reported at construction rather than becoming a
+    # buffer of the wrong length (or, before the guards, an empty success).
+    var bad = sequence_call_element_new(PRANI_VOC_CHIRP, f64_neg(D_0_25), f64_from(0));
+    if (prani_is_err(bad) == 1) {
+        say("a -0.25 s element is rejected up front: ");
+        fmt_int(bad); say(" ("); say(prani_err_name(bad)); println(")");
+    } else {
+        println("BUG: a negative duration built an element");
+        return 1;
+    }
+    println("");
+
+    # =======================================================================
+    # 3. A CHORUS -- many voices at once.
+    # =======================================================================
+    println("3. A CHORUS -- four voices mixed with a timing spread");
+    println("-----------------------------------------------------");
+
+    # Four wolves that are genuinely different animals. size_scale is body size:
+    # effective f0 is f0_default / size_scale, so the 0.8 wolf is a small, high
+    # one and the 1.4 wolf is a big, low one. Mixing four copies of one default
+    # voice would just be one signal at 4x amplitude.
+    var voices = vec_new();
+    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), SZ_0_8));
+    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), f64_from(1)));
+    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), SZ_1_2));
+    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), SZ_1_4));
+
+    var vi = 0;
+    while (vi < vec_len(voices)) {
+        say("  wolf "); fmt_int(vi + 1); say(": size ");
+        fmt_float(CreatureVoice_size_scale(vec_get(voices, vi)), 2);
+        say("  ->  ");
+        fmt_float(crvoice_effective_f0(vec_get(voices, vi)), 1);
+        println(" Hz");
+        vi = vi + 1;
+    }
+
+    # timing_spread is how far apart the voices may start. Each voice is given a
+    # random offset in [0, 2*spread) seconds from a seeded RNG (voice count
+    # times 7919), so the pack does not begin in lockstep -- and the same four
+    # voices produce the same mix on every run.
+    var chorus = sequence_synthesize_chorus(voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL,
+      SR, f64_from(1), D_0_25);
+    if (prani_is_err(chorus) == 1) {
+        say("chorus failed: "); println(prani_err_name(chorus));
+        return 1;
+    }
+    println("chorus: howl, 1.0 s each, timing_spread 0.25 s, intent social");
+    say("  rendered "); fmt_int(vec_len(chorus)); say(" samples = ");
+    say_secs(vec_len(chorus));
+    println("   (1.0 s of call + 2 x 0.25 s of spread)");
+
+    # The mix is a straight sum, then scaled by 1/sqrt(voice_count) -- 0.5 for
+    # four voices. Summing correlated signals would clip; 1/sqrt(N) is the
+    # power-preserving scale for signals that are not correlated, which is what
+    # the timing offsets make them.
+    say("  peak amplitude "); fmt_float(peak_abs(chorus, 0, vec_len(chorus)), 4);
+    println("   (sum, then x 1/sqrt(4) = 0.5, so it does not clip)");
+    println("");
+
+    # An empty voice list is not an error -- it is an empty mix. Worth knowing
+    # before you write a length check that assumes samples came back.
+    var nobody = sequence_synthesize_chorus(vec_new(), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL,
+      SR, f64_from(1), D_0_25);
+    if (prani_is_err(nobody) == 1) { println("BUG: an empty chorus errored"); return 1; }
+    say("  a chorus of no voices succeeds with "); fmt_int(vec_len(nobody));
+    println(" samples, rather than erroring");
+
+    # 2.0.5 bounds timing_spread. A spread of 1e6 s at 44100 Hz asks for 4.41e10
+    # offset samples -- 705 GB for the mix alone -- and a failed allocation in
+    # the vec layer aborts the process, which a library cannot report. So the
+    # demand is checked BEFORE anything is allocated and comes back as a code.
+    var absurd = sequence_synthesize_chorus(voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL,
+      SR, f64_from(1), f64_from(1000000));
+    if (prani_is_err(absurd) == 1) {
+        say("  a timing_spread of 1e6 s returns "); fmt_int(absurd);
+        say(" ("); say(prani_err_name(absurd));
+        println(") instead of asking for 705 GB");
+    } else {
+        println("BUG: a 1e6 s timing spread allocated a buffer");
+        return 1;
+    }
+    println("");
+
+    println("done -- every fallible call above was checked with prani_is_err.");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

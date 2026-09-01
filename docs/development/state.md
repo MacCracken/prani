@@ -5,23 +5,22 @@
 
 ## Version
 
-**2.0.5** — input-range validation, and a crash in the whole low-sample-rate
-band. ⭐ **`crvoice_vocalize` aborted the process for every sample rate in
-(1000, 7500]** — reachable from `prani_ffi_stream_start`, where a host passes the
-rate straight in. Not prani's bug: `crtract_new` checked svara's return exactly as
-ADR-0001 requires and got a *valid pointer*; the tract could not survive its own
-next call. Fixed in **svara 3.5.4** (two defects, found from here), not worked
-around — a prani-side floor would have left it live for every other svara consumer
-and rejected rates that work. The band **1201–7500 Hz never worked and now
-renders**.
+**2.0.6** — runnable examples, and the two defects they found. Five worked
+programs in [`../examples/`](../examples/), built and run by CI on every push.
+Each includes **`dist/prani.cyr`** rather than `src/`, so they exercise prani as a
+consumer does — the closest thing the project has to a consumer integration test.
 
-Alongside it, ADR-0002's deferral and audit F10/F11 are closed: **109 guards
-across 11 modules**, every accepted range written down in
-[`../architecture/input-ranges.md`](../architecture/input-ranges.md)
-([ADR-0006](../adr/0006-reject-non-finite-numeric-input.md)). The measured worst
-case was not the audit's "silent empty buffer" — a NaN on a syringeal,
-stridulatory or vibratile species returned a **full-length all-NaN buffer as
-success**. **1219 → 1894 assertions / 17 suites**, `cyrius audit` exit 0.
+⭐ **The FFI surface has now been driven end to end.** `streaming.cyr` runs
+`voice_create` → `stream_start` → `stream_fill` to completion → `is_finished` →
+destroy, and proves the FFI and Cyrius drains produce **sample-for-sample
+identical audio**. That lifecycle is the condition the consumer-green decision
+rests on.
+
+They immediately earned their keep: an **out-of-range species tag rendered audio
+and reported success** (2.0.5 guarded `voc` and `intent` for this exact reason and
+missed `species`) — fixed, pinned as F13; and **`stream_fill_buffer` retains
+8,800 bytes per call** on the path advertised for audio callbacks — filed as
+roadmap 2.0.9. **1900 assertions / 17 suites**, `cyrius audit` exit 0.
 
 ## Toolchain
 
@@ -92,8 +91,8 @@ each integrated and independently re-verified in the main tree against `rust-old
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.5: fmt · lint · docs · tests · bench,
-**exit 0**. 17 suites / **1894 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
+`cyrius audit` is green end to end as of 2.0.6: fmt · lint · docs · tests · bench,
+**exit 0**. 17 suites / **1900 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4; before
 that it ran only build + test, so fmt · lint · docs · bench were local-only.
@@ -120,7 +119,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, current on toolchain and dependencies, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), and exercised by runnable examples (2.0.6).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x is one arc with one destination: retiring `rust-old/`**
@@ -131,8 +130,9 @@ the oracle still holds may be lost:
 |---|---|
 | ~~**2.0.4**~~ | ✅ **Done** — parity re-verification + all 41 shortfalls closed; recovery rule in [ADR-0004](../adr/0004-cite-the-oracle-by-tag.md). Ledger: [`rust-test-parity.md`](rust-test-parity.md). |
 | ~~**2.0.5**~~ | ✅ **Done** — input-range validation (109 guards, [`input-ranges.md`](../architecture/input-ranges.md)), plus the svara 3.5.4 bump that fixed the (1000, 7500] abort. |
-| **2.0.6** | Runnable examples — `CLAUDE.md` advertises `docs/examples/` and it holds only a `.gitkeep`. A gate item: after the oracle goes, an example is the only executable statement of how the API is driven. ⚠ `streaming.cyr` **must** drive the full FFI lifecycle — that is the condition consumer-green's removal from 2.0.8's gate rests on. |
+| ~~**2.0.6**~~ | ✅ **Done** — five examples, run by CI; `streaming.cyr` drives the full FFI lifecycle, satisfying the consumer-green condition. |
 | **2.0.7** | Benchmark breadth + the Rust comparison. ⚠ **Must complete before 2.0.8** — it is the only item that must; it needs the oracle buildable. Mirror the oracle's **14** benchmarks (not 10, as previously recorded). |
+| **2.0.9** | `stream_fill_buffer` allocates 8,800 B/call on the real-time path (found by 2.0.6's example). Does **not** gate the retirement. |
 | **2.0.8** | Retire `rust-old/`. Gated on the above plus an **83-citation** reference sweep across 42 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
 
 **Decided 2026-08-31: consumer-green is not a hard gate on 2.0.8**, on the

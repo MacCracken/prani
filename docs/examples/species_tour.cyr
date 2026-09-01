@@ -1,0 +1,375 @@
+# species_tour.cyr -- one synthesis call per vocal apparatus.
+#
+# The thing that makes prani prani is that a creature call is not one synth with
+# different parameters: prani models FIVE physically different sound sources,
+# and which one a species owns decides both how it sounds and what it can say at
+# all. This example walks one species per apparatus, then sweeps all 13 species.
+#
+# It is a standalone program. The includes below are exactly what a downstream
+# consumer writes -- the dependency bundles, then prani's published bundle -- so
+# building this also proves dist/prani.cyr is usable from outside the library.
+#
+# Build + run:
+#   cyrius build docs/examples/species_tour.cyr build/examples/species_tour
+#   ./build/examples/species_tour
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+# ---------------------------------------------------------------------------
+# Constants. Cyrius has no float literals: an integer-valued f64 comes from
+# f64_from(n), and everything else is written as its IEEE-754 bit pattern with
+# the decimal value in the comment.
+# ---------------------------------------------------------------------------
+var EX_DUR_0_25 = 0x3fd0000000000000;   # 0.25 s -- the per-apparatus calls
+var EX_DUR_0_1  = 0x3fb999999999999a;   # 0.10 s -- the 13-species sweep
+
+# ---------------------------------------------------------------------------
+# Output helpers. There is no printf here, so lines get assembled piece by
+# piece. print() wants an exact BYTE COUNT, which is easy to get wrong by hand;
+# strlen() supplies it instead, so a miscount cannot truncate a line.
+# ---------------------------------------------------------------------------
+fn ex_out(s) { print(s, strlen(s)); return 0; }
+fn ex_nl() { return println(""); }
+
+# Left-aligned string field, padded to `w` columns (the sweep table below).
+fn ex_col(s, w) { ex_out(s); fmt_pad(w - strlen(s)); return 0; }
+
+# Right-aligned integer field: format into scratch first so the digit count is
+# known, then pad. `var buf[24]` is 24 BYTES -- enough for 19 digits + sign + NUL.
+fn ex_int_w(n, w) {
+    var buf[24];
+    var len = fmt_int_buf(n, &buf);
+    fmt_pad(w - len);
+    print(&buf, len);
+    return 0;
+}
+
+fn ex_rule(n) { while (n > 0) { ex_out("-"); n = n - 1; } return println(""); }
+
+# A "label   value" line inside a per-species block.
+fn ex_label(s) { ex_out("  "); ex_col(s, 15); return 0; }
+
+# ---------------------------------------------------------------------------
+# Names for the integer constants. prani's enums were erased to i64 in the port,
+# so a consumer that wants to print one needs its own table -- there is no
+# reflection and no Display.
+# ---------------------------------------------------------------------------
+fn ex_species_name(sp) {
+    if (sp == PRANI_SP_WOLF)        { return "Wolf"; }
+    if (sp == PRANI_SP_DOG)         { return "Dog"; }
+    if (sp == PRANI_SP_CAT)         { return "Cat"; }
+    if (sp == PRANI_SP_LION)        { return "Lion"; }
+    if (sp == PRANI_SP_SONGBIRD)    { return "Songbird"; }
+    if (sp == PRANI_SP_CROW)        { return "Crow"; }
+    if (sp == PRANI_SP_RAPTOR)      { return "Raptor"; }
+    if (sp == PRANI_SP_SNAKE)       { return "Snake"; }
+    if (sp == PRANI_SP_CROCODILIAN) { return "Crocodilian"; }
+    if (sp == PRANI_SP_CRICKET)     { return "Cricket"; }
+    if (sp == PRANI_SP_BEE)         { return "Bee"; }
+    if (sp == PRANI_SP_DRAGON)      { return "Dragon"; }
+    if (sp == PRANI_SP_FANTASY)     { return "Fantasy"; }
+    return "unknown species";
+}
+
+fn ex_apparatus_name(app) {
+    if (app == PRANI_APP_LARYNGEAL)    { return "laryngeal"; }
+    if (app == PRANI_APP_SYRINGEAL)    { return "syringeal"; }
+    if (app == PRANI_APP_STRIDULATORY) { return "stridulatory"; }
+    if (app == PRANI_APP_VIBRATILE)    { return "vibratile"; }
+    if (app == PRANI_APP_NOISE_ONLY)   { return "noise-only"; }
+    return "unknown apparatus";
+}
+
+fn ex_voc_name(voc) {
+    if (voc == PRANI_VOC_HOWL)       { return "Howl"; }
+    if (voc == PRANI_VOC_BARK)       { return "Bark"; }
+    if (voc == PRANI_VOC_GROWL)      { return "Growl"; }
+    if (voc == PRANI_VOC_ROAR)       { return "Roar"; }
+    if (voc == PRANI_VOC_HISS)       { return "Hiss"; }
+    if (voc == PRANI_VOC_CHIRP)      { return "Chirp"; }
+    if (voc == PRANI_VOC_TRILL)      { return "Trill"; }
+    if (voc == PRANI_VOC_WHINE)      { return "Whine"; }
+    if (voc == PRANI_VOC_RUMBLE)     { return "Rumble"; }
+    if (voc == PRANI_VOC_PURR)       { return "Purr"; }
+    if (voc == PRANI_VOC_YELP)       { return "Yelp"; }
+    if (voc == PRANI_VOC_SCREECH)    { return "Screech"; }
+    if (voc == PRANI_VOC_STRIDULATE) { return "Stridulate"; }
+    if (voc == PRANI_VOC_BUZZ)       { return "Buzz"; }
+    return "unknown call";
+}
+
+# ---------------------------------------------------------------------------
+# Peak amplitude of a rendered call. This is the number that shows the five
+# apparatus are genuinely different signal paths: a noise-only hiss and a
+# laryngeal howl do not land in the same place even at identical effort.
+# vec_get returns an f64, so the compare is f64_gt, not `>`.
+# ---------------------------------------------------------------------------
+fn ex_peak(samples) {
+    var peak = 0;                       # integer 0 is also the f64 bit pattern for 0.0
+    var i = 0;
+    var n = vec_len(samples);
+    while (i < n) {
+        var a = f64_abs(vec_get(samples, i));
+        if (f64_gt(a, peak) == 1) { peak = a; }
+        i = i + 1;
+    }
+    return peak;
+}
+
+# Zero crossings in the rendered buffer. Peak level alone cannot tell a periodic
+# source from shaped turbulence at the same amplitude; the crossing rate can. A
+# steady periodic call crosses twice per f0 cycle -- the bee's buzz comes out at
+# exactly 2 x its 300 Hz f0 -- and harmonics or a rising pitch contour push it
+# above that, as the wolf's howl does. The snake has no f0 to track at all.
+fn ex_zero_crossings(samples) {
+    var n = vec_len(samples);
+    var count = 0;
+    var i = 1;
+    while (i < n) {
+        var a = vec_get(samples, i - 1);
+        var b = vec_get(samples, i);
+        if ((f64_lt(a, 0) == 1) & (f64_ge(b, 0) == 1)) { count = count + 1; }
+        if ((f64_ge(a, 0) == 1) & (f64_lt(b, 0) == 1)) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# ---------------------------------------------------------------------------
+# One apparatus, one species, one call. Returns 0 on success, 1 on failure, so
+# main can turn any failure into a non-zero exit status.
+#
+# `note` is the one-line reason this apparatus is not just a preset: what the
+# animal is physically doing to make the sound.
+# ---------------------------------------------------------------------------
+fn ex_apparatus_block(sp, voc, note, sr, dur) {
+    # The species table is the source of truth for the apparatus -- read it back
+    # rather than asserting it here, because that is how a host interrogates a
+    # species it was handed at runtime.
+    var params = species_params(sp);
+    var app = SpeciesParams_apparatus(params);
+
+    ex_nl();
+    ex_out(ex_species_name(sp));
+    ex_out(" -- ");
+    ex_out(ex_voc_name(voc));
+    ex_nl();
+
+    ex_label("apparatus"); ex_out(ex_apparatus_name(app));
+    ex_out("  (SpeciesParams_apparatus, code "); fmt_int(app); ex_out(")"); ex_nl();
+    ex_label("why"); ex_out(note); ex_nl();
+
+    # f0 is the periodic source. A noise-only apparatus has none, and the table
+    # says so honestly with 0 Hz rather than with a fake pitch.
+    ex_label("f0 default");
+    fmt_float(SpeciesParams_f0_default(params), 1);
+    ex_out(" Hz  (range ");
+    fmt_float(SpeciesParams_f0_min(params), 1); ex_out(" - ");
+    fmt_float(SpeciesParams_f0_max(params), 1); ex_out(" Hz)"); ex_nl();
+
+    # tract_scale is vocal-tract length, 1.0 = human male. It is what makes a
+    # cricket's filter a different object from a crocodile's.
+    ex_label("tract scale");
+    fmt_float(SpeciesParams_tract_scale(params), 2);
+    ex_out(" x human-male reference"); ex_nl();
+
+    # 2.0.5 added range guards. species_params_validate is the cheap way to find
+    # out that a SpeciesParams (yours, or one you deserialized) is synthesizable
+    # BEFORE handing it to a voice. Fallible: report the code, do not assume.
+    var vres = species_params_validate(params);
+    ex_label("params check");
+    if (prani_is_err(vres) == 1) {
+        ex_out("REJECTED: "); ex_out(prani_err_name(vres)); ex_nl();
+        return 1;
+    }
+    ex_out("in range ("); ex_out(prani_err_name(vres)); ex_out(")"); ex_nl();
+
+    # THE fallible call. It returns a vec handle OR a negative PRANI_ERR_* code;
+    # there is no separate status out-param, so prani_is_err is not optional --
+    # vec_len() on a negative code would read garbage.
+    var samples = crvoice_vocalize(crvoice_new(sp), voc, sr, dur);
+    ex_label("vocalize");
+    if (prani_is_err(samples) == 1) {
+        ex_out("FAILED: "); ex_out(prani_err_name(samples));
+        ex_out(" (code "); fmt_int(samples); ex_out(")"); ex_nl();
+        return 1;
+    }
+    fmt_int(vec_len(samples));
+    ex_out(" samples @ "); fmt_float(sr, 1); ex_out(" Hz = ");
+    fmt_float(dur, 2); ex_out(" s"); ex_nl();
+
+    ex_label("peak amplitude"); fmt_float(ex_peak(samples), 4); ex_nl();
+    ex_label("zero crossings");
+    fmt_float(f64_div(f64_from(ex_zero_crossings(samples)), dur), 1);
+    ex_out(" /s"); ex_nl();
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Pick a vocalization this species can actually produce.
+#
+# The preference is the species' own signature call, which prani ships as part
+# of species_bout_template (the characteristic calling pattern: what call, how
+# many, how far apart). species_supports_vocalization is the authority, though,
+# so the preference is GATED rather than trusted -- that is the shape a host
+# needs when the wanted call comes from its own config or from designer input,
+# where nothing guarantees the creature can make it. Scan for any permitted call
+# if the preferred one is refused; -1 if the species has no legal call at all.
+# ---------------------------------------------------------------------------
+fn ex_pick_voc(sp) {
+    var want = CallBout_vocalization(species_bout_template(sp));
+    if (species_supports_vocalization(sp, want) == 1) { return want; }
+    var v = 0;
+    while (v < PRANI_VOC_COUNT) {
+        if (species_supports_vocalization(sp, v) == 1) { return v; }
+        v = v + 1;
+    }
+    return 0 - 1;
+}
+
+# ---------------------------------------------------------------------------
+# One row of the 13-species sweep: how many of the 14 vocalizations this
+# species' apparatus permits, and a real rendering of one of them. The count is
+# the column worth reading -- a laryngeal mammal can make almost the whole
+# vocabulary, a bee can make two.
+# ---------------------------------------------------------------------------
+fn ex_sweep_row(sp, sr, dur) {
+    var app = SpeciesParams_apparatus(species_params(sp));
+
+    var supported = 0;
+    var v = 0;
+    while (v < PRANI_VOC_COUNT) {
+        if (species_supports_vocalization(sp, v) == 1) { supported = supported + 1; }
+        v = v + 1;
+    }
+    var chosen = ex_pick_voc(sp);
+
+    ex_out("  ");
+    ex_col(ex_species_name(sp), 14);
+    ex_col(ex_apparatus_name(app), 14);
+    ex_int_w(supported, 6); ex_out("/14  ");
+
+    # A species with no legal vocalization could not be voiced at all; that is a
+    # library bug, not a caller error, so say so loudly instead of synthesizing.
+    if (chosen < 0) {
+        ex_out("NO SUPPORTED VOCALIZATION"); ex_nl();
+        return 1;
+    }
+    ex_col(ex_voc_name(chosen), 12);
+
+    var samples = crvoice_vocalize(crvoice_new(sp), chosen, sr, dur);
+    if (prani_is_err(samples) == 1) {
+        ex_out("FAILED: "); ex_out(prani_err_name(samples)); ex_nl();
+        return 1;
+    }
+    ex_int_w(vec_len(samples), 7); ex_out("  ");
+    fmt_float(ex_peak(samples), 4);
+    ex_nl();
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # 44100 Hz because svara's vocal tract carries a fixed 600 Hz subglottal
+    # bandpass, and a filter centre at or above nyquist is refused -- so a rate
+    # at or below 1200 Hz cannot build a tract and comes back as a negative code
+    # instead of samples. Any real audio rate is clear of that edge.
+    var sr = f64_from(44100);
+    var fails = 0;
+
+    println("prani -- a tour of the five vocal apparatus");
+    ex_rule(68);
+    println("prani does not model creatures as one synthesizer with different");
+    println("presets. Each species owns one of five physically distinct sound");
+    println("sources, and that choice decides both the timbre and which calls the");
+    println("animal can make at all.");
+    ex_nl();
+    println("Every call below: 44100 Hz, 0.25 s, intent Idle (what crvoice_vocalize");
+    println("uses when you do not pass one). Only the species changes. Peak level and");
+    println("zero-crossing rate are printed so the difference is visible: a periodic");
+    println("call's rate tracks its fundamental (the bee lands on exactly 2 x its 300 Hz");
+    println("f0), while the noise-only snake has no fundamental to track.");
+
+    # One species per apparatus, in the order the constants are declared.
+    fails = fails + ex_apparatus_block(PRANI_SP_WOLF, PRANI_VOC_HOWL,
+      "larynx: vocal folds chopping airflow, a human-like source", sr, EX_DUR_0_25);
+    fails = fails + ex_apparatus_block(PRANI_SP_SONGBIRD, PRANI_VOC_TRILL,
+      "a syrinx, not a larynx: two independent sound sources", sr, EX_DUR_0_25);
+    fails = fails + ex_apparatus_block(PRANI_SP_CRICKET, PRANI_VOC_STRIDULATE,
+      "a wing file scraped over a scraper -- no vocal tract at all", sr, EX_DUR_0_25);
+    fails = fails + ex_apparatus_block(PRANI_SP_BEE, PRANI_VOC_BUZZ,
+      "tone comes from wing-beat modulation, not from a throat", sr, EX_DUR_0_25);
+    fails = fails + ex_apparatus_block(PRANI_SP_SNAKE, PRANI_VOC_HISS,
+      "no vocal folds at all: shaped turbulent noise, so f0 is 0 Hz", sr, EX_DUR_0_25);
+
+    # ---- the bioacoustic gate ---------------------------------------------
+    ex_nl();
+    println("The bioacoustic gate");
+    ex_rule(68);
+    println("Not every (species, call) pair exists in nature, and prani refuses the");
+    println("ones that do not. Ask first with species_supports_vocalization, or just");
+    println("call and check the return -- crvoice_vocalize enforces the same gate.");
+    ex_nl();
+
+    ex_out("  Cricket + Roar, supported? ");
+    if (species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_ROAR) == 1) {
+        println("yes");
+        println("  BUG: a stridulating insect should not be able to roar");
+        fails = fails + 1;
+    } else {
+        println("no  (a wing file cannot produce a roar)");
+
+        # And the same answer through the synthesis path: a NEGATIVE code where a
+        # vec handle would be. This is the convention to code against.
+        var bad = crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_ROAR,
+          sr, EX_DUR_0_25);
+        ex_out("  crvoice_vocalize     -> ");
+        if (prani_is_err(bad) == 1) {
+            ex_out("error code "); fmt_int(bad);
+            ex_out(", \""); ex_out(prani_err_name(bad)); println("\"");
+        } else {
+            ex_out("returned a buffer of "); fmt_int(vec_len(bad)); println(" samples");
+            println("  BUG: the gate let an unsupported pair through");
+            fails = fails + 1;
+        }
+    }
+
+    # ---- every species synthesizes ----------------------------------------
+    ex_nl();
+    println("All 13 species (0.1 s each; call = the species' signature call, gated");
+    println("by species_supports_vocalization). supported = how many of the 14");
+    println("vocalizations this apparatus permits.");
+    ex_rule(68);
+    ex_out("  ");
+    ex_col("species", 14);
+    ex_col("apparatus", 14);
+    ex_col("supported", 11);
+    ex_col("call", 12);
+    ex_out("samples"); ex_out("    peak"); ex_nl();
+    ex_rule(68);
+
+    var sp = 0;
+    while (sp < PRANI_SP_COUNT) {
+        fails = fails + ex_sweep_row(sp, sr, EX_DUR_0_1);
+        sp = sp + 1;
+    }
+
+    ex_nl();
+    if (fails == 0) {
+        println("All 13 species synthesized; 5 apparatus, 5 different signals.");
+        return 0;
+    }
+    ex_out("FAILURES: "); fmt_int(fails); println(" -- see the lines above");
+    return 1;
+}
+
+var r = main();
+syscall(60, r);

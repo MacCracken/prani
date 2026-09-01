@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.6] - Runnable examples, and the two defects they found
+
+Five worked programs in [`docs/examples/`](docs/examples/), built and run by CI on
+every push via [`scripts/run-examples.sh`](scripts/run-examples.sh). Suite
+**1894 → 1900 assertions / 17 suites**, `cyrius audit` exit 0.
+
+`CLAUDE.md` had advertised *"[`docs/examples/`](docs/examples/) — Runnable
+examples"* over a directory containing a `.gitkeep`. More to the point:
+`rust-old/` is removed in 2.0.8, and after that **a worked example is the only
+executable statement of how this API is driven.**
+
+Each example includes **`dist/prani.cyr`** — the published bundle — rather than
+`src/*.cyr`, so building them exercises prani exactly as a consumer does. That
+makes the examples the closest thing the project has to a consumer integration
+test, which matters because neither consumer has ported up the stack.
+
+| Example | Shows |
+|---|---|
+| `basic.cyr` | a wolf howl end to end, and the vec-or-negative-code convention |
+| `species_tour.cyr` | one call per vocal apparatus, with parameters read back at runtime |
+| `error_handling.cyr` | every failure shape, and the ADR divergences behind them |
+| `streaming.cyr` | the real-time path, the allocation rule, **and the full FFI lifecycle** |
+| `sequencing.cyr` | bouts, phrases, and a multi-voice chorus |
+
+### The FFI surface has now been driven end to end
+
+`streaming.cyr` runs `prani_ffi_voice_create` → `_stream_start` → `_stream_fill`
+to completion → `_stream_is_finished` → both destroys, checking every return.
+**That lifecycle is the condition the 2026-08-31 decision to drop consumer-green
+from 2.0.8's gate rests on**, and nothing had ever driven it before.
+
+It also proves the FFI is a thin adapter rather than a second implementation:
+the FFI drain and the Cyrius-level drain produce **sample-for-sample identical
+audio** — 0 of 2205 samples differ — for the same parameters.
+
+### Fixed — an out-of-range species tag rendered audio and reported success
+
+⭐ **Found by `error_handling.cyr`**, which is exactly the job a worked example is
+supposed to do. 2.0.5 guarded the `voc` and `intent` tags for precisely this
+reason — the oracle's enums made an out-of-range value unrepresentable, and the
+port carries them as `i64` — and **missed `species`**. `species_params` falls
+through to the FANTASY defaults for any unknown tag (deliberately, to preserve
+totality), so:
+
+```
+crvoice_new(99)                              -> a valid voice, no error
+crvoice_vocalize(that, HOWL, 44100.0, 0.05)  -> 2205 samples, no error
+stream_new(that, HOWL, IDLE, 44100.0, 0.05)  -> a valid stream, no error
+```
+
+`crvoice_new` returns a pointer with no error channel, so the guard is at the
+**point of use** — `crvoice_vocalize_with_intent` and `stream_new` — exactly as
+[ADR-0006](docs/adr/0006-reject-non-finite-numeric-input.md) describes for the
+builders. Pinned as **F13** in `tests/hardening.tcyr`, with controls at
+`PRANI_SP_FANTASY` (the last valid tag) so a guard that rejected everything
+could not pass.
+
+### Filed — `stream_fill_buffer` allocates 8,800 bytes per call
+
+Found by `streaming.cyr`. At 44100 Hz with 512-sample blocks that is 86
+callbacks a second — **~757 KB/s retained for the life of the process**, on an
+allocator that never frees; a one-minute creature loop retains ~45 MB. It
+contradicts what `src/stream.cyr`'s own header advertises the module for:
+*"suitable for real-time audio callbacks … (Wwise, FMOD, Godot, JACK)."*
+
+Three per-call sources, all the **same pattern 2.0.3 already fixed twice** (F7,
+F8). Filed as roadmap **2.0.9** rather than fixed here, to keep an examples
+release from carrying a `stream.cyr` rework. It does not gate `rust-old/`'s
+retirement — the oracle allocated per call too and simply had an allocator that
+freed.
+
+### Also noted
+
+The examples surfaced two ergonomic gaps, both recorded rather than fixed
+(adding public API is a minor bump, and 2.1.0 is where that belongs): there are
+**no name helpers** for the species / vocalization / intent tags to match
+`prani_err_name`, so every example and host log line hand-writes the same string
+tables; and the **FFI has no `total_samples` getter**, so a host cannot learn the
+length it should expect, and cannot account for an intent's `duration_scale`.
+
 ## [2.0.5] - Input-range validation, and a crash in the whole low-sample-rate band
 
 Closes [ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)'s deferral

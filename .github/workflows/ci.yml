@@ -64,6 +64,14 @@ jobs:
         # paren-aware in 6.5.28). Trust this one.
         run: cyrius audit
 
+      - name: Examples — build and run all five
+        # Roadmap 2.0.6's gate. `rust-old/` (the frozen Rust oracle) is removed in
+        # 2.0.8, after which a worked example is the only executable statement of
+        # how this API is driven — so the examples must not be allowed to rot.
+        # Each one includes dist/prani.cyr exactly as a consumer would, so this
+        # also proves the published bundle is usable from outside the library.
+        run: sh scripts/run-examples.sh
+
       - name: Bundle coherence — dist/ matches src/
         # dist/prani.cyr and dist/prani.deps are TRACKED build products,
         # regenerated from [lib].modules. A PR that edits src/ without

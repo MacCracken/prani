@@ -43,36 +43,6 @@ Measured facts this arc rests on, all verified 2026-08-31:
 > gates. Every number in this table now carries the command that reproduces it;
 > a gate figure with no reproducible command does not belong here.
 
-### 2.0.6 — Runnable examples
-
-**Source**: `CLAUDE.md` advertises *"[`docs/examples/`](../examples/) — Runnable
-examples"*; the directory contains a `.gitkeep` and nothing else.
-
-**A gate item, not a nicety.** `rust-old/` has no `examples/` either, so nothing
-is lost by removal here — but once the oracle is gone, a worked example is the
-only executable statement of how the API is meant to be driven, and the fastest
-way for a consumer to be wrong about an API is to have no example of it. svara
-closed exactly this gap before its own oracle retirement.
-
-| Example | Shows |
-|---|---|
-| `basic.cyr` | a wolf howl, sample statistics, the vec-or-negative-code return convention |
-| `species_tour.cyr` | one call per vocal apparatus — laryngeal, syringeal, stridulatory, vibratile, noise-only |
-| `error_handling.cyr` | every failure shape, including the three ADR divergences (rejected sample rate, rejected JSON, a retired stream) |
-| `streaming.cyr` | the `stream_fill_buffer` real-time path, the allocation rule that governs it, **and the full FFI lifecycle** (see below) |
-| `sequencing.cyr` | bouts, phrases, and a multi-voice chorus |
-
-⚠ **`streaming.cyr` carries a hard requirement, not a suggestion.** It must drive
-`prani_ffi_voice_create` → `prani_ffi_stream_start` → `prani_ffi_stream_fill` to
-completion → `prani_ffi_stream_is_finished` → the destroy calls. That lifecycle
-is the condition the 2026-08-31 decision to drop consumer-green from 2.0.8's gate
-rests on — it is the only thing that will ever have driven the FFI surface end to
-end, and it is where 2.0.3's stream repairs ([ADR-0003](../adr/0003-failed-fill-reports-zero-and-retires.md))
-live. An example that stops at `stream_fill_buffer` does not satisfy it.
-
-**Done when**: CI builds and runs all five on every push, so they cannot rot
-against the API.
-
 ### 2.0.7 — Benchmark breadth and the Rust comparison
 
 **Source**: [`docs/benchmarks.md`](../benchmarks.md) — *"A like-for-like
@@ -122,7 +92,9 @@ after this, parity is asserted by the suites alone.
 - [x] **2.0.4 complete** — all 73 Rust tests audited and all 41 shortfalls closed,
       not merely filed. Ledger: [`rust-test-parity.md`](rust-test-parity.md).
       Zero behavioural defects; suite 770 → 1200 assertions
-- [ ] 2.0.6 complete — examples exist and CI runs them
+- [x] **2.0.6 complete** — five examples exist, CI runs them on every push, and
+      `streaming.cyr` drives the full FFI lifecycle (the condition the consumer-green
+      decision rests on)
 - [ ] **2.0.7 complete — the comparison captured while the oracle still builds**
 - [ ] **Reference sweep**: all **83** `rust-old/…` citations across the 42
       maintained files converted to the tag-qualified form from
@@ -184,6 +156,37 @@ better than the Rust does.
 ## 2.x — larger work
 
 Changes the public surface, or is gated on something outside this repo.
+
+### 2.0.9 — `stream_fill_buffer` allocates on every call
+
+**Source**: found by 2.0.6's `streaming.cyr` example — the first thing ever to
+drive the streaming path the way a host does.
+
+**Measured 2026-08-31: 8,800 bytes retained per steady-state fill.** At 44100 Hz
+with 512-sample blocks that is 86 callbacks a second — **~757 KB/s retained for
+the life of the process**, on an allocator that never frees. A one-minute
+creature loop retains ~45 MB.
+
+This directly contradicts what `src/stream.cyr`'s own header advertises the
+module for: *"suitable for real-time audio callbacks where the block size is
+determined by the host (Wwise, FMOD, Godot, JACK)."* An allocation inside an
+audio callback is not a leak that grows slowly — it is one that ends the process.
+
+Three per-call sources are visible: the block vec `crtract_synthesize` returns,
+the `SynthesisOptions` built at `src/stream.cyr:337`, and the contour vec in
+`stream_pitch_contour_at`. All three are the **same pattern 2.0.3 already fixed
+twice** (F7 removed 168 B/call from `prani_ffi_voice_set_size`; F8 removed one
+`SynthesisOptions` per 20 ms block from the `voice.cyr` loop) — hoist the
+storage into `SynthStream` and reuse it across fills.
+
+Patch-level: no API change, no behaviour change on any valid input. It is
+numbered after 2.0.8 only because the numbers below it are taken; **it does not
+gate `rust-old/`'s retirement** — the oracle has nothing to say about it, since
+the Rust allocated per call too and simply had an allocator that freed.
+
+**Done when**: `alloc_used()` before and after a steady-state fill differs by 0,
+asserted in `tests/hardening.tcyr` alongside 2.0.3's two existing allocation
+budgets.
 
 ### 2.1.0 — The allocation-failure contract
 

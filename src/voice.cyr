@@ -949,6 +949,17 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     if (voc >= PRANI_VOC_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (intent < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (intent >= PRANI_INTENT_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # SPECIES is the same erasure and was missed in 2.0.5 -- found by 2.0.6's
+    # error_handling example. species_params falls through to the FANTASY
+    # defaults for any unknown tag (src/species.cyr, "preserves totality since
+    # the Rust enum is #[non_exhaustive]"), so crvoice_new(99) returned a voice
+    # and this function rendered 2205 samples for it as a success (measured).
+    # crvoice_new cannot report it -- it returns a pointer with no error channel
+    # -- so the guard belongs here, at the point of use, exactly as ADR-0006
+    # describes for the builders.
+    var species_tag = CreatureVoice_species(self);
+    if (species_tag < 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (species_tag >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
     # sample_rate: finite and > 0 only -- NOT a threshold. svara owns the
     # "too low to build a tract" rule and prani must not restate it (ADR-0001).
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }

@@ -1,0 +1,404 @@
+# streaming.cyr -- prani's pull-based streaming path, driven twice.
+#
+#   cyrius build docs/examples/streaming.cyr build/examples/streaming
+#   ./build/examples/streaming
+#
+# prani has TWO streaming surfaces and a consumer has to pick one:
+#
+#   PART 1  stream_new / stream_fill_buffer / stream_is_finished -- the Cyrius
+#           API. Every fallible call returns a HANDLE (a positive heap pointer)
+#           or a NEGATIVE PRANI_ERR_* code; the sign of the return is the whole
+#           error channel.
+#   PART 2  prani_ffi_* -- the same machine driven the way a C host drives it
+#           (a Wwise source plugin, an FMOD DSP callback, a Godot
+#           AudioStreamGenerator): integer INDICES in, 0 (null) for failure.
+#
+# Both parts render the same call -- Wolf / Howl / Social, 44100 Hz, 0.05 s --
+# so the totals can be held against each other and against the one-shot
+# crvoice_vocalize_with_intent at the end. Sample counts are printed per fill so
+# the drain is visible converging.
+#
+# This file includes the dependency bundles and dist/prani.cyr exactly as an
+# outside consumer would: building it proves the published bundle is usable from
+# outside the library. It checks every fallible return and exits non-zero if any
+# check fails, so scripts/run-examples.sh catches API drift on every push.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+# ---- parameters -------------------------------------------------------------
+# Non-integer f64 literals are IEEE-754 bit patterns in Cyrius (the decimal is
+# in the comment); whole numbers come from f64_from(n).
+var EX_SR      = 0x40e5888000000000;   # 44100.0 Hz. Anything at or below svara's
+                                       # ~1200 Hz floor is refused at the first
+                                       # fill, not at construction -- see the
+                                       # note under "stream_new" below.
+var EX_DUR     = 0x3fa999999999999a;   # 0.05 s -> 2205 samples at 44100 Hz
+var EX_DUR_NEG = 0xbff0000000000000;   # -1.0 s -- a host bug, used as a guard demo
+var EX_BLOCK   = 512;                  # the host's callback block size. A real
+                                       # host is handed this number; it is not
+                                       # prani's to choose.
+
+# ---- check accounting -------------------------------------------------------
+# Passing checks stay silent so the transcript reads as a transcript; a failure
+# prints and forces a non-zero exit, which is what makes this file a CI gate
+# rather than a demo.
+var ex_checks   = 0;
+var ex_failures = 0;
+
+# ---- output helpers ---------------------------------------------------------
+# There is no printf in Cyrius and `print` wants an exact byte count, so pair it
+# with strlen once here instead of hand-counting every literal.
+fn say(s) { print(s, strlen(s)); return 0; }
+fn nl() { print("\n", 1); return 0; }
+fn line(s) { say(s); nl(); return 0; }
+
+fn expect_eq(got, want, what) {
+    if (got == want) { ex_checks = ex_checks + 1; return 0; }
+    ex_failures = ex_failures + 1;
+    say("  FAIL: "); say(what); say(" -- got "); fmt_int(got);
+    say(", want "); fmt_int(want); nl();
+    return 0;
+}
+
+# peak |x| over a vec -- one honest number about the audio, so the reader can
+# tell "it ran" from "it produced signal". 0 is the +0.0 bit pattern.
+#must_use
+fn ex_peak_abs(v) {
+    var p = 0;
+    var i = 0;
+    var n = vec_len(v);
+    while (i < n) {
+        var a = f64_abs(vec_get(v, i));
+        if (f64_gt(a, p) == 1) { p = a; }
+        i = i + 1;
+    }
+    return p;
+}
+
+# count samples that differ bit-for-bit between two vecs (compared over the
+# shorter length).
+#must_use
+fn ex_count_diffs(a, b) {
+    var n = vec_len(a);
+    if (vec_len(b) < n) { n = vec_len(b); }
+    var d = 0;
+    var i = 0;
+    while (i < n) {
+        if (vec_get(a, i) != vec_get(b, i)) { d = d + 1; }
+        i = i + 1;
+    }
+    return d;
+}
+
+fn main() {
+    alloc_init();
+
+    line("prani streaming -- the pull-based path and the FFI lifecycle");
+    line("===========================================================");
+    nl();
+    line("  species       Wolf     PRANI_SP_WOLF");
+    line("  vocalization  Howl     PRANI_VOC_HOWL");
+    line("  intent        Social   PRANI_INTENT_SOCIAL");
+    line("  sample rate   44100 Hz");
+    line("  duration      0.05 s   -> 2205 samples");
+    line("  block size    512      the host's callback size, not prani's choice");
+    nl();
+
+    # ========================================================================
+    line("PART 1 -- the Cyrius streaming path");
+    line("-----------------------------------");
+    nl();
+
+    var voice = crvoice_new(PRANI_SP_WOLF);
+    var stream = stream_new(voice, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, EX_SR, EX_DUR);
+    # prani_is_err FIRST, always. A handle is a heap pointer, so it is large and
+    # positive; an error is a small negative code. Using the return without this
+    # check dereferences -2 as a pointer.
+    if (prani_is_err(stream) == 1) {
+        say("stream_new failed: "); say(prani_err_name(stream)); nl();
+        return 1;
+    }
+    line("stream_new -> ok (a negative return would have been a PRANI_ERR_* code)");
+    say("  total_samples     "); fmt_int(stream_total_samples(stream)); nl();
+    say("  samples_rendered  "); fmt_int(stream_samples_rendered(stream)); nl();
+    say("  is_finished       "); fmt_int(stream_is_finished(stream)); nl();
+    # total_samples is duration * the intent's duration_scale * sample_rate.
+    # Social scales by 1.0; MATING would scale by 2.0 and this would be 4410 --
+    # the intent changes the LENGTH, not just the timbre.
+    expect_eq(stream_total_samples(stream), 2205, "total_samples == 0.05 s * 44100 Hz");
+    nl();
+
+    line("Not every species can make every sound, and a rejected pair is reported");
+    line("rather than substituted:");
+    var snake = crvoice_new(PRANI_SP_SNAKE);
+    say("  species_supports_vocalization(SNAKE, HOWL)  -> ");
+    fmt_int(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HOWL)); nl();
+    var bad = stream_new(snake, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, EX_SR, EX_DUR);
+    say("  stream_new(snake, HOWL, ...)                -> ");
+    fmt_int(bad); say("  "); say(prani_err_name(bad)); nl();
+    expect_eq(bad, PRANI_ERR_INVALID_VOCALIZATION, "snake howl -> INVALID_VOCALIZATION");
+    nl();
+
+    # ---- THE ALLOCATION RULE ------------------------------------------------
+    # Cyrius's allocator is a bump arena: alloc() never frees, and the only way
+    # back is alloc_reset(), which throws away EVERYTHING. So an allocation
+    # inside an audio callback is not a slow leak -- at 86 callbacks a second it
+    # is a countdown to the arena running out and the process dying mid-session.
+    # The buffer is therefore allocated ONCE, here, outside the drain loop, and
+    # every fill writes over it. The accumulator is pre-sized for the same
+    # reason and written in place with vec_set; a real host would not keep it at
+    # all -- it hands each block to the device and forgets it. This example
+    # keeps the audio only so it can be compared with the one-shot render below.
+    var buf = vec_new();
+    prani_vec_push_zeros(buf, EX_BLOCK);
+    var acc = vec_new();
+    prani_vec_push_zeros(acc, stream_total_samples(stream));
+
+    line("Draining into ONE reused 512-sample buffer, the way a callback would:");
+    var used_before = alloc_used();
+    var fills = 0;
+    var total = 0;
+    var finite = 1;
+    # Bounded loop: 5 passes are expected. The guard is a CI safety net, not part
+    # of the pattern -- a regression that stops advancing samples_rendered leaves
+    # through the bound and fails a check instead of hanging the build.
+    while (stream_is_finished(stream) == 0 && fills < 32) {
+        var n = stream_fill_buffer(stream, buf);
+        fills = fills + 1;
+        # fill_buffer's ONLY failure channel is "0 samples written" -- there is
+        # no code to return, because the count is the return. A 0 here (with the
+        # stream not yet finished) means synthesis failed and the stream retired
+        # itself so this loop can still terminate (ADR-0003).
+        if (n == 0) {
+            line("  fill returned 0 -- synthesis failed; the stream retired itself (ADR-0003)");
+        }
+        var i = 0;
+        while (i < n) {
+            var s = vec_get(buf, i);
+            if (prani_is_finite(s) == 0) { finite = 0; }
+            vec_set(acc, total + i, s);
+            i = i + 1;
+        }
+        total = total + n;
+        say("  fill "); fmt_int(fills); say(" -> "); fmt_int(n);
+        say(" samples   rendered "); fmt_int(stream_samples_rendered(stream));
+        say("/"); fmt_int(stream_total_samples(stream));
+        if (n < EX_BLOCK) { say("   <- short fill: the stream ran out"); }
+        nl();
+    }
+    var used_after = alloc_used();
+
+    say("  is_finished -> "); fmt_int(stream_is_finished(stream));
+    say(" after "); fmt_int(fills); line(" fills");
+    say("  accumulated "); fmt_int(total); line(" samples");
+    if (finite == 1) { line("  every sample is finite"); }
+    if (finite == 0) { line("  NOT ALL SAMPLES FINITE -- see the FAIL below"); }
+    say("  peak |sample| "); fmt_float(ex_peak_abs(acc), 6); nl();
+    expect_eq(fills, 5, "drained in 5 fills (4 x 512 + 157)");
+    expect_eq(total, 2205, "drain total == total_samples");
+    expect_eq(stream_is_finished(stream), 1, "stream finished after the drain");
+    expect_eq(finite, 1, "every sample finite");
+    nl();
+
+    line("One-shot cross-check -- crvoice_vocalize_with_intent, same parameters:");
+    var v2 = crvoice_new(PRANI_SP_WOLF);
+    var batch = crvoice_vocalize_with_intent(v2, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL,
+                                             EX_SR, EX_DUR);
+    if (prani_is_err(batch) == 1) {
+        say("crvoice_vocalize_with_intent failed: "); say(prani_err_name(batch)); nl();
+        return 1;
+    }
+    say("  one-shot length  "); fmt_int(vec_len(batch)); line(" samples");
+    say("  streamed total   "); fmt_int(total); line(" samples");
+    expect_eq(total, vec_len(batch), "streamed total == one-shot length");
+    if (total == vec_len(batch)) {
+        line("  MATCH -- draining a stream yields exactly the one-shot length");
+    }
+    say("  peak |sample|    "); fmt_float(ex_peak_abs(batch), 6); line("  (one-shot)");
+    # The LENGTH is the contract the two share, and the only one. The one-shot
+    # path runs a post chain the stream does not (subharmonics, biphonation,
+    # nasal anti-formant, AM, envelope), so the two are not sample-for-sample
+    # substitutes -- pick streaming for latency, not for identical audio.
+    say("  differing samples "); fmt_int(ex_count_diffs(acc, batch));
+    say(" of "); fmt_int(total); line("  <- expected: different post chains");
+    line("  The two peaks above are the practical consequence: the streamed signal");
+    line("  comes out roughly a tenth of the one-shot's level, because the one-shot");
+    line("  envelope and AM stages never run on it. A host swapping one path for the");
+    line("  other has to re-gain, not just re-buffer.");
+    nl();
+
+    line("The allocation rule -- Cyrius's arena never frees:");
+    say("  heap retained before the drain  "); fmt_int(used_before); line(" bytes");
+    say("  heap retained after the drain   "); fmt_int(used_after); line(" bytes");
+    say("  retained by the drain           "); fmt_int(used_after - used_before);
+    say(" bytes over "); fmt_int(fills); line(" fills");
+    say("  per fill                        ");
+    fmt_int((used_after - used_before) / fills); line(" bytes");
+    line("  The loop body above allocates NOTHING: the buffer was allocated once,");
+    line("  before the loop. Those bytes are what stream_fill_buffer allocates");
+    line("  internally per call -- a fresh block vec from the tract, the pitch");
+    line("  contour table, and svara's per-call working set. They are retained too,");
+    line("  so size the arena for the whole session: streaming lowers latency, it");
+    line("  does not make synthesis allocation-free.");
+    nl();
+
+    # CONTROL, so the rule is demonstrated rather than asserted: the identical
+    # drain with vec_new moved inside the loop. Same 2205 samples out; the only
+    # difference is where the buffer comes from.
+    var s_ctl = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL,
+                           PRANI_INTENT_SOCIAL, EX_SR, EX_DUR);
+    if (prani_is_err(s_ctl) == 1) {
+        say("control stream_new failed: "); say(prani_err_name(s_ctl)); nl();
+        return 1;
+    }
+    var ctl_before = alloc_used();
+    var ctl_fills = 0;
+    var ctl_total = 0;
+    while (stream_is_finished(s_ctl) == 0 && ctl_fills < 32) {
+        var cbuf = vec_new();                    # <- the mistake, on purpose
+        prani_vec_push_zeros(cbuf, EX_BLOCK);
+        ctl_total = ctl_total + stream_fill_buffer(s_ctl, cbuf);
+        ctl_fills = ctl_fills + 1;
+    }
+    var ctl_after = alloc_used();
+    expect_eq(ctl_total, total, "control drain produced the same sample count");
+    line("Control -- the same drain with the buffer allocated per fill:");
+    say("  retained by the drain           "); fmt_int(ctl_after - ctl_before);
+    line(" bytes");
+    say("  cost of one vec_new inside the loop  +");
+    fmt_int((ctl_after - ctl_before) - (used_after - used_before));
+    line(" bytes, never returned");
+    nl();
+
+    # ========================================================================
+    line("PART 2 -- the FFI lifecycle (what a non-Cyrius host drives)");
+    line("-----------------------------------------------------------");
+    nl();
+    line("A C host has no PRANI_SP_* constants: it passes integer INDICES, and");
+    line("this surface reports failure as 0 (null), not as a negative code. The");
+    line("mapping is queryable, so a host can validate an index before using it:");
+    say("  prani_ffi_species_from_index(0)       -> ");
+    fmt_int(prani_ffi_species_from_index(0)); line("   Wolf");
+    say("  prani_ffi_vocalization_from_index(0)  -> ");
+    fmt_int(prani_ffi_vocalization_from_index(0)); line("   Howl");
+    say("  prani_ffi_intent_from_index(6)        -> ");
+    fmt_int(prani_ffi_intent_from_index(6)); line("   Social");
+    say("  prani_ffi_species_from_index(99)      -> ");
+    fmt_int(prani_ffi_species_from_index(99)); line("  out of range");
+    expect_eq(prani_ffi_species_from_index(99), (0 - 1), "species index 99 -> -1");
+    nl();
+
+    line("The lifecycle, in order, every return checked:");
+
+    # 1. create ---------------------------------------------------------------
+    var fvoice = prani_ffi_voice_create(0);
+    if (fvoice == 0) {
+        line("  prani_ffi_voice_create(0) returned null -- cannot continue");
+        return 1;
+    }
+    line("  1. prani_ffi_voice_create(0)                        -> handle (non-null)");
+    say("       rejected: prani_ffi_voice_create(99)           -> ");
+    fmt_int(prani_ffi_voice_create(99)); line("  null");
+    expect_eq(prani_ffi_voice_create(99), 0, "voice_create(99) -> null");
+
+    # 2. start ----------------------------------------------------------------
+    var fstream = prani_ffi_stream_start(fvoice, 0, 6, EX_SR, EX_DUR);
+    if (fstream == 0) {
+        line("  prani_ffi_stream_start returned null -- cannot continue");
+        return 1;
+    }
+    line("  2. prani_ffi_stream_start(voice, 0, 6, 44100, 0.05) -> handle (non-null)");
+    say("       rejected: the same call with duration -1.0     -> ");
+    fmt_int(prani_ffi_stream_start(fvoice, 0, 6, EX_SR, EX_DUR_NEG)); line("  null");
+    expect_eq(prani_ffi_stream_start(fvoice, 0, 6, EX_SR, EX_DUR_NEG), 0,
+              "negative duration -> null");
+
+    # 3. fill -----------------------------------------------------------------
+    # One buffer, allocated before the loop, for the reason Part 1 measured. The
+    # host knows how many samples it asked for (0.05 s x 44100 Hz); this surface
+    # has no total_samples getter, so the accumulator is sized from Part 1's
+    # figure. Note that an intent with a duration_scale != 1.0 (MATING doubles
+    # it) changes the real length, and the FFI does not expose that either.
+    var fbuf = vec_new();
+    prani_vec_push_zeros(fbuf, EX_BLOCK);
+    var facc = vec_new();
+    prani_vec_push_zeros(facc, total);
+
+    line("  3. prani_ffi_stream_fill(stream, buffer, 512), looping until");
+    line("     prani_ffi_stream_is_finished(stream) == 1:");
+    var ffills = 0;
+    var ftotal = 0;
+    while (prani_ffi_stream_is_finished(fstream) == 0 && ffills < 32) {
+        var wrote = prani_ffi_stream_fill(fstream, fbuf, EX_BLOCK);
+        ffills = ffills + 1;
+        # Same failure channel as the Cyrius call: the count IS the return, so a
+        # 0 before the stream is finished means the fill failed and retired it.
+        if (wrote == 0) {
+            line("       fill returned 0 -- failed and retired the stream (ADR-0003)");
+        }
+        var k = 0;
+        while (k < wrote) {
+            vec_set(facc, ftotal + k, vec_get(fbuf, k));
+            k = k + 1;
+        }
+        ftotal = ftotal + wrote;
+        say("       fill "); fmt_int(ffills); say(" -> "); fmt_int(wrote); say(" samples");
+        if (wrote < EX_BLOCK) { say("   <- short fill: the stream ran out"); }
+        nl();
+    }
+
+    # 4. finished -------------------------------------------------------------
+    say("  4. prani_ffi_stream_is_finished(stream)             -> ");
+    fmt_int(prani_ffi_stream_is_finished(fstream)); nl();
+    expect_eq(prani_ffi_stream_is_finished(fstream), 1, "FFI stream reports finished");
+
+    # 5/6. destroy ------------------------------------------------------------
+    prani_ffi_stream_destroy(fstream);
+    prani_ffi_voice_destroy(fvoice);
+    line("  5. prani_ffi_stream_destroy(stream)");
+    line("  6. prani_ffi_voice_destroy(voice)");
+    line("     Both are null-checked no-ops today -- the arena has no per-object");
+    line("     free. Call them anyway: they are the lifecycle contract a C host");
+    line("     is written against, and a host that skips them breaks the day");
+    line("     prani gets an allocator that can free.");
+    nl();
+
+    # ---- the three totals ---------------------------------------------------
+    line("Totals -- all three paths must agree:");
+    say("  FFI drain     "); fmt_int(ftotal); say(" samples in "); fmt_int(ffills); line(" fills");
+    say("  Cyrius drain  "); fmt_int(total); say(" samples in "); fmt_int(fills); line(" fills");
+    say("  one-shot      "); fmt_int(vec_len(batch)); line(" samples");
+    expect_eq(ftotal, total, "FFI drain total == Cyrius drain total");
+    expect_eq(ftotal, vec_len(batch), "FFI drain total == one-shot length");
+    expect_eq(ffills, fills, "FFI drain took the same number of fills");
+    if (ftotal == total) { line("  MATCH -- the FFI drains to exactly the Cyrius total"); }
+    var fdiff = ex_count_diffs(facc, acc);
+    say("  sample-for-sample: "); fmt_int(fdiff); say(" of "); fmt_int(total);
+    line(" samples differ between the FFI and Cyrius drains");
+    expect_eq(fdiff, 0, "FFI and Cyrius drains are bit-identical");
+    if (fdiff == 0) {
+        line("  The FFI is a thin adapter over the same code: identical parameters,");
+        line("  identical audio. It is the indices and the null-for-error convention");
+        line("  that differ, not the synthesis.");
+    }
+    nl();
+
+    line("SUMMARY");
+    say("  checks passed  "); fmt_int(ex_checks); nl();
+    if (ex_failures > 0) {
+        say("  CHECKS FAILED  "); fmt_int(ex_failures); nl();
+        return 1;
+    }
+    line("  all checks passed");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

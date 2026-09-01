@@ -1,0 +1,516 @@
+# =============================================================================
+# error_handling.cyr -- every failure shape prani has, and how a caller tells
+# them apart.
+#
+#     cyrius build docs/examples/error_handling.cyr build/examples/error_handling
+#     ./build/examples/error_handling
+#
+# This example synthesizes almost nothing. It is the page to read when a prani
+# call has come back and you do not know what you are holding.
+#
+# Four of its five sections are DIVERGENCES from the Rust original prani was
+# ported from (rust-old/), each recorded as an ADR. They are the ones a consumer
+# actually trips over, because in every one of them the Rust could not fail and
+# prani can:
+#
+#     section 2 -- docs/adr/0001  the tract constructor reports svara's rejection
+#     section 3 -- docs/adr/0002  the deserializers report a parse failure
+#     section 4 -- docs/adr/0006  non-finite / out-of-range input is refused
+#     section 5 -- docs/adr/0003  a failed stream fill writes 0 and retires
+#
+# Every call below is checked against the code it is documented to return, and
+# the program exits non-zero if any of them stops behaving that way. These are
+# executable claims, not prose: an example that only printed what it got would
+# keep "passing" after the contract had changed underneath it.
+# =============================================================================
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+# ---- literals ---------------------------------------------------------------
+# Cyrius has no non-integer float literals: an integer is f64_from(n), anything
+# else is its IEEE-754 bit pattern, with the decimal value in the comment.
+#     python3 -c "import struct;print(hex(struct.unpack('<Q',struct.pack('<d',V))[0]))"
+var EX_SR_44100 = 0x40e5888000000000;   # 44100.0 Hz  the rate to use unless the
+                                        #             example is about rates
+var EX_SR_1200  = 0x4092c00000000000;   # 1200.0 Hz   svara's floor, exactly
+var EX_DUR_005  = 0x3fa999999999999a;   # 0.05 s      long enough to be real audio,
+                                        #             short enough to stay instant
+
+# The two ways to build a non-finite f64 in Cyrius, since there is no NaN
+# literal either. Both are refused by section 4 -- that is the point of having
+# them here rather than only in a comment.
+fn ex_nan()     { return f64_div(0, 0); }               # 0/0
+fn ex_pos_inf() { return f64_div(f64_from(1), 0); }     # 1/0
+
+# The same VoicePreset document twice, differing in ONE field. prani's codec
+# writes f64 fields as their exact i64 BIT PATTERN rather than as a decimal, so
+# a roundtrip is lossless -- which is also why an out-of-range float survives
+# JSON at all and has to be range-checked on the way back in (section 4).
+#   4608983858650965606 == 0x3ff6666666666666 ==  1.4   (inside with_size's domain)
+#   4626322717216342016 == 0x4034000000000000 == 20.0   (outside it)
+var EX_PRESET_OK  = "{\"name\":\"Alpha Wolf\",\"species\":0,\"size\":4608983858650965606,\"f0_offset\":0,\"breathiness\":0}";
+var EX_PRESET_BIG = "{\"name\":\"Alpha Wolf\",\"species\":0,\"size\":4626322717216342016,\"f0_offset\":0,\"breathiness\":0}";
+
+# ---- transcript helpers -----------------------------------------------------
+# Counters, so the closing summary is measured rather than asserted by hand.
+var EX_REJECTIONS = 0;
+var EX_ACCEPTANCES = 0;
+var EX_UNEXPECTED = 0;
+
+# print() wants an exact BYTE count and miscounting truncates the line, so this
+# never counts by hand.
+fn ex_put(s) { print(s, strlen(s)); return 0; }
+
+fn ex_rule() {
+    println("------------------------------------------------------------");
+    return 0;
+}
+
+fn ex_section(title) {
+    println("");
+    ex_rule();
+    println(title);
+    ex_rule();
+    return 0;
+}
+
+# The call being made, echoed as source so the transcript reads as a script.
+fn ex_call(text) { ex_put("  "); println(text); return 0; }
+
+# A call that SHOULD have failed. Prints the code and its name, then checks it
+# against `want`: printing without checking is how an example rots.
+fn ex_rejected(code, want) {
+    ex_put("      rejected: ");
+    fmt_int(code);
+    ex_put("  ");
+    println(prani_err_name(code));
+    if (prani_is_err(code) == 0) {
+        println("      *** UNEXPECTED: a handle came back, not an error code");
+        EX_UNEXPECTED = EX_UNEXPECTED + 1;
+        return 0;
+    }
+    if (code != want) {
+        ex_put("      *** UNEXPECTED: documented code is ");
+        println_int(want);
+        EX_UNEXPECTED = EX_UNEXPECTED + 1;
+        return 0;
+    }
+    EX_REJECTIONS = EX_REJECTIONS + 1;
+    return 0;
+}
+
+# A call that SHOULD have succeeded, returning a vec of `want_len` samples.
+# The length is part of the claim: an empty buffer returned as a success is the
+# exact defect shape ADR-0006's guards exist to replace, so "no error" alone is
+# not enough to call this a pass.
+fn ex_accepted_audio(out, want_len) {
+    if (prani_is_err(out) == 1) {
+        ex_put("      *** UNEXPECTED: rejected with ");
+        println(prani_err_name(out));
+        EX_UNEXPECTED = EX_UNEXPECTED + 1;
+        return 0;
+    }
+    ex_put("      accepted: ");
+    fmt_int(vec_len(out));
+    println(" samples");
+    if (vec_len(out) != want_len) {
+        ex_put("      *** UNEXPECTED: expected ");
+        println_int(want_len);
+        EX_UNEXPECTED = EX_UNEXPECTED + 1;
+        return 0;
+    }
+    EX_ACCEPTANCES = EX_ACCEPTANCES + 1;
+    return 0;
+}
+
+# A non-audio success (a voice, a preset, a stream). `note` describes what came
+# back; the handle is still checked, because every one of these is a function
+# that can hand back a negative code instead.
+fn ex_accepted(handle, note) {
+    if (prani_is_err(handle) == 1) {
+        ex_put("      *** UNEXPECTED: rejected with ");
+        println(prani_err_name(handle));
+        EX_UNEXPECTED = EX_UNEXPECTED + 1;
+        return 0;
+    }
+    ex_put("      accepted: ");
+    println(note);
+    EX_ACCEPTANCES = EX_ACCEPTANCES + 1;
+    return 0;
+}
+
+fn ex_field(name, value) {
+    ex_put("      ");
+    ex_put(name);
+    println_int(value);
+    return 0;
+}
+
+# ---- 5: the drain loop ------------------------------------------------------
+# Written the way a host writes it, and the reason ADR-0003 retires a failed
+# stream: the loop's only exit is stream_is_finished. `guard` is NOT part of
+# the idiom -- it is here so that if the retirement ever regresses, this example
+# fails instead of hanging CI forever.
+fn ex_drain(s, buf, want_iters, want_written) {
+    var iters = 0;
+    var written = 0;
+    var guard = 0;
+    while (stream_is_finished(s) == 0) {
+        # fill_buffer returns a SAMPLE COUNT, never a negative code: its callers
+        # add it to a play position, so a negative return would corrupt exactly
+        # the hosts least able to notice. 0 written is the whole error channel.
+        written = written + stream_fill_buffer(s, buf);
+        iters = iters + 1;
+        guard = guard + 1;
+        if (guard > 10000) {
+            println("      *** UNEXPECTED: drain loop did not terminate");
+            EX_UNEXPECTED = EX_UNEXPECTED + 1;
+            return 0;
+        }
+    }
+    ex_field("iterations:         ", iters);
+    ex_put("      samples written:    ");
+    fmt_int(written);
+    ex_put(" of ");
+    println_int(stream_total_samples(s));
+    ex_field("stream_is_finished: ", stream_is_finished(s));
+    var wrong = 0;
+    if (iters != want_iters) { wrong = wrong + 1; }
+    if (written != want_written) { wrong = wrong + 1; }
+    if (stream_is_finished(s) != 1) { wrong = wrong + 1; }
+    if (wrong != 0) {
+        println("      *** UNEXPECTED: the drain did not match the documented shape");
+        EX_UNEXPECTED = EX_UNEXPECTED + wrong;
+        return 0;
+    }
+    EX_ACCEPTANCES = EX_ACCEPTANCES + 1;
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    println("============================================================");
+    println("prani -- error handling: every failure shape, and how to");
+    println("distinguish them");
+    println("============================================================");
+    println("");
+    println("prani's convention for a fallible call: it returns either a HANDLE");
+    println("-- a positive vec or struct pointer -- or a NEGATIVE error code.");
+    println("There is no out-parameter and no exception. One test separates");
+    println("them, and it must be made before the handle is used:");
+    println("");
+    println("    var out = crvoice_vocalize(voice, voc, sample_rate, duration);");
+    println("    if (prani_is_err(out) == 1) { ... prani_err_name(out) ... }");
+    println("");
+    println("There are exactly five codes. prani_err_name turns any i64 into a");
+    println("static string, so a caller never has to keep its own table:");
+    println("");
+
+    # Printed from the constants rather than transcribed, so this table cannot
+    # drift from src/error.cyr.
+    var code = 0;
+    while (code >= PRANI_ERR_SVARA) {
+        ex_put("     ");
+        if (code == 0) { ex_put(" "); }   # keep the digit column aligned
+        fmt_int(code);
+        ex_put("  ");
+        println(prani_err_name(code));
+        code = code - 1;
+    }
+    println("");
+    println("Four of the five appear below. -4 is the odd one out: it is raised");
+    println("when a synthesis step fails part-way through a render -- a filter");
+    println("the tract could not build, say -- rather than by anything a caller");
+    println("passes in. It arrives through the same return value as the rest,");
+    println("which is the point: no separate handling is needed for it.");
+    println("");
+    println("Failures raised inside the synthesis chain are ALSO written to");
+    println("sakshi: the two ERROR lines and one WARN you will see on STDERR,");
+    println("each with a timestamp, interleaved with this transcript on stdout.");
+    println("Rejected arguments are not logged -- the return code already says");
+    println("so. The code is the contract; the log line is a courtesy, and");
+    println("sakshi_set_level silences it.");
+
+    # =========================================================================
+    ex_section("1. A species that cannot make that sound");
+    # =========================================================================
+    println("Not every (species, vocalization) pair exists. A snake has no");
+    println("larynx -- its row in the species table is noise-only -- so it can");
+    println("hiss but it cannot howl. Ask first with species_supports_");
+    println("vocalization, or read the code afterwards. Both are supported;");
+    println("asking first is cheaper if you are picking a call at runtime.");
+    println("");
+
+    var snake = crvoice_new(PRANI_SP_SNAKE);
+
+    ex_call("species_supports_vocalization(SNAKE, HOWL)");
+    ex_field("returned:           ", species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HOWL));
+    ex_call("crvoice_vocalize(snake, HOWL, 44100.0, 0.05)");
+    ex_rejected(crvoice_vocalize(snake, PRANI_VOC_HOWL, EX_SR_44100, EX_DUR_005),
+      PRANI_ERR_INVALID_VOCALIZATION);
+
+    ex_call("species_supports_vocalization(SNAKE, HISS)");
+    ex_field("returned:           ", species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HISS));
+    ex_call("crvoice_vocalize(snake, HISS, 44100.0, 0.05)");
+    ex_accepted_audio(crvoice_vocalize(snake, PRANI_VOC_HISS, EX_SR_44100, EX_DUR_005), 2205);
+
+    println("");
+    println("An out-of-table tag is refused the same way. The oracle's");
+    println("Vocalization was an enum, so voc = 99 was UNREPRESENTABLE; the port");
+    println("carries it as an i64, and before 2.0.5 it fell through every match");
+    println("to a flat contour and came back as a success.");
+    println("");
+    ex_call("crvoice_vocalize(snake, 99, 44100.0, 0.05)");
+    ex_rejected(crvoice_vocalize(snake, 99, EX_SR_44100, EX_DUR_005),
+      PRANI_ERR_INVALID_VOCALIZATION);
+
+    # =========================================================================
+    ex_section("2. A sample rate the synthesis backend refuses  (ADR-0001)");
+    # =========================================================================
+    println("prani builds its vocal tract inside svara. svara 3.x hardened that");
+    println("constructor: its fixed 600 Hz subglottal bandpass needs nyquist");
+    println("above 600, so at or below 1200 Hz it returns an error rather than");
+    println("a tract.");
+    println("");
+    println("The Rust oracle could not express this. CreatureTract::new returned");
+    println("`Self` -- an infallible constructor -- because the svara it was");
+    println("written against could not fail either. prani's returns \"pointer or");
+    println("negative code\" instead, and that code surfaces at every public");
+    println("entry point above it. The divergence is ADR-0001, and it is why the");
+    println("first call below reports instead of dereferencing -1.");
+    println("");
+    println("Note which code comes back: PRANI_ERR_SVARA, not a prani range");
+    println("error. prani deliberately does NOT restate svara's threshold as a");
+    println("constant of its own -- it forwards what svara said, so the number");
+    println("cannot go stale here. Treat 1200 as measured, not as API.");
+    println("");
+
+    var wolf = crvoice_new(PRANI_SP_WOLF);
+
+    ex_call("crvoice_vocalize(wolf, HOWL, 1200.0, 0.05)   <- svara's floor");
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_1200, EX_DUR_005),
+      PRANI_ERR_SVARA);
+    # One Hz higher is the whole difference: 0.05 s * 1201 truncates to 60.
+    ex_call("crvoice_vocalize(wolf, HOWL, 1201.0, 0.05)   <- one Hz higher");
+    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, f64_from(1201), EX_DUR_005), 60);
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, 0.05)");
+    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, EX_DUR_005), 2205);
+
+    println("");
+    println("The 1201 Hz call also puts a WARN on stderr -- \"species formants");
+    println("out of range, using defaults\". That is the one failure shape prani");
+    println("has that is NOT a return value: svara could not place a wolf's");
+    println("upper formants that close to nyquist, so prani logs it and carries");
+    println("on with svara's defaults. Degraded is not failed -- the 60 samples");
+    println("above are real audio, and no code is returned because nothing the");
+    println("caller has to decide about went wrong. Watch the log if you care");
+    println("about the gap between what you asked for and what is usable.");
+
+    # =========================================================================
+    ex_section("3. A document that does not parse  (ADR-0002)");
+    # =========================================================================
+    println("bayan's value accessors are null-safe by design: obj_get on a failed");
+    println("parse returns 0, and int() of 0 returns 0. Composed, a naive");
+    println("deserializer handed back a fully-formed struct with every field zero");
+    println("and called it a success. Those zeros are not inert -- a CreatureVoice");
+    println("with size_scale 0.0 makes crvoice_effective_f0 divide by zero.");
+    println("");
+    println("Rust's serde_json::from_str returned a Result and the oracle checked");
+    println("it; the port had dropped that half of the contract. ADR-0002 restores");
+    println("it as \"pointer or negative code\" across all four deserializers.");
+    println("");
+
+    ex_call("crvoice_from_json_str(\"not json at all\")");
+    ex_rejected(crvoice_from_json_str("not json at all"), PRANI_ERR_INVALID_SPECIES);
+    ex_call("crvoice_from_json_str(\"\")                   <- empty input");
+    ex_rejected(crvoice_from_json_str(""), PRANI_ERR_INVALID_SPECIES);
+    ex_call("crvoice_from_json_str(\"{\\\"species\\\":\")        <- truncated");
+    ex_rejected(crvoice_from_json_str("{\"species\":"), PRANI_ERR_INVALID_SPECIES);
+    # A null pointer is the fourth shape, and it is checked before strlen: the
+    # deserializers are the surface that takes untrusted bytes.
+    ex_call("crvoice_from_json_str(0)                    <- null pointer");
+    ex_rejected(crvoice_from_json_str(0), PRANI_ERR_INVALID_SPECIES);
+    # Each deserializer has its own code, chosen by what the document describes.
+    ex_call("crtract_from_json_str(\"not json at all\")");
+    ex_rejected(crtract_from_json_str("not json at all"), PRANI_ERR_INVALID_TRACT);
+    ex_call("sequence_call_phrase_from_json_str(\"nope\")");
+    ex_rejected(sequence_call_phrase_from_json_str("nope"), PRANI_ERR_INVALID_VOCALIZATION);
+
+    println("");
+    println("Control -- a document prani itself wrote still roundtrips, which is");
+    println("what makes the rejections above meaningful rather than blanket:");
+    println("");
+
+    var lion = crvoice_with_size(crvoice_new(PRANI_SP_LION), f64_from(3));
+    var sb = str_builder_new();
+    crvoice_to_json(lion, sb);
+    var json = str_data(str_builder_build(sb));
+    ex_call("crvoice_to_json(lion) -> crvoice_from_json_str(...)");
+    var lion2 = crvoice_from_json_str(json);
+    ex_accepted(lion2, "a CreatureVoice");
+    if (prani_is_err(lion2) == 0) {
+        ex_field("species (LION):     ", CreatureVoice_species(lion2));
+        if (CreatureVoice_species(lion2) != PRANI_SP_LION) { EX_UNEXPECTED = EX_UNEXPECTED + 1; }
+        if (CreatureVoice_size_scale(lion2) != CreatureVoice_size_scale(lion)) {
+            EX_UNEXPECTED = EX_UNEXPECTED + 1;
+        }
+    }
+
+    # =========================================================================
+    ex_section("4. A number that is not a number, or is out of range  (ADR-0006)");
+    # =========================================================================
+    println("f64_clamp(NaN, lo, hi) is NaN: every comparison against NaN is");
+    println("false, so NaN walks through every clamp in the tree untouched. And");
+    println("f64_to of any non-finite value is i64::MIN, so a sample count");
+    println("derived from one goes NEGATIVE and the render loop simply never");
+    println("runs. Measured before 2.0.5: one of those returned a full-length");
+    println("all-NaN buffer as a success, the other an empty one. Both are now");
+    println("refused at the entry point, before any audio is allocated.");
+    println("");
+    println("The code says WHICH parameter was wrong -- there is no generic");
+    println("\"bad argument\": a rejected duration is INVALID_VOCALIZATION, a");
+    println("rejected sample rate is INVALID_TRACT.");
+    println("");
+
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, f64_div(0, 0))          <- NaN s");
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, ex_nan()),
+      PRANI_ERR_INVALID_VOCALIZATION);
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, f64_div(f64_from(1), 0)) <- +inf s");
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, ex_pos_inf()),
+      PRANI_ERR_INVALID_VOCALIZATION);
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, -0.05)                  <- negative s");
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, f64_neg(EX_DUR_005)),
+      PRANI_ERR_INVALID_VOCALIZATION);
+    ex_call("crvoice_vocalize(wolf, HOWL, f64_div(0, 0), 0.05)             <- NaN Hz");
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, ex_nan(), EX_DUR_005),
+      PRANI_ERR_INVALID_TRACT);
+
+    println("");
+    println("A duration of exactly ZERO is not an error. The oracle's");
+    println("test_zero_duration_synthesis asserts an empty buffer, so prani");
+    println("returns one -- 0 samples, no error. \"Empty\" and \"failed\" are");
+    println("different answers and prani keeps them different.");
+    println("");
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, 0.0)");
+    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, 0), 0);
+
+    println("");
+    println("The same rule reaches deserialized fields, which is the half");
+    println("ADR-0002 explicitly deferred. A document can parse perfectly and");
+    println("still carry a number prani would never have written: 2.0.5 ranges");
+    println("every field against the clamp domain of the builder it feeds --");
+    println("here, crvoice_with_size's [0.1, 10.0]. Before the guard, a size of");
+    println("20.0 was accepted and silently clamped back to 10.0, so the caller");
+    println("got audio for a creature it had not asked for.");
+    println("");
+    println("The two documents differ in ONE field. prani writes f64s as their");
+    println("exact i64 bit pattern (lossless roundtrip), which is also why an");
+    println("out-of-range float survives JSON at all:");
+    println("");
+    ex_put("    ");
+    println(EX_PRESET_OK);
+    println("        size = 4608983858650965606 = 0x3ff6666666666666 =  1.4");
+    ex_put("    ");
+    println(EX_PRESET_BIG);
+    println("        size = 4626322717216342016 = 0x4034000000000000 = 20.0");
+    println("");
+
+    ex_call("preset_from_json_str(... \"size\": 1.4 ...)");
+    var preset = preset_from_json_str(EX_PRESET_OK);
+    ex_accepted(preset, "a VoicePreset");
+    if (prani_is_err(preset) == 0) {
+        ex_put("      name:                ");
+        println(VoicePreset_name(preset));
+    }
+    ex_call("preset_from_json_str(... \"size\": 20.0 ...)");
+    ex_rejected(preset_from_json_str(EX_PRESET_BIG), PRANI_ERR_INVALID_SPECIES);
+
+    # =========================================================================
+    ex_section("5. A stream that cannot produce audio  (ADR-0003)");
+    # =========================================================================
+    println("stream_fill_buffer returns a SAMPLE COUNT, not a code. Its callers");
+    println("add it to a play position, so a negative return would corrupt");
+    println("exactly the hosts least able to notice -- which leaves 0 as the");
+    println("entire error channel.");
+    println("");
+    println("The oracle skipped the copy on a synthesis failure but still");
+    println("advanced its counter and still returned \"I wrote N samples\". The");
+    println("host then played whatever the buffer held before, which on a reused");
+    println("audio buffer is the previous block: an audible repeat, attributed to");
+    println("prani, with no error anywhere.");
+    println("");
+    println("ADR-0003: a failed fill writes nothing, returns 0, AND retires the");
+    println("stream by marking it finished. The retirement is the load-bearing");
+    println("half. Both failure causes are fixed at stream_new time, so the");
+    println("failure repeats identically on every call, and the documented drain");
+    println("loop");
+    println("");
+    println("    while (stream_is_finished(s) == 0) { stream_fill_buffer(s, buf); }");
+    println("");
+    println("would otherwise never terminate. Retiring is what lets it exit.");
+    println("");
+    println("stream_new does not build the tract -- that is a lazily-filled slot,");
+    println("so section 2's rejection cannot happen until the first fill. A rate");
+    println("svara will refuse therefore CONSTRUCTS a stream successfully and");
+    println("fails later, which is exactly why fill needs an error channel of");
+    println("its own.");
+    println("");
+
+    var buf = vec_new();
+    prani_vec_push_zeros(buf, 64);   # push_zeros takes a COUNT of samples, not bytes
+
+    ex_call("stream_new(wolf, HOWL, IDLE, 1200.0, 0.05)   <- the refused rate");
+    var bad = stream_new(wolf, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, EX_SR_1200, EX_DUR_005);
+    ex_accepted(bad, "a SynthStream (the tract is not built yet)");
+    ex_field("total_samples:      ", stream_total_samples(bad));
+    ex_call("drain it with a 64-sample buffer:");
+    # One iteration: the first fill builds the tract, svara refuses, 0 comes back
+    # and the stream is retired, so the loop's condition is false on re-entry.
+    ex_drain(bad, buf, 1, 0);
+
+    println("");
+    println("The identical loop at a rate svara accepts, for contrast. Same");
+    println("code, same buffer, same exit condition -- only the tail block is");
+    println("short (2205 = 34 * 64 + 29):");
+    println("");
+    ex_call("stream_new(wolf, HOWL, IDLE, 44100.0, 0.05)");
+    var good = stream_new(wolf, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, EX_SR_44100, EX_DUR_005);
+    ex_accepted(good, "a SynthStream");
+    ex_field("total_samples:      ", stream_total_samples(good));
+    ex_call("drain it with the same 64-sample buffer:");
+    ex_drain(good, buf, 35, 2205);
+
+    # =========================================================================
+    println("");
+    println("============================================================");
+    println("Summary");
+    println("============================================================");
+    ex_put("handled rejections: ");
+    println_int(EX_REJECTIONS);
+    ex_put("accepted calls:     ");
+    println_int(EX_ACCEPTANCES);
+    ex_put("unexpected results: ");
+    println_int(EX_UNEXPECTED);
+    println("");
+    if (EX_UNEXPECTED != 0) {
+        println("FAILED -- a call did not behave as this example documents.");
+        println("Read the *** lines above: either prani changed or this example");
+        println("is stale, and both are worth knowing.");
+        return 1;
+    }
+    println("Every call was checked before its result was used, and every one");
+    println("behaved as documented -- so a program made entirely of handled");
+    println("errors exits 0.");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

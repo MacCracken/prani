@@ -1,0 +1,229 @@
+# basic.cyr -- prani from a standing start: one wolf howl.
+#
+# The first example to read. It builds a wolf voice, asks it to howl, checks
+# the return the way every prani caller must, and reports what came back.
+#
+#   cyrius build docs/examples/basic.cyr build/examples/basic
+#   ./build/examples/basic
+#
+# The includes below are exactly what a downstream consumer writes: the
+# dependency bundles prani is built on (svara supplies the glottal source and
+# formant filters, naad the DSP primitives), then prani's single published
+# bundle. Nothing here reaches into src/ -- if this file builds, dist/prani.cyr
+# is usable from outside the library.
+
+include "lib/sakshi.cyr"
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/hashmap.cyr"
+include "lib/bayan.cyr"
+include "lib/svara.cyr"
+include "dist/prani.cyr"
+
+# ================================================================
+# Literals. Cyrius has no float literal syntax: whole numbers come from
+# f64_from(n), and everything else is written as its IEEE-754 bit pattern with
+# the decimal value in the comment. Generate one with:
+#   python3 -c "import struct;print(hex(struct.unpack('<Q',struct.pack('<d',1.5))[0]))"
+# ================================================================
+
+# 44.1 kHz because that is what an audio device wants. prani does not pick a
+# rate for you -- it renders at whatever rate you pass and hands back samples.
+# The floor is svara's, not prani's: below ~1200 Hz svara cannot build a tract
+# (its subglottal bandpass sits at 600 Hz and needs nyquist above that), and
+# prani reports that rejection rather than papering over it.
+var SAMPLE_RATE = f64_from(44100);
+
+# 1.5 s -- a wolf howl is a long sustained call, and short buffers hide the
+# pitch contour that makes it sound like a howl rather than a tone.
+var DURATION = 0x3FF8000000000000;   # 1.5
+
+var F_ONE = 0x3FF0000000000000;   # 1.0  -- the nominal amplitude bound
+
+# ================================================================
+# Reporting helpers. Cyrius has no printf: output is built line by line, and
+# print() takes an explicit byte count rather than finding the terminator
+# itself. Pairing it with strlen() once here keeps the report below readable --
+# miscounting a literal by hand truncates the line or runs it into the next.
+# ================================================================
+
+fn ex_label(s) {
+    print(s, strlen(s));
+    return 0;
+}
+
+fn ex_line(label, value, decimals, suffix) {
+    ex_label(label);
+    fmt_float(value, decimals);
+    println(suffix);
+    return 0;
+}
+
+fn ex_line_int(label, n, suffix) {
+    ex_label(label);
+    fmt_int(n);
+    println(suffix);
+    return 0;
+}
+
+fn ex_line_hex(label, bits, suffix) {
+    ex_label(label);
+    fmt_hex0x(bits);
+    println(suffix);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    println("prani -- a wolf howl, start to finish");
+    println("=====================================");
+    println("");
+
+    # ---- 1. build a voice ---------------------------------------------------
+    # A CreatureVoice is a species plus individual variation. crvoice_new gives
+    # you the species defaults; the crvoice_with_* builders (size, f0 offset,
+    # breathiness, jitter, shimmer, vocal effort) individuate one animal from
+    # another. This example changes nothing, so what prints below is the wolf
+    # table verbatim.
+    println("1. Build the voice");
+    println("   var wolf = crvoice_new(PRANI_SP_WOLF);");
+    var wolf = crvoice_new(PRANI_SP_WOLF);
+
+    ex_line_int("   species tag     : ", crvoice_species(wolf), "  (PRANI_SP_WOLF)");
+    # effective_f0 is (f0_default + f0_offset) / size_scale clamped to the
+    # species range -- with the defaults it is just the species default.
+    ex_line("   effective f0    : ", crvoice_effective_f0(wolf), 1, " Hz  (species default; range 150-1200 Hz)");
+    ex_line("   tract scale     : ", crvoice_effective_tract_scale(wolf), 2, " x human-male reference tract");
+    ex_line("   vocal effort    : ", crvoice_vocal_effort(wolf), 2, "  (0 = whisper, 0.5 = normal, 1 = shout)");
+    println("");
+
+    # ---- 2. is the call even possible? --------------------------------------
+    # Not every (species, vocalization) pair is bioacoustically valid, and the
+    # gate is public: ask before you synthesize if you want to branch, or just
+    # synthesize and read the error code. The gate dispatches on the species'
+    # vocal apparatus -- a snake's is noise-only, so it cannot howl; a cricket's
+    # is stridulatory, so it cannot roar.
+    println("2. Can a wolf howl?");
+    ex_line_int("   species_supports_vocalization(WOLF, HOWL) -> ",
+      species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_HOWL), "  (1 = yes)");
+    println("");
+
+    # ---- 3. synthesize ------------------------------------------------------
+    # THE ONE CONVENTION TO LEARN. Every fallible function in prani returns
+    # either a handle (here: a vec of f64 samples, a large positive pointer) or
+    # a NEGATIVE PRANI_ERR_* code, in the same i64 slot. There is no out-param
+    # and no exception. prani_is_err(x) is how you tell the two apart, and
+    # prani_err_name(x) turns the code into a static string for a log line.
+    #
+    # Checking is not optional: the codes are how prani reports a sample rate
+    # svara cannot use, a duration that is negative or NaN, an out-of-range
+    # tag, or a species that physically cannot make the sound. Skip the check
+    # and you will pass a small negative integer to something expecting audio.
+    #
+    # crvoice_vocalize implies the Idle intent. crvoice_vocalize_with_intent
+    # takes a PRANI_INTENT_* as well -- Alarm, Territorial, Threat and the rest
+    # scale pitch, amplitude, duration and urgency around this baseline.
+    println("3. Synthesize");
+    println("   var howl = crvoice_vocalize(wolf, PRANI_VOC_HOWL, 44100, 1.5);");
+    var howl = crvoice_vocalize(wolf, PRANI_VOC_HOWL, SAMPLE_RATE, DURATION);
+
+    if (prani_is_err(howl) == 1) {
+        # The failure path, written out in full because this is the shape every
+        # caller needs. Nothing below this point may touch `howl`.
+        ex_label("   FAILED: ");
+        println(prani_err_name(howl));
+        return 1;
+    }
+    println("   prani_is_err(howl) = 0  -> this is a vec handle, not an error code");
+    println("");
+
+    # ---- 4. what came back --------------------------------------------------
+    # A vec of f64 samples, nominally in [-1, 1]. The loops below are written
+    # out rather than folded into a helper so it is plain what a returned
+    # buffer actually contains.
+    println("4. What came back");
+    var n = vec_len(howl);
+    ex_line_int("   samples         : ", n, "");
+    # Rendered length is duration * intent duration_scale * sample_rate, so it
+    # is worth deriving the real duration back from the count rather than
+    # assuming you got the 1.5 s you asked for. Idle scales duration by 1.0.
+    ex_line("   duration        : ", f64_div(f64_from(n), SAMPLE_RATE), 3, " s at 44100 Hz");
+
+    # Peak amplitude, and where in the buffer it lands. The level is well under
+    # 1.0 and that is not a bug: the Idle intent halves amplitude and the
+    # default vocal effort is 0.5. Gain and normalization are the caller's --
+    # prani renders the call's shape, not a mastered asset.
+    var peak = 0;
+    var peak_at = 0;
+    var i = 0;
+    while (i < n) {
+        var a = f64_abs(vec_get(howl, i));
+        if (f64_gt(a, peak) == 1) { peak = a; peak_at = i; }
+        i = i + 1;
+    }
+    ex_line("   peak amplitude  : ", peak, 6, "  (max |sample|; Idle intent scales amplitude by 0.5)");
+    ex_label("   loudest at      : ");
+    fmt_int(peak_at);
+    ex_label("  (");
+    fmt_float(f64_div(f64_from(peak_at), SAMPLE_RATE), 3);
+    println(" s in -- the howl's pitch contour swells past its midpoint)");
+
+    # The ends of the buffer show the vocalization envelope: a howl opens from
+    # silence and closes back to it, so a caller can butt two calls together
+    # without a click. Shown as bit patterns because they are exactly zero, and
+    # fmt_float renders IEEE negative zero as "-0.000000" -- which reads like a
+    # formatter bug rather than the silence it actually is. Samples are plain
+    # f64s; a Cyrius f64 is an i64-held bit pattern, so this is the same value
+    # viewed two ways.
+    ex_line_hex("   first sample    : ", vec_get(howl, 0), "  (IEEE -0.0 -- silence)");
+    ex_line_hex("   last sample     : ", vec_get(howl, n - 1), "  (silence again)");
+
+    # Finiteness is the property worth asserting on any DSP result: a single
+    # NaN propagates through every downstream mix and is silent, not loud.
+    # prani's 2.0.5 input guards exist so a bad parameter comes back as a
+    # negative code instead of a full buffer of NaN returned as success.
+    var nonfinite = 0;
+    var outside = 0;
+    var j = 0;
+    while (j < n) {
+        var v = vec_get(howl, j);
+        if (prani_is_finite(v) == 0) { nonfinite = nonfinite + 1; }
+        if (f64_gt(f64_abs(v), F_ONE) == 1) { outside = outside + 1; }
+        j = j + 1;
+    }
+    ex_line_int("   non-finite      : ", nonfinite, " of the samples");
+    ex_line_int("   outside [-1,1]  : ", outside, " of the samples");
+    println("");
+    println("   Next step for a caller: hand these f64 samples to an audio device");
+    println("   opened at the same rate you asked for (44100 Hz here). prani renders");
+    println("   buffers; it never opens a device or writes a file.");
+    println("");
+
+    # ---- 5. the error channel, deliberately ---------------------------------
+    # The same call shape against a species that cannot make the sound. This is
+    # the branch section 3 skipped, exercised on purpose so the transcript
+    # shows both halves of the convention.
+    println("5. The error channel, on purpose");
+    println("   A snake has no vocal folds, so PRANI_SP_SNAKE cannot howl.");
+    var snake = crvoice_new(PRANI_SP_SNAKE);
+    var bad = crvoice_vocalize(snake, PRANI_VOC_HOWL, SAMPLE_RATE, DURATION);
+    if (prani_is_err(bad) == 0) {
+        # If this ever happens the convention has been broken, and an example
+        # that quietly passed anyway would be worse than no example.
+        println("   UNEXPECTED: the snake howl succeeded");
+        return 1;
+    }
+    ex_line_int("   returned        : ", bad, "  (a negative code, not a handle)");
+    ex_label("   prani_err_name  : ");
+    println(prani_err_name(bad));
+    ex_line_int("   prani_is_err    : ", prani_is_err(bad), "");
+    println("");
+
+    println("done.");
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

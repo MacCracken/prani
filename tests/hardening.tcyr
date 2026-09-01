@@ -403,5 +403,39 @@ var hback = crvoice_from_json_str(hjson);
 assert_eq(prani_is_err(hback), 0, "control: prani's own to_json output still deserializes");
 assert_eq(CreatureVoice_species(hback), PRANI_SP_WOLF, "control: and round-trips its species");
 
+# ================================================================
+# F13 (2.0.6) -- an out-of-range SPECIES tag rendered audio as success.
+#
+# 2.0.5 guarded the voc and intent tags for exactly this reason (the oracle's
+# enums made an out-of-range value UNREPRESENTABLE; the port carries i64) and
+# MISSED species. species_params falls through to the FANTASY defaults for any
+# unknown tag -- deliberately, to preserve totality -- so crvoice_new(99)
+# returned a voice and crvoice_vocalize rendered 2205 samples for it, reporting
+# success. Found by 2.0.6's error_handling example, which is precisely the job
+# a worked example is supposed to do.
+#
+# crvoice_new returns a pointer with no error channel, so the guard is at the
+# POINT OF USE, as ADR-0006 describes for the builders.
+# ================================================================
+test_group("F13 an out-of-range species tag is refused on every synthesis path");
+var hbadsp = crvoice_new(99);
+assert_eq(prani_is_err(crvoice_vocalize(hbadsp, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 1,
+  "species 99 -> vocalize refuses (rendered 2205 samples before)");
+assert_eq(prani_is_err(
+    crvoice_vocalize_with_intent(hbadsp, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, H_SR, H_DUR_005)), 1,
+  "species 99 -> vocalize_with_intent refuses");
+assert_eq(prani_is_err(stream_new(hbadsp, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, H_DUR_005)), 1,
+  "species 99 -> stream_new refuses");
+assert_eq(prani_is_err(
+    crvoice_vocalize(crvoice_new(0 - 1), PRANI_VOC_HOWL, H_SR, H_DUR_005)), 1,
+  "a negative species tag is refused too");
+# CONTROLS: the boundary tag and an ordinary one must be untouched. Without
+# these, a guard that rejected EVERYTHING would pass the four assertions above.
+assert_eq(prani_is_err(
+    crvoice_vocalize(crvoice_new(PRANI_SP_FANTASY), PRANI_VOC_HOWL, H_SR, H_DUR_005)), 0,
+  "control: FANTASY (the last valid tag, 12) still synthesizes");
+assert_eq(vec_len(crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
+  "control: a wolf howl is unchanged");
+
 var rc = assert_summary();
 syscall(60, rc);
