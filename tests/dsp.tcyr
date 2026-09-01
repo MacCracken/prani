@@ -1,7 +1,7 @@
 # dsp.tcyr -- tests for src/dsp.cyr (DcBlocker + naad error mapping).
-# rust-old/src/dsp.rs had no #[test] blocks. Behavioural parity: the DC blocker
-# passes the first sample, then rings down by R each step, and drives a constant
-# DC input toward zero. serde round-trip dropped (no serde).
+# 2.0.3:rust-old/src/dsp.rs had no #[test] blocks. Behavioural parity: the DC
+# blocker passes the first sample, then rings down by R each step, and drives a
+# constant DC input toward zero. serde round-trip dropped (no serde).
 
 include "src/error.cyr"
 include "src/logging.cyr"

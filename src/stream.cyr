@@ -1,6 +1,6 @@
 # stream.cyr -- pull-based streaming synthesis.
-# Ports rust-old/src/stream.rs. A SynthStream wraps a CreatureVoice and yields
-# audio blocks on demand, avoiding the full-buffer allocation of
+# Ports 2.0.3:rust-old/src/stream.rs. A SynthStream wraps a CreatureVoice and
+# yields audio blocks on demand, avoiding the full-buffer allocation of
 # crvoice_vocalize. Suitable for real-time audio callbacks where the block size
 # is determined by the host (Wwise, FMOD, Godot, JACK).
 #
@@ -346,11 +346,12 @@ fn stream_fill_buffer(self, buffer) {
         if (prani_is_err(block) == 0) { have_block = 1; }
     }
 
-    # A synthesis failure must not be reported as a successful fill. The oracle
-    # (rust-old/src/stream.rs:184) wraps only the COPY in `if let Ok(block)`, then
-    # unconditionally runs `self.samples_rendered += to_render; to_render` -- so a
-    # failed block returns "I wrote N samples" while the caller's buffer still
-    # holds whatever it held before, and that stale audio is played. DIVERGENCE
+    # A synthesis failure must not be reported as a successful fill. The
+    # oracle (2.0.3:rust-old/src/stream.rs:184) wraps only the COPY in
+    # `if let Ok(block)`, then unconditionally runs
+    # `self.samples_rendered += to_render; to_render` -- so a failed block
+    # returns "I wrote N samples" while the caller's buffer still holds
+    # whatever it held before, and that stale audio is played. DIVERGENCE
     # (ADR-0003): report 0 written, and retire the stream so a caller draining
     # `while (stream_is_finished(s) == 0)` terminates instead of spinning on a
     # failure that will repeat every call.

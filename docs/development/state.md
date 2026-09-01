@@ -5,23 +5,23 @@
 
 ## Version
 
-**2.0.7** — the Rust comparison, run before the oracle can be retired.
-Benchmarks **4 → 18**, 14 mirroring criterion one-for-one. Both harnesses on one
-host, 2026-08-31: the port is **~16× slower** than the oracle (median 15.7×,
-range 9.9–17.4×). ⚠ That measures **two stacks as shipped** — f32 vs f64, svara
-1.0.0 vs 3.5.4, LLVM vs cycc — not one algorithm in two languages.
+**2.0.8** — **`rust-old/` retired.** The 2.0.x arc's destination: the frozen Rust
+oracle, 26 files and 4,646 lines, is gone from the working tree. Patch-level —
+no API, no behaviour, no bundle change. What changed is what the parity guarantee
+*rests on*: **from here it is asserted by the suites alone.**
 
-⭐ **Two figures this project had published since the port began were wrong**: the
-oracle does **719×** realtime, not ~1000×; the port does **45.6×**, not ~236×.
-The 236× was an artifact of benchmarking at 8 kHz — per-sample cost is nearly
-rate-independent, so an eighth of the rate looks eight times more real-time.
-`docs/benchmarks.md` now quotes ns/sample.
+The gate was preserve-first and every item was checked, including a move-aside
+proof (`mv rust-old ../`, then audit + examples + distlib green) run **before**
+deleting. The reference sweep found the gate's own figure stale — **297 citations
+across 53 files, not 83 across 42** — and, more usefully, that `git grep rust-old`
+was **the wrong search**: citations like `voice.rs:227-231` carry no `rust-old/`
+prefix and were invisible to it. **1900 assertions / 17 suites**, `cyrius audit`
+exit 0 with the directory absent.
 
-Also found: **`emotion_evaluate` regressed 2.2× (69 → 151 ns)** on a per-frame
-path, caused by 2.0.5's guards validating the same two fields four times per call
-— filed as 2.0.10. And **the f32 constraint the port was built on is gone**
-(ganita 1.1.4, already vendored); filed as P0 on naad and svara, 2.1.0 Lane A
-here. **1900 assertions / 17 suites**, `cyrius audit` exit 0.
+⚠ **Follow-up: `git push --tags`.** Tag refs could not be verified against origin
+from the dev environment. Bounded: the oracle-bearing tags are ancestors of
+`main` and `origin/main` matched local, so the *content* is already on origin —
+only the readable names may be missing.
 
 ## Toolchain
 
@@ -42,7 +42,9 @@ here. **1900 assertions / 17 suites**, `cyrius audit` exit 0.
 
 ## Source
 
-- Rust reference: 3,527 lines across 17 files at `rust-old/` (frozen). `lib.rs`
+- Rust reference: 3,527 lines across 17 files, frozen at tag `2.0.3` and read
+  with `git show 2.0.3:rust-old/src/<file>.rs`
+  ([ADR-0004](../adr/0004-cite-the-oracle-by-tag.md)). `lib.rs`
   (organization/prelude) and `math.rs` (f32 transcendental wrappers, folded into
   `f64_*` builtins) carry no independent Cyrius module.
 - Cyrius port: `src/main.cyr` (smoke) + 15 per-module `src/*.cyr`, each validated
@@ -88,11 +90,12 @@ per-module in [`port-audit.md`](port-audit.md).
 
 Delivered solo (foundation + keystone vocalization/sequence) + dependency-ordered
 parallel workflow waves (leaves → tract+bridge → voice → preset+stream → ffi),
-each integrated and independently re-verified in the main tree against `rust-old/`.
+each integrated and independently re-verified in the main tree against the
+oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.7: fmt · lint · docs · tests · bench,
+`cyrius audit` is green end to end as of 2.0.8: fmt · lint · docs · tests · bench,
 **exit 0**. 17 suites / **1900 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4; before
@@ -120,7 +123,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, current on toolchain and dependencies, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), and measured against the oracle (2.0.7).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), and no longer carrying it (2.0.8).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x is one arc with one destination: retiring `rust-old/`**
@@ -132,10 +135,11 @@ the oracle still holds may be lost:
 | ~~**2.0.4**~~ | ✅ **Done** — parity re-verification + all 41 shortfalls closed; recovery rule in [ADR-0004](../adr/0004-cite-the-oracle-by-tag.md). Ledger: [`rust-test-parity.md`](rust-test-parity.md). |
 | ~~**2.0.5**~~ | ✅ **Done** — input-range validation (109 guards, [`input-ranges.md`](../architecture/input-ranges.md)), plus the svara 3.5.4 bump that fixed the (1000, 7500] abort. |
 | ~~**2.0.6**~~ | ✅ **Done** — five examples, run by CI; `streaming.cyr` drives the full FFI lifecycle, satisfying the consumer-green condition. |
-| ~~**2.0.7**~~ | ✅ **Done** — the Rust comparison, captured while the oracle still builds. **The arc's only hard ordering constraint, now satisfied.** |
+| ~~**2.0.7**~~ | ✅ **Done** — the Rust comparison, captured while the oracle still builds. **The arc's only hard ordering constraint.** |
+| ~~**2.0.8**~~ | ✅ **Done** — `rust-old/` retired. **The arc is complete.** |
 | **2.0.9** | `stream_fill_buffer` allocates 8,800 B/call on the real-time path (found by 2.0.6's example). Does **not** gate the retirement. |
 | **2.0.10** | `emotion_evaluate` regressed 2.2× — 2.0.5's guards validate the same fields 4× per call (found by 2.0.7). Does **not** gate the retirement. |
-| **2.0.8** | Retire `rust-old/`. Gated on the above plus an **83-citation** reference sweep across 42 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
+| **2.0.8** | Retire `rust-old/`. Gated on the above plus a **297-citation** reference sweep across 53 maintained files, tags pushed to `origin`, and a green tree with the directory moved aside. |
 
 **Decided 2026-08-31: consumer-green is not a hard gate on 2.0.8**, on the
 condition that 2.0.6's `streaming.cyr` drives the full FFI lifecycle. The arc now

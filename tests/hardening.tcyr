@@ -100,10 +100,11 @@ assert_eq(stream_is_finished(hs), 1, "stream retires so a drain loop terminates"
 # F2 (defense in depth) -- block_size floor.
 #
 # `(sample_rate * 0.02) as usize` is 0 below 50 Hz, and the oracle's loop
-# (voice.rs:227-231) advances by exactly that, so it never terminates. It is NOT
-# independently reachable now -- F1's guard rejects everything below ~1000 Hz
-# before the loop is built -- so this asserts the arithmetic and keeps the floor
-# as a second line, not as a fix for a live defect.
+# (2.0.3:rust-old/src/voice.rs:227-231) advances by exactly that, so it never
+# terminates. It is NOT independently reachable now -- F1's guard rejects
+# everything below ~1000 Hz before the loop is built -- so this asserts the
+# arithmetic and keeps the floor as a second line, not as a fix for a live
+# defect.
 # ================================================================
 test_group("F2 block_size arithmetic underflows below 50 Hz (floor is defense in depth)");
 assert_eq(f64_to(f64_mul(f64_from(10), H_0_02)), 0, "sr=10 -> block_size 0 unfloored");

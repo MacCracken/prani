@@ -1,9 +1,10 @@
 # preset.cyr -- named voice presets: specific individuals within a species.
-# Ports rust-old/src/preset.rs. A VoicePreset is a ready-made CreatureVoice
-# configuration for a recognizable individual character (e.g. a large alpha
-# wolf vs. a small pup). preset_build() turns a preset into a CreatureVoice via
-# the crvoice_* builder chain (new -> with_size -> with_f0_offset ->
-# with_breathiness), matching the oracle's builder order exactly.
+# Ports 2.0.3:rust-old/src/preset.rs. A VoicePreset is a ready-made
+# CreatureVoice configuration for a recognizable individual character (e.g. a
+# large alpha wolf vs. a small pup). preset_build() turns a preset into a
+# CreatureVoice via the crvoice_* builder chain (new -> with_size ->
+# with_f0_offset -> with_breathiness), matching the oracle's builder order
+# exactly.
 #
 # Requires (from the build/test unit, in dependency order): stdlib alloc/vec,
 # error.cyr, rng.cyr, dsp.cyr, vocalization.cyr, sequence.cyr, species.cyr,

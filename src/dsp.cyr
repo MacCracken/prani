@@ -1,5 +1,5 @@
 # dsp.cyr -- shared DSP primitives for creature vocal synthesis.
-# Ports rust-old/src/dsp.rs: a single-pole DC blocker (applied to all
+# Ports 2.0.3:rust-old/src/dsp.rs: a single-pole DC blocker (applied to all
 # synthesis output) + naad error mapping. Was `pub(crate)`.
 #
 # Requires (from the build/test unit): error.cyr (PRANI_ERR_*, prani_is_finite)

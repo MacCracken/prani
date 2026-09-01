@@ -1,4 +1,4 @@
-# ffi.tcyr -- tests for src/ffi.cyr (ports rust-old/src/ffi.rs).
+# ffi.tcyr -- tests for src/ffi.cyr (ports 2.0.3:rust-old/src/ffi.rs).
 #
 # Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
 # prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
@@ -262,8 +262,8 @@ assert_eq(prani_ffi_stream_start(vst, 0, 6, T_SR, T_DUR_NEG), 0, "negative durat
 
 # ================================================================
 test_group("stream_start -- ZERO duration stays valid (oracle parity)");
-# rust-old's test_zero_duration_synthesis asserts an EMPTY BUFFER, NOT AN ERROR,
-# so a zero-length request is a legal thing to ask for. The guard is
+# The oracle's test_zero_duration_synthesis asserts an EMPTY BUFFER, NOT AN
+# ERROR, so a zero-length request is a legal thing to ask for. The guard is
 # prani_is_non_negative, not prani_is_positive, exactly to keep this.
 var st_zero = prani_ffi_stream_start(vst, 0, 6, T_SR, T_0_0);
 assert_neq(st_zero, 0, "zero duration is VALID -- still returns a handle");

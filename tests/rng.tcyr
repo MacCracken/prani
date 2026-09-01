@@ -1,8 +1,8 @@
 # rng.tcyr -- tests for src/rng.cyr (PCG32).
-# rust-old/src/rng.rs had no #[test] blocks. prani's PCG32 is bit-identical to
-# svara's (same multiplier + seeding sequence), so the golden next_u32 values
-# are the same real parity oracle svara uses. next_f32 is exact in f64
-# (integer * 2^-31), so its golden bit pattern is asserted exactly too;
+# 2.0.3:rust-old/src/rng.rs had no #[test] blocks. prani's PCG32 is
+# bit-identical to svara's (same multiplier + seeding sequence), so the golden
+# next_u32 values are the same real parity oracle svara uses. next_f32 is exact
+# in f64 (integer * 2^-31), so its golden bit pattern is asserted exactly too;
 # determinism + range round out coverage.
 
 include "src/error.cyr"

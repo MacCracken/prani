@@ -1,7 +1,7 @@
 # vocalization.cyr -- vocalization patterns + call-intent prosody mapping.
-# Ports rust-old/src/vocalization.rs. Two enums (Vocalization, CallIntent) ->
-# integer constants, plus IntentModifiers (a 4-field prosody struct) and
-# CallIntent::modifiers() -> a fixed lookup returning that struct.
+# Ports 2.0.3:rust-old/src/vocalization.rs. Two enums (Vocalization,
+# CallIntent) -> integer constants, plus IntentModifiers (a 4-field prosody
+# struct) and CallIntent::modifiers() -> a fixed lookup returning that struct.
 #
 # Keystone base module: emotion, species, voice, sequence, stream, ffi all lean
 # on these constants. No internal deps. serde RESTORED on IntentModifiers via

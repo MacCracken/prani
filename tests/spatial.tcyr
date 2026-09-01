@@ -1,7 +1,7 @@
 # spatial.tcyr -- tests for src/spatial.cyr (distance attenuation + Doppler).
-# rust-old/src/spatial.rs had no #[test] blocks; behaviour lives in the Rust
-# integration tests. These lock f64 parity to the oracle algorithm via golden
-# values computed by hand (see the algorithm comments in spatial.cyr).
+# 2.0.3:rust-old/src/spatial.rs had no #[test] blocks; behaviour lives in the
+# Rust integration tests. These lock f64 parity to the oracle algorithm via
+# golden values computed by hand (see the algorithm comments in spatial.cyr).
 #
 # Include order: error (base) then spatial. stdlib (vec/math/alloc) auto-resolves.
 
@@ -16,8 +16,8 @@ var SP_TOL = 0x3E112E0BE826D695;   # 1e-9
 
 # Expected sum-of-squares energies for the 400-sample synthetic buffer built in
 # the "energy integral" group below. Computed independently in f64 straight from
-# the algorithm spec (spatial.cyr:34-39 / rust-old/src/spatial.rs:16-42, read via
-# `git show 2.0.3:rust-old/src/spatial.rs`) -- NOT read back out of this port.
+# the algorithm spec (spatial.cyr:34-39 / 2.0.3:rust-old/src/spatial.rs:16-42,
+# read with `git show`) -- NOT read back out of this port.
 var SP_E_NEAR = 0x40A718FD9A07A7AA;   # 2956.4953157798927  energy @ 1 m
 var SP_E_FAR  = 0x3FE48CFBC21121FB;   # 0.642209891354525   energy @ 50 m
 var SP_E_TOL  = 0x3EB0C6F7A0B5ED8D;   # 1e-6, generous against a 400-term sum

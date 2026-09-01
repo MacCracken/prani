@@ -63,11 +63,11 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
-- **`emotion_valence_zone` / `valence (read from the state)`** — Yes. valence_zone is private in rust-old and infallible; Rust's f32::clamp propagates NaN identically, so the oracle also stores and classifies a NaN. No oracle test covers it (all six emotion tests in `git show 2.0.3:rust-old/tests/integration.rs` lines 723-773 use in-range values).
-- **`emotion_arousal_zone` / `arousal (read from the state)`** — Yes, same class as valence_zone: private and infallible in rust-old, NaN propagates through f32::clamp there too.
-- **`emotion_select_vocalization` / `valence + arousal (via the two zone calls)`** — Yes: private and infallible in rust-old (`fn select_vocalization(&self) -> Vocalization`).
-- **`emotion_select_intent` / `valence + arousal (via the two zone calls)`** — Yes: private and infallible in rust-old (`fn select_intent(&self) -> CallIntent`).
-- **`emotion_evaluate` / `smoothing (checked directly), plus valence + arousal (propagated from the selectors)`** — Yes, and this is the signature-shaped one: rust-old's `EmotionState::evaluate()` returns EmotionOutput, not Result. It is the same call ADR-0001 made for crtract_new - "pointer or negative code" - and it is what lets the module report at all. serde's derived Deserialize in the oracle likewise accepts any float for any field, so every state rejected here is one the oracle accepted.
+- **`emotion_valence_zone` / `valence (read from the state)`** — Yes. valence_zone is private in the oracle and infallible; Rust's f32::clamp propagates NaN identically, so the oracle also stores and classifies a NaN. No oracle test covers it (all six emotion tests in `git show 2.0.3:rust-old/tests/integration.rs` lines 723-773 use in-range values).
+- **`emotion_arousal_zone` / `arousal (read from the state)`** — Yes, same class as valence_zone: private and infallible in the oracle, NaN propagates through f32::clamp there too.
+- **`emotion_select_vocalization` / `valence + arousal (via the two zone calls)`** — Yes: private and infallible in the oracle (`fn select_vocalization(&self) -> Vocalization`).
+- **`emotion_select_intent` / `valence + arousal (via the two zone calls)`** — Yes: private and infallible in the oracle (`fn select_intent(&self) -> CallIntent`).
+- **`emotion_evaluate` / `smoothing (checked directly), plus valence + arousal (propagated from the selectors)`** — Yes, and this is the signature-shaped one: the oracle's `EmotionState::evaluate()` returns EmotionOutput, not Result. It is the same call ADR-0001 made for crtract_new - "pointer or negative code" - and it is what lets the module report at all. serde's derived Deserialize in the oracle likewise accepts any float for any field, so every state rejected here is one the oracle accepted.
 
 </details>
 
@@ -81,7 +81,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
-- **`fatigue_record_call` / `duration`** — YES. rust-old/src/fatigue.rs @2.0.3 record_call(duration: f32, ...) accepted every one of NaN, ±inf, negative and 1e300 and poisoned itself identically — f32 could represent all of them. Rejecting them is deliberate. Dropping the event rather than substituting a value is not ADR-0001 fabrication: no value is invented, and the log line reports the failure through the channel prani already has (precedent: tract.cyr:117, tract.cyr:136).
+- **`fatigue_record_call` / `duration`** — YES. `2.0.3:rust-old/src/fatigue.rs`'s record_call(duration: f32, ...) accepted every one of NaN, ±inf, negative and 1e300 and poisoned itself identically — f32 could represent all of them. Rejecting them is deliberate. Dropping the event rather than substituting a value is not ADR-0001 fabrication: no value is invented, and the log line reports the failure through the channel prani already has (precedent: tract.cyr:117, tract.cyr:136).
 - **`fatigue_rest` / `duration`** — YES. The f32 oracle's rest(duration: f32) accepted NaN, ±inf and negatives with the same consequences. Rejecting them is deliberate.
 - **`fatigue_modifiers_make` / `pitch_offset, breathiness_delta, amplitude_scale, jitter_scale (all four)`** — No behavioural divergence — the returned struct is bit-identical to the oracle's in every case. Only a log line is added.
 

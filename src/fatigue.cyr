@@ -1,7 +1,7 @@
 # fatigue.cyr -- vocal fatigue + call-habituation system.
-# Ports rust-old/src/fatigue.rs: the `FatigueState` accumulator and its derived
-# `FatigueModifiers` (pitch drift, breathiness, amplitude, jitter). Tracks a
-# creature's calling history and degrades synthesis realistically:
+# Ports 2.0.3:rust-old/src/fatigue.rs: the `FatigueState` accumulator and its
+# derived `FatigueModifiers` (pitch drift, breathiness, amplitude, jitter).
+# Tracks a creature's calling history and degrades synthesis realistically:
 #   - Fatigue accumulates with calling time, recovers during silence.
 #   - Alarm habituation rises with unreinforced alarms ("cried wolf"), decays
 #     slowly during rest, and is reset on reinforcement.

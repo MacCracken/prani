@@ -5,7 +5,7 @@
 
 ## Context
 
-`rust-old/src/tract.rs` opens `CreatureTract::new` with:
+`2.0.3:rust-old/src/tract.rs` opens `CreatureTract::new` with:
 
 ```rust
 pub fn new(params: &SpeciesParams, sample_rate: f32) -> Self {
@@ -50,11 +50,12 @@ hold — and are recorded here rather than as separate ADRs, because neither is 
 choice once the above is made:
 
 - **`block_size` is floored at 1.** `(sample_rate * 0.02) as usize` is 0 below
-  50 Hz, and the oracle's loop (`voice.rs:227-231`) advances `rendered` by
-  exactly that, so it never terminates. This is **defense in depth, not a fix for
-  a live defect**: the guard above rejects everything below ~1000 Hz before the
-  loop is reached, so no input can now drive `block_size` to 0. It is kept
-  because the loop should not depend on a distant guard for termination.
+  50 Hz, and the oracle's loop (`2.0.3:rust-old/src/voice.rs:227-231`) advances
+  `rendered` by exactly that, so it never terminates. This is **defense in
+  depth, not a fix for a live defect**: the guard above rejects everything below
+  ~1000 Hz before the loop is reached, so no input can now drive `block_size` to
+  0. It is kept because the loop should not depend on a distant guard for
+  termination.
 - **`stream_fill_buffer` does not cache an error code as its tract.** The field
   is the `Option::get_or_insert_with` slot; storing `-5` in it would make the
   next call see a non-zero tract and use the code as a pointer.

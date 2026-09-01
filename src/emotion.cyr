@@ -1,7 +1,7 @@
 # emotion.cyr -- creature emotion state machine (valence/arousal model).
-# Ports rust-old/src/emotion.rs: EmotionState (valence x arousal x smoothing)
-# + EmotionOutput (the synthesis params derived from a state). Maps the 2D
-# emotion space to a Vocalization + CallIntent + continuous modulation
+# Ports 2.0.3:rust-old/src/emotion.rs: EmotionState (valence x arousal x
+# smoothing) + EmotionOutput (the synthesis params derived from a state). Maps
+# the 2D emotion space to a Vocalization + CallIntent + continuous modulation
 # (vocal effort, pitch scale, breathiness delta).
 #
 # Requires (from the build/test unit, in order): error.cyr, vocalization.cyr
@@ -166,8 +166,8 @@ fn emotion_set(self, valence, arousal) {
 # oracle's PraniError::InvalidVocalization is "a vocalization parameter is
 # invalid".
 #
-# DIVERGENCE from rust-old: EmotionState::evaluate() returns EmotionOutput, not
-# Result, and the oracle stores a NaN just as happily (Rust's f32::clamp
+# DIVERGENCE from the oracle: EmotionState::evaluate() returns EmotionOutput,
+# not Result, and the oracle stores a NaN just as happily (Rust's f32::clamp
 # propagates NaN) while serde's derived Deserialize accepts any float for any
 # field. Rejecting is deliberate, and the same call the port already made in
 # ADR-0001 for crtract_new: report the failure, never fabricate an answer.

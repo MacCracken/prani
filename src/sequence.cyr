@@ -1,5 +1,5 @@
 # sequence.cyr -- call sequencing: bouts, phrases, and chorus synthesis.
-# Ports rust-old/src/sequence.rs. Higher-level patterns above individual
+# Ports 2.0.3:rust-old/src/sequence.rs. Higher-level patterns above individual
 # vocalizations: repeated call bouts, ordered phrases, and multi-voice chorus.
 #
 # Defines the CallElement / CallBout / CallPhrase data structs. species.cyr's

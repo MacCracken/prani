@@ -1,5 +1,5 @@
 # voice.cyr -- creature voice: species + individual variation + synthesis.
-# Ports rust-old/src/voice.rs (the largest prani module, 705 lines). A
+# Ports 2.0.3:rust-old/src/voice.rs (the largest prani module, 705 lines). A
 # CreatureVoice is an instance of a Species with individual characteristics
 # (f0 offset, size, breathiness/jitter/shimmer, vocal effort) and the big
 # vocalize_with_intent orchestration that drives the CreatureTract through a
@@ -685,16 +685,16 @@ fn crvoice_nasal_phase_fraction(voc, species) {
 # 2.0.5 -- two separate repairs here:
 #
 #  1. CRASH (parity repair, not a divergence). The oracle iterates
-#     `samples.iter_mut().enumerate().take(nasal_len)` (2.0.3:
-#     rust-old/src/voice.rs:613), and `.take(n)` STOPS AT THE BUFFER END for any
-#     n. The port transcribed it as `while (i < nasal_len)` with no such stop, so
-#     a nasal_fraction above 1.0 indexed past the end and terminated the process
-#     ("vec: index out of bounds", measured at fraction 2.0 on a 100-sample
-#     buffer). The iteration bound is now clamped to len -- in f64, BEFORE the
-#     f64_to, so an overflowing product lands on len the way the oracle's
-#     saturating `as usize` does. The FADE DENOMINATOR stays the unclamped
-#     nasal_len, which is what the oracle divides by; clamping it too would
-#     change the fade curve for fractions above 1.0.
+#     `samples.iter_mut().enumerate().take(nasal_len)`
+#     (2.0.3:rust-old/src/voice.rs:613), and `.take(n)` STOPS AT THE BUFFER END
+#     for any n. The port transcribed it as `while (i < nasal_len)` with no
+#     such stop, so a nasal_fraction above 1.0 indexed past the end and
+#     terminated the process ("vec: index out of bounds", measured at fraction
+#     2.0 on a 100-sample buffer). The iteration bound is now clamped to len --
+#     in f64, BEFORE the f64_to, so an overflowing product lands on len the way
+#     the oracle's saturating `as usize` does. The FADE DENOMINATOR stays the
+#     unclamped nasal_len, which is what the oracle divides by; clamping it too
+#     would change the fade curve for fractions above 1.0.
 #  2. sample_rate is a divisor of both notch coefficients: at 0 it makes
 #     theta = inf, cos_theta = sin(inf) = NaN, and every filtered sample NaN.
 #     Reported instead. The internal call site (the post-processing chain in
@@ -1023,7 +1023,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # vocalization-specific pitch contour
     var contour = crvoice_pitch_contour(voc, f0);
     # block_size = (sample_rate * 0.02) as usize -- 20ms blocks.
-    # DIVERGENCE (ADR-0001): floored at 1. The oracle (voice.rs:227-231) computes
+    # DIVERGENCE (ADR-0001): floored at 1. The oracle
+    # (2.0.3:rust-old/src/voice.rs:227-231) computes
     # `(sample_rate * 0.02) as usize`, which is 0 for any sample_rate < 50, and
     # then loops `rendered += block_size.min(num_samples - rendered)` -- an
     # increment of 0, so the loop never terminates. Reproduced: sample_rate=10,

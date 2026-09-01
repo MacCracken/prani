@@ -1,4 +1,4 @@
-# tract.tcyr -- tests for src/tract.cyr (ports rust-old/src/tract.rs).
+# tract.tcyr -- tests for src/tract.cyr (ports 2.0.3:rust-old/src/tract.rs).
 #
 # Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
 # prani src modules in dependency order (error -> rng -> dsp -> vocalization ->

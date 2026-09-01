@@ -12,8 +12,9 @@ Thank you for your interest in contributing to prani.
 
 ## Development Requirements
 
-**prani is a Cyrius project.** The Rust at `rust-old/` is a frozen parity oracle,
-not the build — nothing in CI or the release runs `cargo`.
+**prani is a Cyrius project.** The Rust it was ported from is a frozen parity
+oracle kept in git history, not the build — nothing in CI or the release runs
+`cargo`.
 
 - The Cyrius toolchain, at the version pinned in `cyrius.cyml` `[package].cyrius`.
   That pin is the single source of truth; never hardcode a version anywhere else.
@@ -24,8 +25,9 @@ not the build — nothing in CI or the release runs `cargo`.
     CYRIUS_VERSION="$CYRIUS_VERSION" sh
   ```
 
-- A Rust toolchain is needed **only** to build the oracle for the roadmap 2.0.7
-  benchmark comparison. It is not needed to build, test, or release prani.
+- A Rust toolchain is needed **only** to build the oracle — checked out from
+  `2.0.3` — for the roadmap 2.0.7 benchmark comparison. It is not needed to
+  build, test, or release prani.
 
 ```sh
 cyrius deps                              # resolve dependencies
@@ -113,9 +115,10 @@ against the oracle. Reference numbers and the method live in
 
 ## Reading the Rust oracle
 
-prani is a port. The original Rust is preserved as the parity oracle, and roadmap
-**2.0.8** removes it from the working tree — after that, you read it out of git
-history rather than off disk. The rule is [ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md):
+prani is a port. The original Rust is preserved as the parity oracle in git
+history — roadmap **2.0.8** retired `rust-old/` from the working tree, so you
+read the oracle with `git show` rather than off disk. The rule is
+[ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md):
 **a citation to the oracle names a tag.**
 
 ```sh
@@ -130,8 +133,9 @@ aside. Use `2.0.3` — the last release before the removal arc, and the state ev
 parity claim in this tree was checked against.
 
 When you write a parity comment, cite `2.0.3:rust-old/src/tract.rs:104`, not
-`rust-old/src/tract.rs:104`. A bare path with a line number stops resolving the
-day the directory goes, and a reviewer cannot tell whether it was ever right.
+`rust-old/src/tract.rs:104`. The directory is gone from the tree: a bare path
+with a line number resolves against nothing, and a reviewer cannot tell whether
+it was ever right.
 
 If `git show` cannot find the tag, your clone is shallow — `git fetch --tags --unshallow`.
 

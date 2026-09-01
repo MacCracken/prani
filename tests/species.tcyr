@@ -1,5 +1,5 @@
 # species.tcyr -- tests for src/species.cyr.
-# rust-old/src/species.rs had no #[test] blocks; parity surface is the enum
+# 2.0.3:rust-old/src/species.rs had no #[test] blocks; parity surface is the enum
 # discriminants, the per-species params() lookup, the precomputed resonance_seed
 # (f32-bit-pattern parity), the supports_vocalization() bioacoustic matrix, and
 # bout_template(). serde/Display tests dropped.

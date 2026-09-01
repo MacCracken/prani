@@ -2,7 +2,9 @@
 
 > **v2.0.0 is the Cyrius port.** The pipeline below is unchanged from the Rust
 > line; names are Cyrius (`crvoice_*`, `PRANI_SP_*`, structs via
-> `#derive(accessors)`). The frozen Rust oracle lives at `rust-old/`.
+> `#derive(accessors)`). The frozen Rust oracle is read from the `2.0.3` tag
+> (`git show 2.0.3:rust-old/src/voice.rs`), per
+> [ADR-0004](../adr/0004-cite-the-oracle-by-tag.md).
 
 ## Module Map
 

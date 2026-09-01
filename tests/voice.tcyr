@@ -1,4 +1,4 @@
-# voice.tcyr -- tests for src/voice.cyr (ports rust-old/src/voice.rs).
+# voice.tcyr -- tests for src/voice.cyr (ports 2.0.3:rust-old/src/voice.rs).
 #
 # Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
 # prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
@@ -58,9 +58,9 @@ var T_60_0      = 0x404e000000000000;   # 60.0  quiet ambient (below Lombard bas
 var T_30_0      = 0x403e000000000000;   # 30.0  ambient at/below Lombard baseline 40 -> no boost
 var T_LOMBARD_60 = 0x3fb999999999999a;  # (60-40)*0.005 = 0.1 lombard boost @ 60 dB
 var T_EFF_06    = 0x3fe3333333333333;   # 0.5 + 0.1 = 0.6 effort after lombard @ 60 dB (start 0.5)
-var T_1E_3      = 0x3f50624dd2f1a9fc;   # 0.001   oracle audibility floor (integration.rs:12)
-var T_1E_4      = 0x3f1a36e2eb1c432d;   # 0.0001  oracle cat-purr audibility floor (integration.rs:367)
-var T_0_01      = 0x3f847ae147ae147b;   # 0.01    oracle subharmonic audibility floor (integration.rs:390)
+var T_1E_3      = 0x3f50624dd2f1a9fc;   # 0.001   oracle audibility floor (2.0.3:rust-old/tests/integration.rs:12)
+var T_1E_4      = 0x3f1a36e2eb1c432d;   # 0.0001  oracle cat-purr audibility floor (2.0.3:rust-old/tests/integration.rs:367)
+var T_0_01      = 0x3f847ae147ae147b;   # 0.01    oracle subharmonic audibility floor (2.0.3:rust-old/tests/integration.rs:390)
 var T_1_5       = 0x3ff8000000000000;   # 1.5   screech / chirp spectral offset
 var T_NEG_1     = 0xbff0000000000000;   # -1.0  roar spectral offset
 var T_0_45      = 0x3fdccccccccccccd;   # 0.45  dog effective_tract_scale @ size 0.5 (0.9 * 0.5)
@@ -88,9 +88,9 @@ fn t_all_finite(v) {
 }
 
 # max_abs(v) -- peak |sample| over the vec (0.0 for an empty vec). This is the
-# oracle's `samples.iter().map(|s| s.abs()).fold(0.0, f32::max)` (2.0.3:
-# rust-old/tests/integration.rs:11). Without it an ALL-ZERO buffer satisfies
-# every other synthesis assertion in the suite.
+# oracle's `samples.iter().map(|s| s.abs()).fold(0.0, f32::max)`
+# (2.0.3:rust-old/tests/integration.rs:11). Without it an ALL-ZERO buffer
+# satisfies every other synthesis assertion in the suite.
 #must_use
 fn t_max_abs(v) {
     var n = vec_len(v);
@@ -121,7 +121,7 @@ fn t_energy_range(v, lo, hi) {
 }
 
 # energy(v) -- sum of s*s over the vec (0.0 for an empty vec). The oracle's
-# `samples.iter().map(|s| s * s).sum()` (2.0.3: rust-old/tests/integration.rs:82).
+# `samples.iter().map(|s| s * s).sum()` (2.0.3:rust-old/tests/integration.rs:82).
 #must_use
 fn t_energy(v) {
     return t_energy_range(v, 0, vec_len(v));
@@ -230,7 +230,7 @@ var bird = crvoice_new(PRANI_SP_SONGBIRD);
 assert_eq(crvoice_effective_f0(bird), T_3000, "songbird effective_f0 == 3000");
 
 # ================================================================
-# Ports test_individual_variation (2.0.3: rust-old/tests/integration.rs:65-72),
+# Ports test_individual_variation (2.0.3:rust-old/tests/integration.rs:65-72),
 # which uses Dog at sizes 0.5 / 2.0 -- neither of which clamps, so the raw
 # monotonicity shows through. Dog row: f0 100..2000 default 300, tract_scale 0.9.
 test_group("individual variation -- Dog size ordering (unclamped)");
@@ -244,7 +244,7 @@ assert_eq(crvoice_effective_tract_scale(dog_l), T_1_8, "dog tract_scale @ size 2
 assert_eq(f64_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_scale(dog_l)), 1, "smaller dog -> shorter tract");
 
 # ================================================================
-# Ports test_dragon_individual_variation (2.0.3: rust-old/tests/integration.rs:342-354).
+# Ports test_dragon_individual_variation (2.0.3:rust-old/tests/integration.rs:342-354).
 # Both voices carry the SAME (default 0) f0_offset, so the comparison isolates
 # size. Dragon row: f0 30..500 default 70 -- 70/3 = 23.33 clamps UP to f0_min 30.
 test_group("individual variation -- Dragon size ordering (f0_min clamp)");
@@ -296,7 +296,7 @@ var v_sh0 = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), f64_neg(T_1_0));
 assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh0)), 0, "with_shimmer clamps -1.0 -> 0.0");
 
 # ================================================================
-# Ports test_parameter_clamping's headline (2.0.3: rust-old/tests/integration.rs:193-203):
+# Ports test_parameter_clamping's headline (2.0.3:rust-old/tests/integration.rs:193-203):
 # every builder pushed out of range at once, then SYNTHESIZE from it. The clamps
 # above prove the fields land on the rail; this proves the railed voice still works.
 test_group("clamped extremes still synthesize");
@@ -399,7 +399,7 @@ assert_eq(FormantBlend_f1(cfb0), f64_from(2000), "cat meow F2 at t=0 == 2000");
 assert_eq(FormantBlend_b0(cfb0), f64_from(150), "cat meow B1 at t=0 == 150");
 
 # ================================================================
-# All three of the oracle's rejection pairs (2.0.3: rust-old/tests/integration.rs:162-174),
+# All three of the oracle's rejection pairs (2.0.3:rust-old/tests/integration.rs:162-174),
 # one per apparatus class: noise-only, stridulatory, laryngeal.
 test_group("supports rejection -> error (snake howl, cricket roar, wolf stridulate)");
 var snake = crvoice_new(PRANI_SP_SNAKE);
@@ -420,7 +420,7 @@ var w_out = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, T_SR, T
 assert_eq(prani_is_err(w_out), 0, "wolf howl non-error");
 assert_eq(vec_len(w_out), 2205, "wolf howl length == 2205 (0.05s @ 44100)");
 assert_eq(t_all_finite(w_out), 1, "wolf howl all finite");
-# The oracle's own audibility bar (2.0.3: rust-old/tests/integration.rs:11-12).
+# The oracle's own audibility bar (2.0.3:rust-old/tests/integration.rs:11-12).
 # non-error + length + all-finite are ALL satisfied by an all-zero buffer; this
 # is the only assertion in the group that is not.
 assert_eq(f64_gt(t_max_abs(w_out), T_1E_3), 1, "wolf howl audible (max |s| > 0.001)");
@@ -449,13 +449,13 @@ var p_out = crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, T_SR, T_
 assert_eq(prani_is_err(p_out), 0, "cat purr non-error");
 assert_eq(vec_len(p_out), 2205, "cat purr length == 2205");
 assert_eq(t_all_finite(p_out), 1, "cat purr all finite");
-# Oracle bar for the purr path is looser than the howl's (2.0.3: rust-old/tests/integration.rs:367).
+# Oracle bar for the purr path is looser than the howl's (2.0.3:rust-old/tests/integration.rs:367).
 assert_eq(f64_gt(t_max_abs(p_out), T_1E_4), 1, "cat purr audible (max |s| > 1e-4)");
 
 # Cat howl -- the ONLY pair that drives the cat nasal anti-formant (0.2 fraction)
 # and the CAT_MEOW_HOWL formant-transition table through a real synthesis.
 # Ports test_cat_howl_formant_transitions / test_cat_nasal_resonance
-# (2.0.3: rust-old/tests/integration.rs:416-423, :454-461).
+# (2.0.3:rust-old/tests/integration.rs:416-423, :454-461).
 var ch_out = crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_HOWL, T_SR, T_DUR_005);
 assert_eq(prani_is_err(ch_out), 0, "cat howl non-error");
 assert_eq(vec_len(ch_out), 2205, "cat howl length == 2205");
@@ -479,7 +479,7 @@ assert_eq(t_all_finite(d_out), 1, "dragon roar all finite");
 assert_eq(f64_gt(t_max_abs(d_out), T_0_01), 1, "dragon roar audible (max |s| > 0.01)");
 
 # Bee buzz (VIBRATILE apparatus -- the only species class with no voice-level
-# coverage before this line). Ports test_bee_buzz (2.0.3: rust-old/tests/integration.rs:279-285).
+# coverage before this line). Ports test_bee_buzz (2.0.3:rust-old/tests/integration.rs:279-285).
 var bee_out = crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, T_SR, T_DUR_005);
 assert_eq(prani_is_err(bee_out), 0, "bee buzz non-error");
 assert_eq(vec_len(bee_out), 2205, "bee buzz length == 2205");
@@ -487,7 +487,7 @@ assert_eq(t_all_finite(bee_out), 1, "bee buzz all finite");
 assert_eq(f64_gt(t_max_abs(bee_out), T_1E_3), 1, "bee buzz audible (max |s| > 0.001)");
 
 # Crow screech (syringeal, f0 800 -> stays in the single-source sub-2000 branch).
-# Ports test_crow_screech (2.0.3: rust-old/tests/integration.rs:287-295).
+# Ports test_crow_screech (2.0.3:rust-old/tests/integration.rs:287-295).
 var cw_out = crvoice_vocalize(crvoice_new(PRANI_SP_CROW), PRANI_VOC_SCREECH, T_SR, T_DUR_005);
 assert_eq(prani_is_err(cw_out), 0, "crow screech non-error");
 assert_eq(vec_len(cw_out), 2205, "crow screech length == 2205");
@@ -496,7 +496,7 @@ assert_eq(f64_gt(t_max_abs(cw_out), T_1E_3), 1, "crow screech audible (max |s| >
 
 # Raptor screech (syringeal, f0 2500 -> the dual-source above-2000 branch, and
 # the screech contour sweeps 1.5x..0.7x ACROSS the 2000 Hz boundary mid-call).
-# Ports test_raptor_screech (2.0.3: rust-old/tests/integration.rs:332-340).
+# Ports test_raptor_screech (2.0.3:rust-old/tests/integration.rs:332-340).
 assert_eq(crvoice_effective_f0(crvoice_new(PRANI_SP_RAPTOR)), f64_from(2500), "raptor effective_f0 == 2500 (dual-source precondition)");
 var rp_out = crvoice_vocalize(crvoice_new(PRANI_SP_RAPTOR), PRANI_VOC_SCREECH, T_SR, T_DUR_005);
 assert_eq(prani_is_err(rp_out), 0, "raptor screech non-error");
@@ -508,7 +508,7 @@ assert_eq(t_vecs_equal(rp_out, cw_out), 0, "raptor screech differs from crow scr
 
 # Crocodilian rumble (subharmonic species; f0 60 sits well below its F1 of 200,
 # so the post-tract subharmonic injection is what keeps it audible at all).
-# Ports test_crocodilian_rumble_with_subharmonics (2.0.3: rust-old/tests/integration.rs:322-330).
+# Ports test_crocodilian_rumble_with_subharmonics (2.0.3:rust-old/tests/integration.rs:322-330).
 var cr_out = crvoice_vocalize(crvoice_new(PRANI_SP_CROCODILIAN), PRANI_VOC_RUMBLE, T_SR, T_DUR_005);
 assert_eq(prani_is_err(cr_out), 0, "crocodilian rumble non-error");
 assert_eq(vec_len(cr_out), 2205, "crocodilian rumble length == 2205");
@@ -517,7 +517,7 @@ assert_eq(f64_gt(t_max_abs(cr_out), T_1E_3), 1, "crocodilian rumble audible (max
 
 # Wolf growl and wolf screech -- one voice, two vocalizations, so the spectral
 # envelope is the only thing that differs. Ports test_spectral_envelope_per_vocalization
-# (2.0.3: rust-old/tests/integration.rs:653-663).
+# (2.0.3:rust-old/tests/integration.rs:653-663).
 var env_v = crvoice_new(PRANI_SP_WOLF);
 var g_out = crvoice_vocalize(env_v, PRANI_VOC_GROWL, T_SR, T_DUR_005);
 assert_eq(prani_is_err(g_out), 0, "wolf growl non-error");
@@ -533,11 +533,11 @@ assert_eq(f64_gt(t_max_abs(s_out), T_1E_3), 1, "wolf screech audible (max |s| > 
 assert_eq(t_vecs_equal(g_out, s_out), 0, "growl and screech from one voice differ");
 
 # ================================================================
-# Ports test_cricket_pulse_train (2.0.3: rust-old/tests/integration.rs:425-441).
+# Ports test_cricket_pulse_train (2.0.3:rust-old/tests/integration.rs:425-441).
 #
 # CAVEAT, and it applies to the ORACLE too: the tract's chirp position is
 # `i % chirp_period` over the index WITHIN one synthesize call (src/tract.cyr:365-368;
-# 2.0.3: rust-old/src/tract.rs:256-258), and crvoice_vocalize renders in 20 ms
+# 2.0.3:rust-old/src/tract.rs:256-258), and crvoice_vocalize renders in 20 ms
 # blocks -- 882 samples at 44100. pos_in_chirp therefore never exceeds 881,
 # always below chirp_active = (44100/30)*4 = 5880, so the inter-chirp SILENCE arm
 # is unreachable through the voice layer at ANY duration in BOTH implementations.
@@ -577,7 +577,7 @@ assert_eq(t_all_finite(long_out), 1, "0.2s wolf howl all finite");
 assert_eq(f64_gt(t_max_abs(long_out), T_1E_3), 1, "0.2s wolf howl audible (max |s| > 0.001)");
 
 # ================================================================
-# Ports test_zero_duration_synthesis (2.0.3: rust-old/tests/integration.rs:260-265).
+# Ports test_zero_duration_synthesis (2.0.3:rust-old/tests/integration.rs:260-265).
 # num_samples.max(1) is used only as the contour DENOMINATOR -- it must not leak
 # into the loop bound and emit a phantom sample.
 test_group("zero duration -- non-error, empty output");
@@ -590,7 +590,7 @@ assert_eq(prani_is_err(zp_out), 0, "cat purr duration 0 is not an error");
 assert_eq(vec_len(zp_out), 0, "cat purr duration 0 -> empty output");
 
 # ================================================================
-# Ports test_cat_purr_size_variation (2.0.3: rust-old/tests/integration.rs:370-379).
+# Ports test_cat_purr_size_variation (2.0.3:rust-old/tests/integration.rs:370-379).
 # purr_f0 = clamp(27 / size_scale, 20, 35): size 0.5 -> 54 rails to the 35 ceiling,
 # size 2.0 -> 13.5 rails to the 20 floor. Both rails are dead at size_scale 1.0
 # (27, the only value the suite has ever evaluated).
@@ -610,7 +610,7 @@ assert_eq(t_vecs_equal(pp_s, pp_l), 0, "purr_f0 35 (size 0.5) and 20 (size 2.0) 
 assert_eq(t_vecs_equal(pp_s, p_out), 0, "size-0.5 purr differs from the default-size purr");
 
 # ================================================================
-# Ports test_all_species_synthesize (2.0.3: rust-old/tests/integration.rs:94-125)
+# Ports test_all_species_synthesize (2.0.3:rust-old/tests/integration.rs:94-125)
 # including its exact vocalization ladder: Growl, else Hiss, else Chirp. Growl is
 # supported by laryngeal/syringeal/noise-only, so it covers 11 of the 13; Cricket
 # (stridulatory) and Bee (vibratile) fall through to Chirp. Hiss is never reached
@@ -660,7 +660,7 @@ assert_eq(vec_len(m_out), 4410, "mating (x2 duration) length == 4410");
 assert_eq(t_all_finite(m_out), 1, "mating trill all finite");
 
 # ================================================================
-# Ports test_intent_modifies_output (2.0.3: rust-old/tests/integration.rs:74-92).
+# Ports test_intent_modifies_output (2.0.3:rust-old/tests/integration.rs:74-92).
 # ONE voice, two intents -- exactly the oracle's `&self` reuse. Alarm's
 # amplitude_scale is 1.5 against Idle's 0.5, so the intent table has to reach the
 # emitted samples; nothing in the suite has ever observed that multiply.
@@ -679,7 +679,7 @@ assert_eq(f64_gt(t_energy(a_out), t_energy(i_out)), 1, "alarm carries more energ
 assert_eq(f64_gt(t_energy(i_out), 0), 1, "idle energy > 0");
 
 # ================================================================
-# Ports test_non_stationary_perturbation (2.0.3: rust-old/tests/integration.rs:676-689).
+# Ports test_non_stationary_perturbation (2.0.3:rust-old/tests/integration.rs:676-689).
 # Alarm's urgency is 0.9, so perturbation_scale reaches 2.4 at call boundaries --
 # every other synthesized buffer in the tree runs at urgency 0.0/0.2/0.3. BARK is
 # also the only path that builds the bark pitch contour inside a real synthesis.
@@ -696,9 +696,10 @@ assert_eq(vec_len(pb_idle), 2205, "idle bark (x1.0 duration) length == 2205");
 assert_eq(t_all_finite(pb_idle), 1, "idle bark all finite");
 
 # ================================================================
-# Ports test_subharmonics_are_finite's Crocodilian half (2.0.3:
-# rust-old/tests/integration.rs:381-405). Territorial (duration_scale 1.5,
-# amplitude_scale 1.3, urgency 0.5) reaches synthesis nowhere else in the tree.
+# Ports test_subharmonics_are_finite's Crocodilian half
+# (2.0.3:rust-old/tests/integration.rs:381-405). Territorial (duration_scale
+# 1.5, amplitude_scale 1.3, urgency 0.5) reaches synthesis nowhere else in the
+# tree.
 test_group("subharmonics stay finite -- Crocodilian RUMBLE at Territorial");
 var crt_out = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_CROCODILIAN),
   PRANI_VOC_RUMBLE, PRANI_INTENT_TERRITORIAL, T_SR, T_DUR_005);
@@ -708,7 +709,7 @@ assert_eq(t_all_finite(crt_out), 1, "territorial crocodilian rumble all finite")
 assert_eq(f64_gt(t_max_abs(crt_out), T_0_01), 1, "crocodilian rumble audible (max |s| > 0.01)");
 
 # ================================================================
-# Ports test_vocal_effort_whisper_vs_shout (2.0.3: rust-old/tests/integration.rs:693-707).
+# Ports test_vocal_effort_whisper_vs_shout (2.0.3:rust-old/tests/integration.rs:693-707).
 # effort 0.0 and 1.0 are the only inputs that drive effort_tilt_offset to its
 # -3 / +3 rails and effort_breathiness_delta to its 0.15 maximum; effort_amp goes
 # 0.3 -> 1.5, so the oracle's bar is a 2x ENERGY floor, not a bare inequality.
@@ -778,7 +779,7 @@ assert_eq(CreatureVoice_size_scale(v2), CreatureVoice_size_scale(vser), "size_sc
 assert_eq(CreatureVoice_vocal_effort(v2), CreatureVoice_vocal_effort(vser), "vocal_effort (0.7) roundtrips");
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v2)), 0x3FC3333333333333, "nested params breathiness override (0.15) roundtrips");
 assert_eq(SpeciesParams_resonance_seed(CreatureVoice_params(v2)), PR_SEED_WOLF, "nested params resonance_seed roundtrips");
-# The oracle's own two roundtrip assertions (2.0.3: rust-old/tests/integration.rs:156-158)
+# The oracle's own two roundtrip assertions (2.0.3:rust-old/tests/integration.rs:156-158)
 # read the DERIVED quantities off the deserialized voice, which pull in f0_default,
 # f0_min/f0_max (the clamp) and tract_scale -- fields no direct assertion covers.
 # (400 + 50) / 1.2 = 375, clamp[150,1200] -> 375; 1.2 * 1.2 = 1.44.
@@ -935,7 +936,7 @@ assert_eq(t_all_finite(g_p100), 1, "cat purr 100 samples all finite");
 # The live CRASH. nasal_len = f64_to(len * nasal_fraction) had no stop at the
 # buffer end, so a fraction above 1.0 indexed past it and terminated the process
 # ("vec: index out of bounds", measured at fraction 2.0 on a 100-sample buffer).
-# The oracle iterates `.take(nasal_len)` (2.0.3: rust-old/src/voice.rs:613), which
+# The oracle iterates `.take(nasal_len)` (2.0.3:rust-old/src/voice.rs:613), which
 # stops at the end for ANY n -- so the repair RESTORES parity rather than
 # diverging, and the fade denominator stays the unclamped nasal_len the oracle
 # divides by.

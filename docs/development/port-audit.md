@@ -1,11 +1,12 @@
 # prani — Rust → Cyrius Port Audit
 
-Per-module parity ledger for the 2.0.0 port. The Rust oracle is frozen at
-`rust-old/`; every Cyrius module must match it function-for-function. Update
-the relevant row whenever a module's status changes.
+Per-module parity ledger for the 2.0.0 port. The Rust oracle is frozen at tag
+`2.0.3` and read with `git show` ([ADR-0004](../adr/0004-cite-the-oracle-by-tag.md));
+every Cyrius module must match it function-for-function. Update the relevant row
+whenever a module's status changes.
 
 **Status:** ✅ ported & tested · 🟡 partial · ⬜ pending
-**LOC** = Rust lines (incl. tests) at `rust-old/src/`.
+**LOC** = Rust lines (incl. tests) at `2.0.3:rust-old/src/`.
 
 ## Conventions established (apply to every module)
 
@@ -54,8 +55,9 @@ Proven reference template: **`src/error.cyr`, `src/rng.cyr`, `src/dsp.cyr`**
   write focused behavioural tests that lock parity (golden values from the oracle).
 - **`math.rs`** (thin f32 sin/cos/exp/sqrt/powf wrappers) is folded into direct
   `f64_*` builtin + ganita calls — **no `math.cyr` module** (same as svara/naad).
-- **Cross-check every module against `rust-old/`** — correctness bar is "matches
-  what Rust did". Diverge only with a documented parity note.
+- **Cross-check every module against the oracle** (`git show
+  2.0.3:rust-old/src/<mod>.rs`) — correctness bar is "matches what Rust did".
+  Diverge only with a documented parity note.
 
 ## Test harness pattern
 
@@ -167,7 +169,7 @@ API — 717 → 770 assertions, `cyrius audit` exit 0).
 **A third defect category the parity bar cannot see.** 2.0.3's CRITICAL was
 neither an inherited oracle defect nor a transcription error: svara 3.x replaced
 an infallible constructor with a checkable error code, and the port went on using
-the return value as a pointer. Parity against `rust-old/` cannot catch this,
+the return value as a pointer. Parity against the oracle cannot catch this,
 because the oracle has no such failure to compare against, and a symbol-level
 dependency review cannot either, because the name and arity did not change — only
 the MEANING of the return. When bumping a dependency, ask what each consumed

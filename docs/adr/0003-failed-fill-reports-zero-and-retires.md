@@ -5,8 +5,8 @@
 
 ## Context
 
-`rust-old/src/stream.rs:fill_buffer` guards only the **copy** with the synthesis
-result:
+`2.0.3:rust-old/src/stream.rs:fill_buffer` guards only the **copy** with the
+synthesis result:
 
 ```rust
 if let Ok(block) = tract.synthesize(contour, to_render, &options) {

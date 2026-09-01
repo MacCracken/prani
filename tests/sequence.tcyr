@@ -21,7 +21,7 @@ include "src/tract.cyr"
 include "src/voice.cyr"
 
 # ---- test constants (IEEE-754 hex) -----------------------------------------
-# The oracle's own fixtures (rust-old/tests/integration.rs, tag 2.0.3) all run
+# The oracle's own fixtures (2.0.3:rust-old/tests/integration.rs) all run
 # at 44100 Hz; the older groups below run at 8000 Hz and keep their own
 # CALL_D (0.05) / GAP_I (0.1), which the new groups reuse BY VALUE, not by role.
 var T_SR_44100 = 0x40e5888000000000;   # 44100.0
@@ -113,7 +113,7 @@ assert_eq(vec_len(bout_buf2), vec_len(bout_buf), "deterministic length");
 assert_eq(vec_get(bout_buf2, 200), vec_get(bout_buf, 200), "deterministic sample[200]");
 
 # ================================================================
-# The oracle's own bout -- rust-old/tests/integration.rs:495-517 (tag 2.0.3):
+# The oracle's own bout -- 2.0.3:rust-old/tests/integration.rs:495-517:
 # Dog / BARK / Alarm / count 3 at 44100 Hz. This is the only place Dog is
 # synthesized and the only place BARK is, so it is what covers the BARK pitch
 # contour and the Bark/Yelp/Chirp envelope arm.
@@ -157,7 +157,7 @@ assert_eq(vec_len(phrase_buf), 1600, "phrase length = (400+800)+(400+0)");
 assert_eq(t_all_finite(phrase_buf), 1, "all phrase samples finite");
 
 # ================================================================
-# The oracle's own phrase -- rust-old/tests/integration.rs:519-546 (tag 2.0.3):
+# The oracle's own phrase -- 2.0.3:rust-old/tests/integration.rs:519-546:
 # Songbird under Mating intent (duration_scale 2.0) at 44100 Hz, three elements
 #   Chirp 0.1s gap 0.05s | Trill 0.3s gap 0.1s | Chirp 0.1s gap 0.0s
 # so unlike the homogeneous phrase above the vocalization, duration and gap all
@@ -208,7 +208,7 @@ var empty_chorus = sequence_synthesize_chorus(vec_new(), PRANI_VOC_HOWL, PRANI_I
 assert_eq(vec_len(empty_chorus), 0, "empty voices -> empty chorus");
 
 # ================================================================
-# The oracle's own chorus -- rust-old/tests/integration.rs:548-565 (tag 2.0.3):
+# The oracle's own chorus -- 2.0.3:rust-old/tests/integration.rs:548-565:
 # FOUR wolves at sizes 0.8 / 1.0 / 1.2 / 1.4, duration 1.0 s, timing_spread
 # 0.2 s, at 44100 Hz. The 2-voice chorus above mixes two bit-identical default
 # wolves (effectively 2x one signal); this one is the only heterogeneous mix, and
@@ -256,7 +256,7 @@ assert_eq(CallBout_count(bo2), 3, "bout count roundtrips");
 assert_eq(CallBout_call_duration(bo2), 0x4008000000000000, "bout call_duration roundtrips");
 assert_eq(CallBout_intent(bo2), PRANI_INTENT_SOCIAL, "bout intent roundtrips");
 
-# The oracle's own bout -- rust-old/tests/integration.rs:594-608 (tag 2.0.3).
+# The oracle's own bout -- 2.0.3:rust-old/tests/integration.rs:594-608.
 # PRANI_VOC_HOWL above has discriminant 0, and bayan's int accessor yields 0 for
 # a missing key, so that assertion survives a derive that dropped the
 # "vocalization" key entirely. BARK's discriminant is 1, so this one does not.
@@ -299,7 +299,7 @@ assert_eq(strlen(pjson_2), strlen(pjson), "phrase json idempotent -- same length
 assert_eq(memeq(pjson, pjson_2, strlen(pjson)), 1, "phrase json idempotent");
 
 # ================================================================
-# rust-old/tests/integration.rs:619-651 (tag 2.0.3) -- SYNTHESIS half. Every
+# 2.0.3:rust-old/tests/integration.rs:619-651 -- SYNTHESIS half. Every
 # species' own bout_template must render at 44100 Hz, non-empty and all finite.
 # Non-error also carries the oracle's supports_vocalization invariant for free:
 # crvoice_vocalize_with_intent returns PRANI_ERR_INVALID_VOCALIZATION for a pair

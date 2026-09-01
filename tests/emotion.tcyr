@@ -1,5 +1,5 @@
 # emotion.tcyr -- tests for src/emotion.cyr.
-# rust-old/src/emotion.rs had no #[test] blocks; parity surface is the
+# 2.0.3:rust-old/src/emotion.rs had no #[test] blocks; parity surface is the
 # valence/arousal -> (Vocalization, CallIntent) mapping (all 9 zone quadrants +
 # their sub-branches) and the evaluate() continuous outputs (vocal_effort,
 # pitch_scale, breathiness_delta). Golden float values computed by hand in f64,
@@ -319,7 +319,7 @@ assert_eq(memeq(pojstr, pojstr_2, strlen(pojstr)), 1, "json idempotent");
 # classifiers, the two selectors and evaluate each return
 # PRANI_ERR_INVALID_VOCALIZATION instead of a fabricated answer.
 #
-# DIVERGENCE from the oracle: rust-old's EmotionState::evaluate() returns
+# DIVERGENCE from the oracle: the Rust EmotionState::evaluate() returns
 # EmotionOutput (infallible), Rust's f32::clamp propagates NaN identically, and
 # serde's derived Deserialize accepts any float for any field -- so the oracle
 # accepts every state rejected below. It has no NaN or out-of-range emotion

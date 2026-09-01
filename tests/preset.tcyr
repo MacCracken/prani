@@ -1,4 +1,4 @@
-# preset.tcyr -- tests for src/preset.cyr (ports rust-old/src/preset.rs).
+# preset.tcyr -- tests for src/preset.cyr (ports 2.0.3:rust-old/src/preset.rs).
 #
 # Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
 # prani src modules in dependency order (error -> rng -> dsp -> vocalization ->
@@ -334,8 +334,8 @@ assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_anc)), T_0_25,
   "build ancient_dragon breathiness override 0.25 in voice params");
 
 # ================================================================
-# Ports rust-old/tests/integration.rs:567-592 (test_voice_presets), the one
-# oracle test that SYNTHESIZES from a preset-built voice -- read it with
+# Ports 2.0.3:rust-old/tests/integration.rs:567-592 (test_voice_presets), the
+# one oracle test that SYNTHESIZES from a preset-built voice -- read it with
 # `git show 2.0.3:rust-old/tests/integration.rs` (ADR-0004). Every other suite
 # only vocalizes crvoice_new voices, so this is the sole voice-level synthesis
 # coverage for Raptor, Crow and Crocodilian, for Cat+Howl (the nasal

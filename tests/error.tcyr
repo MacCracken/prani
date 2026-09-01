@@ -1,8 +1,9 @@
 # error.tcyr -- tests for src/error.cyr.
-# rust-old/src/error.rs had no #[test] blocks (its Display/serde behaviour is
-# exercised in tests/integration.rs). The parity-meaningful surface in the
-# Cyrius port is the integer codes + prani_from_svara mapping + finite test;
-# serde round-trip and Display-string tests are dropped (integer codes).
+# 2.0.3:rust-old/src/error.rs had no #[test] blocks (its Display/serde
+# behaviour is exercised in 2.0.3:rust-old/tests/integration.rs). The
+# parity-meaningful surface in the Cyrius port is the integer codes +
+# prani_from_svara mapping + finite test; serde round-trip and Display-string
+# tests are dropped (integer codes).
 
 include "src/error.cyr"
 

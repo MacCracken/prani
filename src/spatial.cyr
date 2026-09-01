@@ -1,7 +1,7 @@
 # spatial.cyr -- spatial audio effects for creature vocalizations.
-# Ports rust-old/src/spatial.rs: two free functions, no struct, no internal
-# deps. Distance-based attenuation with atmospheric HF absorption (one-pole
-# lowpass) and Doppler pitch shift (linear-interpolated resampling).
+# Ports 2.0.3:rust-old/src/spatial.rs: two free functions, no struct, no
+# internal deps. Distance-based attenuation with atmospheric HF absorption
+# (one-pole lowpass) and Doppler pitch shift (linear-interpolated resampling).
 #
 # Requires (from the build/test unit): stdlib alloc/vec/math (F64_TAU,
 # f64_from, f64_clamp, f64_floor, f64_to) + error.cyr for PRANI_ERR_* and the
@@ -74,9 +74,9 @@
 #
 # DELIBERATE DIVERGENCE from the oracle: a negative `distance`, a
 # non-positive `reference_distance` and a non-positive `sample_rate` were all
-# accepted by `rust-old/src/spatial.rs` (`git show 2.0.3:rust-old/src/spatial.rs`)
-# because f32 arithmetic gave each of them *some* buffer. None of those buffers
-# is the audio the caller asked for.
+# accepted by `2.0.3:rust-old/src/spatial.rs` because f32 arithmetic gave each
+# of them *some* buffer. None of those buffers is the audio the caller asked
+# for.
 # ================================================================
 
 # ================================================================

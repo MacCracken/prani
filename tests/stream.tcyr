@@ -1,4 +1,4 @@
-# stream.tcyr -- tests for src/stream.cyr (ports rust-old/src/stream.rs).
+# stream.tcyr -- tests for src/stream.cyr (ports 2.0.3:rust-old/src/stream.rs).
 #
 # Include order: dep bundles (hisab -> goonj -> naad -> svara) first, then the
 # prani src modules in dependency order (error -> rng -> dsp -> vocalization ->

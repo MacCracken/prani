@@ -10,7 +10,7 @@ Two groups. **Group A** is the historical series tracked since 2.0.0. **Group B*
 mirrors the Rust oracle's criterion suite one-for-one — same species, same
 vocalizations, same durations, same 44100 Hz — so the two harnesses can be lined
 up mechanically. Group B was added in **2.0.7**, the milestone that had to run
-before [`rust-old/`](development/roadmap.md) could be retired.
+before the Rust oracle could be [retired](development/roadmap.md).
 
 ## Per-apparatus coverage (Group B)
 
@@ -110,8 +110,8 @@ per-sample svara calls are f64 on both sides. It is no longer *forced*: ganita
 - **Host**: x86_64 Linux 7.1.10, AMD Ryzen 7 5800H, single core, no pinning, no
   governor changes. Both harnesses run back to back on an otherwise idle machine.
 - **Rust**: `cargo bench --bench benchmarks` at `--release`, criterion defaults
-  (3 s warmup, 100 samples), `CARGO_TARGET_DIR` **outside the repo** so
-  `rust-old/` stays unmodified. The point estimate is quoted.
+  (3 s warmup, 100 samples), `CARGO_TARGET_DIR` **outside the repo** so the
+  oracle tree stayed unmodified. The point estimate is quoted.
 - **Cyrius**: `cyrius bench tests/prani.bcyr`, batch pattern
   (`bench_batch_start` / loop / `bench_batch_stop`), one batch mean per benchmark.
 - ⚠ **The two harnesses do not measure identically.** `lib/bench.cyr` **measures

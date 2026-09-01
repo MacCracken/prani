@@ -1,5 +1,5 @@
 # bridge.tcyr -- tests for src/bridge.cyr.
-# rust-old/src/bridge.rs had no #[test] blocks; parity surface is 13 pure
+# 2.0.3:rust-old/src/bridge.rs had no #[test] blocks; parity surface is 13 pure
 # value-conversion functions. These are mostly exact IEEE-754 arithmetic (asserted
 # bit-exact) with a handful of transcendental / pow paths (asserted within TOL).
 # Every threshold function is probed at each cut and each clamp at its limits.
@@ -33,7 +33,7 @@ assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x400e000000000000),
 # mass 1 kg: cbrt(1/30) ~ 0.32183 (positive branch, above 0.1 floor).
 assert_eq(f64_lt(f64_abs(f64_sub(bridge_size_from_body_mass(0x3ff0000000000000), 0x3fd498dbfef5ae9b)), TOL), 1, "mass 1.0 kg -> ~0.32183");
 assert_eq(f64_gt(bridge_size_from_body_mass(0x3ff0000000000000), PR_B_0_1), 1, "mass 1 kg > 0.1 floor");
-# Oracle probe points (rust-old/tests/integration.rs:904-915 @ 2.0.3): a 0.03 kg
+# Oracle probe points (2.0.3:rust-old/tests/integration.rs:904-915): a 0.03 kg
 # mouse must land below 0.2, a 5000 kg elephant above 4.0. Both sit OUTSIDE the
 # 1-240 kg band above, so they pin the sub-kg and multi-tonne ends of the pow
 # rather than extrapolating from it. PR_B_0_03 / PR_B_0_2 are src/bridge.cyr

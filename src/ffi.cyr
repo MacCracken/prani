@@ -1,7 +1,7 @@
 # ffi.cyr -- C buffer-callback API for game-engine middleware.
-# Ports rust-old/src/ffi.rs. Provides the create/configure/stream/fill surface a
-# host (Wwise source plugin, FMOD DSP callback, Godot AudioStreamGenerator) drives
-# to synthesize creature voices on demand.
+# Ports 2.0.3:rust-old/src/ffi.rs. Provides the create/configure/stream/fill
+# surface a host (Wwise source plugin, FMOD DSP callback, Godot
+# AudioStreamGenerator) drives to synthesize creature voices on demand.
 #
 # Requires (from the build/test unit, in dependency order): stdlib alloc/vec/math,
 # hisab, goonj, naad, svara, error.cyr, rng.cyr, dsp.cyr, vocalization.cyr,

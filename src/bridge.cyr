@@ -1,8 +1,8 @@
 # bridge.cyr -- science-crate bridge: pure value conversions.
-# Ports rust-old/src/bridge.rs. 13 stateless functions that convert bioacoustic
-# measurements + behavioral state into prani synthesis parameters. Consumers
-# (kiran, joshua) call these with primitive values, independent of which science
-# crates are in their dependency graph.
+# Ports 2.0.3:rust-old/src/bridge.rs. 13 stateless functions that convert
+# bioacoustic measurements + behavioral state into prani synthesis parameters.
+# Consumers (kiran, joshua) call these with primitive values, independent of
+# which science crates are in their dependency graph.
 #
 # Requires (in the build/test unit): vocalization.cyr (PRANI_INTENT_*) and
 # species.cyr (PRANI_SP_*) for the enum-returning mappers. The module file has no

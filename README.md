@@ -5,7 +5,9 @@
 Procedural synthesis of non-human voices: wolves, cats, lions, birds, snakes, insects, dragons, and fantasy creatures. Built on [svara](https://github.com/MacCracken/svara)'s glottal/formant engine with species-specific vocal tract models, bioacoustic call patterns, and behavioral vocalization mapping.
 
 > **v2.0.0 is a Rust → Cyrius port.** The original Rust crate (through 1.1.0) is
-> frozen at [`rust-old/`](rust-old/) as the parity oracle; every Cyrius module is
+> frozen in git history as the parity oracle — read it with
+> `git show 2.0.3:rust-old/src/voice.rs`
+> ([ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md)). Every Cyrius module is
 > cross-checked against it function-for-function. See
 > [`docs/development/port-audit.md`](docs/development/port-audit.md).
 

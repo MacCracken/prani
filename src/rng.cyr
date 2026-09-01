@@ -1,8 +1,9 @@
 # rng.cyr -- deterministic PCG32 PRNG for stochastic creature synthesis.
-# Ports rust-old/src/rng.rs (Rng struct + PCG32). Seedable for reproducible
-# jitter/shimmer/breathiness across tract turbulence and call-pattern timing.
-# There is no seedable float RNG in the Cyrius stdlib, so this is hand-ported
-# (same PCG32 svara uses; prani's rng.rs and svara's rng.rs are identical).
+# Ports 2.0.3:rust-old/src/rng.rs (Rng struct + PCG32). Seedable for
+# reproducible jitter/shimmer/breathiness across tract turbulence and
+# call-pattern timing. There is no seedable float RNG in the Cyrius stdlib,
+# so this is hand-ported (same PCG32 svara uses; prani's rng.rs and svara's
+# rng.rs are identical).
 #
 # u64 semantics on i64: wrapping_mul/wrapping_add == plain `*`/`+` (i64 wraps
 # two's-complement, bit-identical to u64). `>>` is LOGICAL (zero-fill) == u64

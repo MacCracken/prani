@@ -2,10 +2,10 @@
 # L0 base module: included FIRST by every build/test entry. Modules never
 # `include` each other -- the entry file orders them.
 #
-# Ports rust-old/src/error.rs (the `PraniError` enum + `From<SvaraError>`).
-# Rust carried a String payload per variant; the Cyrius port uses integer
-# codes -- fallible functions return PRANI_ERR_NONE (0) on success or a
-# negative code on failure; diagnostic text via prani_err_name().
+# Ports 2.0.3:rust-old/src/error.rs (the `PraniError` enum +
+# `From<SvaraError>`). Rust carried a String payload per variant; the Cyrius
+# port uses integer codes -- fallible functions return PRANI_ERR_NONE (0) on
+# success or a negative code on failure; diagnostic text via prani_err_name().
 #
 # NAMING: every prani top-level symbol is `prani_`/`PRANI_`/`Pr`-prefixed so
 # the prani distlib coexists with svara + naad bundles in one flat namespace

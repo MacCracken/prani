@@ -13,13 +13,13 @@
 #     comparable to Group B's wolf_howl_1s; see below.
 #
 #   GROUP B -- CRITERION MIRROR (2.0.7). A like-for-like mirror of the frozen
-#     Rust oracle's 14 criterion benchmarks (git show 2.0.3:rust-old/benches/
-#     benchmarks.rs), so the 1.1.0 crate's "~1000x realtime" claim and the
-#     port's number can finally be read under ONE method before rust-old/ is
-#     retired in 2.0.8. Names are the criterion function names VERBATIM
-#     (wolf_howl_1s, cat_purr_500ms, ...) so the two harnesses' output lines up
-#     mechanically. Every parameter -- species, vocalization, intent, sample
-#     rate, duration -- is the oracle's.
+#     Rust oracle's 14 criterion benchmarks, read with
+#     `git show 2.0.3:rust-old/benches/benchmarks.rs`, so the 1.1.0 crate's
+#     "~1000x realtime" claim and the port's number can finally be read under
+#     ONE method after 2.0.8 retires the oracle tree. Names are the criterion
+#     function names VERBATIM (wolf_howl_1s, cat_purr_500ms, ...) so the two
+#     harnesses' output lines up mechanically. Every parameter -- species,
+#     vocalization, intent, sample rate, duration -- is the oracle's.
 #
 #     Two structural rules Group B follows, because getting either wrong voids
 #     the comparison:
@@ -133,7 +133,7 @@ fn main() {
     bench_report(b4);
 
     println("");
-    println("  -- GROUP B, criterion mirror of rust-old/benches/benchmarks.rs --");
+    println("  -- GROUP B, criterion mirror of 2.0.3:rust-old/benches/benchmarks.rs --");
     println("  -- (voice built OUTSIDE the timed loop, as criterion does) --");
 
     # ---- 1. wolf_howl_1s -- Wolf / Howl / default intent / 44100 / 1.0 s ----

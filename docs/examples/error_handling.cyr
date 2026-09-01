@@ -9,9 +9,9 @@
 # call has come back and you do not know what you are holding.
 #
 # Four of its five sections are DIVERGENCES from the Rust original prani was
-# ported from (rust-old/), each recorded as an ADR. They are the ones a consumer
-# actually trips over, because in every one of them the Rust could not fail and
-# prani can:
+# ported from (the oracle at tag 2.0.3), each recorded as an ADR. They are the
+# ones a consumer actually trips over, because in every one of them the Rust
+# could not fail and prani can:
 #
 #     section 2 -- docs/adr/0001  the tract constructor reports svara's rejection
 #     section 3 -- docs/adr/0002  the deserializers report a parse failure

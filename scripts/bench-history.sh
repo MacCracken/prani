@@ -4,7 +4,7 @@
 #
 # Ported from the Rust era (2.0.4): the previous version shelled out to
 # `cargo bench` and parsed criterion's output. prani is a Cyrius project —
-# `rust-old/benches/` is the frozen oracle's harness, not this project's.
+# `2.0.3:rust-old/benches/` is the frozen oracle's harness, not this project's.
 #
 # Output: benches/history.csv (gitignored via *.csv — it is a local log, not
 # a tracked artifact). Reference numbers live in docs/benchmarks.md.

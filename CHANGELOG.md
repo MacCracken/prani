@@ -5,6 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Reading `rust-old/…` citations in the entries below.** The Rust oracle this
+> project was ported from lived at `rust-old/` until **2.0.8** removed it. Entries
+> written before then cite it by bare path, and those paths are left as written —
+> a released changelog is a record of what was true at the time, not a document to
+> retrofit. To resolve any of them, name the tag
+> ([ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md)):
+>
+> ```sh
+> git show 2.0.3:rust-old/src/voice.rs   # port era: 2.0.0 and later
+> git show 1.1.0:src/voice.rs            # Rust era: the Rust WAS src/
+> ```
+>
+> The path changed at 2.0.0 because the port created `rust-old/` by moving the
+> Rust aside, so the era decides which form resolves.
+
+## [2.0.8] - `rust-old/` retired
+
+**The 2.0.x arc's destination.** The frozen Rust oracle prani was ported from —
+**26 files, 4,646 lines** — is gone from the working tree. Patch-level because it
+changes nothing a consumer sees: no API, no behaviour, no bundle content. What it
+changes is what prani's parity guarantee *rests on*. **From here, parity is
+asserted by the suites alone.**
+
+`cyrius audit` exit 0 (17 suites, **1900 assertions**), five examples clean, with
+the directory absent.
+
+### The gate, and what it caught
+
+The arc was preserve-first: nothing the oracle held could be lost before it went.
+Every item was checked, and two of them found problems:
+
+- **2.0.4** — all 73 Rust tests audited against the suites; 41 shortfalls closed,
+  zero behavioural defects. Suite 770 → 1200.
+- **2.0.6** — five runnable examples, CI-gated; `streaming.cyr` drives the full
+  FFI lifecycle, which is what consumer-green was standing in for.
+- **2.0.7** — the Rust comparison, captured while the oracle still built. The
+  arc's only hard ordering constraint.
+- **Move-aside proof** — `mv rust-old ../`, then audit + examples + `distlib`, all
+  green, **before** deleting. Nothing in the build, tests, or bundle read it.
+- **Reference sweep** — every live citation converted to the tag-qualified form
+  from [ADR-0004](docs/adr/0004-cite-the-oracle-by-tag.md).
+
+### Fixed — the sweep's own search pattern was too narrow
+
+⭐ The gate said *"83 citations across 42 files"*. The real figure was **297
+across 53** — 2.0.4–2.0.7 added heavily-citing docs and the number was never
+re-measured. That is the same drift that produced the wrong 176 figure 2.0.4
+corrected, and the second time a gate number measured once has gone stale.
+
+Worse, and only caught by the verification pass: **`git grep rust-old` was the
+wrong search.** Citations like `voice.rs:227-231` name an oracle file with **no
+`rust-old/` prefix at all**, so they were invisible to it and just as
+unresolvable — 77 of them, including one in `src/voice.cyr`. Most turned out to
+be module names in prose (`prani's rng.rs and svara's rng.rs are identical`),
+which need nothing; the line-numbered ones were converted.
+
+Also normalised: citations written `rust-old/…:904-915 @ 2.0.3` or
+`2.0.3: rust-old/…` were tag-qualified but **not paste-able into `git show`** —
+which, with the directory gone, is the entire point. All 33 are now the canonical
+`2.0.3:rust-old/…`.
+
+### How to read the oracle now
+
+```sh
+git show 2.0.3:rust-old/src/voice.rs           # port era (2.0.0+)
+git show 1.1.0:src/voice.rs                    # Rust era — the Rust WAS src/
+git grep 'fn vocalize' 2.0.3 -- rust-old/src   # grep the whole oracle
+```
+
+The path changed at 2.0.0 because the port created `rust-old/` by moving the Rust
+aside, so the era decides which form resolves. `CHANGELOG.md` entries written
+before this release cite bare paths and are **left as written** — a released
+changelog records what was true at the time; a note at the head of this file
+carries the incantation instead.
+
+### ⚠ Follow-up — push the tags
+
+The recovery rule names tags, and they could not be verified against `origin`
+from the dev environment. **Run `git push --tags`.** The risk is bounded rather
+than open: all three oracle-bearing tags are **ancestors of `main`**, and
+`origin/main` matched local `main`, so the oracle's *content* is already on
+origin — only the readable tag refs may be missing, and pushing them later works
+against commits origin already has. Until then, citations resolve by hash only.
+
 ## [2.0.7] - The Rust comparison, and two published figures that were wrong
 
 The measurement that had to happen before `rust-old/` could be retired: after

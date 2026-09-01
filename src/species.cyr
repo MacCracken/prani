@@ -1,9 +1,10 @@
 # species.cyr -- creature species definitions + per-species vocal parameters.
-# Ports rust-old/src/species.rs. Two enums (Species, VocalApparatus) -> integer
-# constants, the SpeciesParams struct, the big per-species params() lookup, the
-# supports_vocalization() bioacoustic gate, and bout_template() (a CallBout per
-# species). serde RESTORED on SpeciesParams via #derive(Serialize) (all fields
-# typed i64 for lossless bit-pattern roundtrip); integer codes throughout.
+# Ports 2.0.3:rust-old/src/species.rs. Two enums (Species, VocalApparatus) ->
+# integer constants, the SpeciesParams struct, the big per-species params()
+# lookup, the supports_vocalization() bioacoustic gate, and bout_template()
+# (a CallBout per species). serde RESTORED on SpeciesParams via
+# #derive(Serialize) (all fields typed i64 for lossless bit-pattern roundtrip);
+# integer codes throughout.
 #
 # Requires (in the build/test unit): vocalization.cyr (PRANI_VOC_*/PRANI_INTENT_*)
 # and sequence.cyr (CallBout struct + sequence_call_bout_new). The module file
