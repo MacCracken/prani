@@ -29,6 +29,19 @@ test, which matters because neither consumer has ported up the stack.
 | `streaming.cyr` | the real-time path, the allocation rule, **and the full FFI lifecycle** |
 | `sequencing.cyr` | bouts, phrases, and a multi-voice chorus |
 
+### Note — the runner is POSIX `sh`, deliberately
+
+`scripts/run-examples.sh` is written for POSIX `sh`, not bash. CI invokes it as
+`sh scripts/run-examples.sh`, which is **dash** on `ubuntu-latest`, where
+`set -o pipefail` is an *error* rather than a no-op — the first version used it
+(plus arrays and `shopt`) and failed CI at line 11 before running anything. It is
+now free of bashisms and its shebang says `#!/bin/sh` so both invocations agree.
+The trap is that `/bin/sh` on a typical dev box is a symlink to bash, so the
+script passes locally and fails only in CI; there is a comment in the file saying
+so. Both failure paths are verified: a build failure and a non-zero exit each
+fail the gate, and the runner reports every failing example rather than stopping
+at the first.
+
 ### The FFI surface has now been driven end to end
 
 `streaming.cyr` runs `prani_ffi_voice_create` → `_stream_start` → `_stream_fill`

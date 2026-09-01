@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # run-examples.sh — build and run every example in docs/examples/.
 #
 # This is the gate roadmap 2.0.6 asks for: CI runs it on every push, so an
@@ -8,7 +8,12 @@
 # Each example is a standalone program: it includes the dep bundles and
 # dist/prani.cyr exactly as a consumer would, so building them also proves the
 # published bundle is usable from outside the library.
-set -euo pipefail
+#
+# POSIX sh, deliberately — no arrays, no `shopt`, no `set -o pipefail`. CI runs
+# this under dash, where `set -o pipefail` is an error, not a no-op. Keep it
+# portable: if you reach for a bashism here, change the shebang too, or CI will
+# fail on a line that works fine in your shell.
+set -eu
 
 EX_DIR="${EX_DIR:-docs/examples}"
 OUT_DIR="${OUT_DIR:-build/examples}"
@@ -21,45 +26,50 @@ command -v cyrius >/dev/null 2>&1 || {
 # Every `cyrius …` call re-resolves deps and races on cyrius.lock — serialize.
 LOCK="${CYRIUS_LOCKFILE:-${TMPDIR:-/tmp}/prani-build.lock}"
 cyr() {
-    if command -v flock >/dev/null 2>&1; then flock "$LOCK" cyrius "$@"; else cyrius "$@"; fi
+    if command -v flock >/dev/null 2>&1; then
+        flock "$LOCK" cyrius "$@"
+    else
+        cyrius "$@"
+    fi
 }
 
 mkdir -p "$OUT_DIR"
 
-shopt -s nullglob
-examples=("$EX_DIR"/*.cyr)
-shopt -u nullglob
-
-if [ ${#examples[@]} -eq 0 ]; then
-    echo "error: no examples found in $EX_DIR/ — 2.0.6 requires five." >&2
-    exit 1
-fi
-
+total=0
 fail=0
-for src in "${examples[@]}"; do
-    name="$(basename "$src" .cyr)"
+for src in "$EX_DIR"/*.cyr; do
+    # An unmatched glob expands to the literal pattern in POSIX sh (there is no
+    # nullglob), so skip anything that is not a real file rather than trying to
+    # build "docs/examples/*.cyr".
+    [ -f "$src" ] || continue
+    total=$((total + 1))
+
+    name=$(basename "$src" .cyr)
     bin="$OUT_DIR/$name"
     printf '── %s\n' "$name"
 
-    if ! cyr build "$src" "$bin" >"$OUT_DIR/$name.build.log" 2>&1; then
-        echo "   BUILD FAILED — $OUT_DIR/$name.build.log" >&2
-        sed 's/^/   /' "$OUT_DIR/$name.build.log" >&2
-        fail=1
-        continue
-    fi
-
-    if "$bin"; then
-        printf '   ok\n'
+    if cyr build "$src" "$bin" >"$OUT_DIR/$name.build.log" 2>&1; then
+        if "$bin"; then
+            printf '   ok\n'
+        else
+            rc=$?
+            echo "   RUN FAILED (exit $rc)" >&2
+            fail=$((fail + 1))
+        fi
     else
-        rc=$?
-        echo "   RUN FAILED (exit $rc)" >&2
-        fail=1
+        echo "   BUILD FAILED — see $OUT_DIR/$name.build.log" >&2
+        sed 's/^/   /' "$OUT_DIR/$name.build.log" >&2
+        fail=$((fail + 1))
     fi
 done
 
 echo
-if [ "$fail" -ne 0 ]; then
-    echo "examples: FAILED" >&2
+if [ "$total" -eq 0 ]; then
+    echo "error: no examples found in $EX_DIR/ — 2.0.6 requires five." >&2
     exit 1
 fi
-echo "examples: ${#examples[@]} built and ran clean"
+if [ "$fail" -ne 0 ]; then
+    echo "examples: $fail of $total FAILED" >&2
+    exit 1
+fi
+echo "examples: $total built and ran clean"
