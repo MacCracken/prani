@@ -5,7 +5,7 @@ description = "prani — creature & animal vocal synthesis (species vocal tracts
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/prani"
 language = "cyrius"
-cyrius = "6.5.36"
+cyrius = "6.6.3"
 
 [build]
 entry = "src/main.cyr"

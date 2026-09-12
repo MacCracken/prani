@@ -308,7 +308,6 @@ var pojstr_2 = str_data(str_builder_build(posb2));
 assert_eq(strlen(pojstr_2), strlen(pojstr), "json idempotent -- same length");
 assert_eq(memeq(pojstr, pojstr_2, strlen(pojstr)), 1, "json idempotent");
 
-
 # ================================================================
 # Input-range guards (2.0.5, audit finding F11). src/emotion.cyr clamps every
 # setter, and f64_clamp(NaN, lo, hi) -> NaN (measured, pinned in
@@ -555,7 +554,8 @@ assert_eq(emotion_select_intent(un), PRANI_ERR_INVALID_VOCALIZATION, "public sel
 assert_eq(emotion_evaluate(un), PRANI_ERR_INVALID_VOCALIZATION, "evaluate still rejects");
 # emotion_state_in_range is the single precondition the unchecked path rests on.
 assert_eq(emotion_state_in_range(un), 0, "state_in_range rejects the NaN state");
-assert_eq(emotion_state_in_range(emotion_with_values(T_NEG_1_0, T_0_0)), 1, "state_in_range accepts the -1.0/0.0 corner");
+assert_eq(emotion_state_in_range(emotion_with_values(T_NEG_1_0, T_0_0)), 1,
+  "state_in_range accepts the -1.0/0.0 corner");
 assert_eq(emotion_state_in_range(emotion_with_values(T_1_0, T_1_0)), 1, "state_in_range accepts the 1.0/1.0 corner");
 
 var rc = assert_summary();

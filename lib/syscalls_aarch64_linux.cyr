@@ -176,7 +176,7 @@ enum SysNr {
 
     # Mount + sync + reboot
     SYS_MOUNT = 40;
-    SYS_UMOUNT2 = 39;
+    SYS_UMOUNT2 = 1039;         # v6.5.37: private alias — native 39 is eaten by x86 getpid(39)->172
     SYS_SYNC = 81;
     SYS_REBOOT = 142;
     SYS_UNAME = 160;
@@ -192,7 +192,7 @@ enum SysNr {
     # Epoll
     SYS_EPOLL_CREATE1 = 20;
     SYS_EPOLL_CTL = 21;
-    SYS_EPOLL_PWAIT = 22;   # → sys_epoll_wait (NULL sigmask)
+    SYS_EPOLL_PWAIT = 1022; # v6.5.37: private alias — native 22 is eaten by x86 pipe(22)->59
 
     # Timers + waitid
     SYS_TIMERFD_CREATE = 85;
@@ -824,5 +824,51 @@ fn sys_kqueue(): i64 {
 # Register changes and/or collect events on a kqueue. Returns the event count, or < 0.
 fn sys_kevent(kq, changelist, nchanges, eventlist, nevents, timeout): i64 {
     return syscall(1363, kq, changelist, nchanges, eventlist, nevents, timeout);
+}
+#endif
+
+# ── v6.5.43 (band J phase 1) — Darwin CONCURRENCY primitives, arm64-macOS ONLY.
+#
+# macOS has neither clone nor futex. Real threading is `bsdthread_*` and blocking is
+# `__ulock_*`; none of the five was routed on either Mach-O backend before this release, which
+# is why `lib/thread_macos.cyr` runs bodies INLINE and `lib/sync_macos.cyr` is a bare
+# `atomic_cas` spinlock with no kernel wait.
+#
+# ⚠ SAME SHARED-FILE TRAP as kqueue above: `lib/syscalls.cyr` selects THIS file for
+# aarch64-LINUX *and* arm64-macOS, so every one is `#ifdef CYRIUS_TARGET_MACOS`-guarded and
+# real aarch64-Linux — which has futex and clone — is untouched.
+#
+# ⚠ ARITIES ARE FROM DARWIN'S `syscalls.master`, and phase 2 is what CONFIRMS them by
+# execution. `bsdthread_register` takes 6 args in older SDKs and 7 in newer ones (a trailing
+# `tsd_offset`); the 6-arg form is used here because cyrius `syscall()` carries at most 6 and
+# the 7th is optional in practice. If phase 2 finds otherwise on real ecb, this is the line to
+# change — recorded so that is a one-line correction rather than a re-investigation.
+#
+# ⛔ THESE DO NOT MAKE A THREAD ON THEIR OWN. `bsdthread_register` must run before
+# `bsdthread_create`, and the created thread enters the REGISTERED TRAMPOLINE with a
+# Darwin-specific register layout — not the user fn. That is phase 2 (`.44`).
+#ifdef CYRIUS_TARGET_MACOS
+# Register the thread-start and workqueue trampolines. MUST be called once, before any
+# bsdthread_create. Returns 0 on success.
+fn sys_bsdthread_register(threadstart, wqthread, flags, stack_addr_hint, targetconc, dq_offset): i64 {
+    return syscall(1366, threadstart, wqthread, flags, stack_addr_hint, targetconc, dq_offset);
+}
+# Create a thread that begins in the REGISTERED trampoline (not `func`). Returns the new
+# thread's port/pointer, or < 0.
+fn sys_bsdthread_create(func, func_arg, stack_addr, pthread, flags): i64 {
+    return syscall(1360, func, func_arg, stack_addr, pthread, flags);
+}
+# Terminate the calling thread and free its stack. Does not return on success.
+fn sys_bsdthread_terminate(stackaddr, freesize, port, sem): i64 {
+    return syscall(1361, stackaddr, freesize, port, sem);
+}
+# Block until *addr changes from `value`. `operation` selects the ulock class
+# (UL_COMPARE_AND_WAIT = 1). `timeout` is microseconds; 0 means wait forever.
+fn sys_ulock_wait(operation, addr, value, timeout_us): i64 {
+    return syscall(1515, operation, addr, value, timeout_us);
+}
+# Wake a thread blocked in __ulock_wait on `addr`. ULF_WAKE_ALL = 0x100 in `operation`.
+fn sys_ulock_wake(operation, addr, wake_value): i64 {
+    return syscall(1516, operation, addr, wake_value);
 }
 #endif

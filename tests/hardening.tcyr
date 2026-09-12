@@ -389,18 +389,20 @@ assert_eq(t_all_finite_h(hchor), 1, "control: and the mix is finite");
 # ================================================================
 test_group("deserializers reject out-of-range fields, not just malformed JSON");
 assert_eq(prani_is_err(crvoice_from_json_str(
-  "{\"species\":0,\"f0_offset\":0,\"size_scale\":0,\"vocal_effort\":4602678819172646912,\"params\":{}}")), 1,
+      "{\"species\":0,\"f0_offset\":0,\"size_scale\":0,\"vocal_effort\":4602678819172646912,\"params\":{}}")), 1,
   "size_scale 0 rejected (it divides in effective_f0)");
-assert_eq(prani_is_err(crvoice_from_json_str(
-  "{\"species\":99,\"f0_offset\":0,\"size_scale\":4607182418800017408,\"vocal_effort\":4602678819172646912,\"params\":{}}")), 1,
+var hj = str_builder_new();
+str_builder_add_cstr(hj, "{\"species\":99,\"f0_offset\":0,\"size_scale\":4607182418800017408,");
+str_builder_add_cstr(hj, "\"vocal_effort\":4602678819172646912,\"params\":{}}");
+assert_eq(prani_is_err(crvoice_from_json_str(str_data(str_builder_build(hj)))), 1,
   "out-of-range species rejected");
 # CONTROL: prani's OWN serialized output must still round-trip -- the guards are
 # only allowed to reject documents prani did not write.
 var hser = crvoice_new(PRANI_SP_WOLF);
-var hsb = str_builder_new();
-crvoice_to_json(hser, hsb);
-var hjson = str_data(str_builder_build(hsb));
-var hback = crvoice_from_json_str(hjson);
+var hsb2 = str_builder_new();
+crvoice_to_json(hser, hsb2);
+var hjson2 = str_data(str_builder_build(hsb2));
+var hback = crvoice_from_json_str(hjson2);
 assert_eq(prani_is_err(hback), 0, "control: prani's own to_json output still deserializes");
 assert_eq(CreatureVoice_species(hback), PRANI_SP_WOLF, "control: and round-trips its species");
 

@@ -74,6 +74,7 @@ fn bench_probe_ok(handle, label) {
     return 1;
 }
 
+# Bench entry point — runs every benchmark in this file.
 fn main() {
     alloc_init();
 
@@ -217,7 +218,8 @@ fn main() {
     # N = 20 (15.244 ms measured -> ~0.30 s). Alarm's duration_scale changes the rendered length; that is the
     # oracle's behaviour too, so the number is comparable as-is.
     var v08 = crvoice_new(PRANI_SP_WOLF);
-    ok = ok + bench_probe_ok(crvoice_vocalize_with_intent(v08, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, rate, one), "wolf_alarm_howl_1s");
+    ok = ok + bench_probe_ok(crvoice_vocalize_with_intent(v08, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, rate, one),
+      "wolf_alarm_howl_1s");
     var b08 = bench_new("wolf_alarm_howl_1s");
     bench_batch_start(b08);
     var n08 = 0;

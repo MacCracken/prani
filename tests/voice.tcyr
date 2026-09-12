@@ -59,8 +59,10 @@ var T_30_0      = 0x403e000000000000;   # 30.0  ambient at/below Lombard baselin
 var T_LOMBARD_60 = 0x3fb999999999999a;  # (60-40)*0.005 = 0.1 lombard boost @ 60 dB
 var T_EFF_06    = 0x3fe3333333333333;   # 0.5 + 0.1 = 0.6 effort after lombard @ 60 dB (start 0.5)
 var T_1E_3      = 0x3f50624dd2f1a9fc;   # 0.001   oracle audibility floor (2.0.3:rust-old/tests/integration.rs:12)
-var T_1E_4      = 0x3f1a36e2eb1c432d;   # 0.0001  oracle cat-purr audibility floor (2.0.3:rust-old/tests/integration.rs:367)
-var T_0_01      = 0x3f847ae147ae147b;   # 0.01    oracle subharmonic audibility floor (2.0.3:rust-old/tests/integration.rs:390)
+# 0.0001  oracle cat-purr audibility floor (2.0.3:rust-old/tests/integration.rs:367)
+var T_1E_4      = 0x3f1a36e2eb1c432d;
+# 0.01    oracle subharmonic audibility floor (2.0.3:rust-old/tests/integration.rs:390)
+var T_0_01      = 0x3f847ae147ae147b;
 var T_1_5       = 0x3ff8000000000000;   # 1.5   screech / chirp spectral offset
 var T_NEG_1     = 0xbff0000000000000;   # -1.0  roar spectral offset
 var T_0_45      = 0x3fdccccccccccccd;   # 0.45  dog effective_tract_scale @ size 0.5 (0.9 * 0.5)
@@ -241,7 +243,8 @@ assert_eq(crvoice_effective_f0(dog_l), f64_from(150), "dog @ size 2.0 -> 300/2 =
 assert_eq(f64_gt(crvoice_effective_f0(dog_s), crvoice_effective_f0(dog_l)), 1, "smaller dog -> higher effective_f0");
 assert_eq(crvoice_effective_tract_scale(dog_s), T_0_45, "dog tract_scale @ size 0.5 == 0.45");
 assert_eq(crvoice_effective_tract_scale(dog_l), T_1_8, "dog tract_scale @ size 2.0 == 1.8");
-assert_eq(f64_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_scale(dog_l)), 1, "smaller dog -> shorter tract");
+assert_eq(f64_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_scale(dog_l)), 1,
+  "smaller dog -> shorter tract");
 
 # ================================================================
 # Ports test_dragon_individual_variation (2.0.3:rust-old/tests/integration.rs:342-354).
@@ -250,7 +253,8 @@ assert_eq(f64_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_s
 test_group("individual variation -- Dragon size ordering (f0_min clamp)");
 var dr_small = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), T_0_5);
 var dr_large = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), f64_from(3));
-assert_eq(CreatureVoice_f0_offset(dr_small), CreatureVoice_f0_offset(dr_large), "both dragons share one f0_offset (size isolated)");
+assert_eq(CreatureVoice_f0_offset(dr_small), CreatureVoice_f0_offset(dr_large),
+  "both dragons share one f0_offset (size isolated)");
 assert_eq(crvoice_effective_f0(dr_small), f64_from(140), "dragon @ size 0.5 -> 70/0.5 = 140");
 assert_eq(crvoice_effective_f0(dr_large), f64_from(30), "dragon @ size 3.0 -> 23.33 clamps up to f0_min 30");
 assert_lt(crvoice_effective_f0(dr_large), crvoice_effective_f0(dr_small), "bigger dragon has the lower f0");
@@ -497,7 +501,8 @@ assert_eq(f64_gt(t_max_abs(cw_out), T_1E_3), 1, "crow screech audible (max |s| >
 # Raptor screech (syringeal, f0 2500 -> the dual-source above-2000 branch, and
 # the screech contour sweeps 1.5x..0.7x ACROSS the 2000 Hz boundary mid-call).
 # Ports test_raptor_screech (2.0.3:rust-old/tests/integration.rs:332-340).
-assert_eq(crvoice_effective_f0(crvoice_new(PRANI_SP_RAPTOR)), f64_from(2500), "raptor effective_f0 == 2500 (dual-source precondition)");
+assert_eq(crvoice_effective_f0(crvoice_new(PRANI_SP_RAPTOR)), f64_from(2500),
+  "raptor effective_f0 == 2500 (dual-source precondition)");
 var rp_out = crvoice_vocalize(crvoice_new(PRANI_SP_RAPTOR), PRANI_VOC_SCREECH, T_SR, T_DUR_005);
 assert_eq(prani_is_err(rp_out), 0, "raptor screech non-error");
 assert_eq(vec_len(rp_out), 2205, "raptor screech length == 2205");
@@ -559,7 +564,8 @@ var c_ramp = t_energy_range(c_long, 3528, 3675);
 var c_flat = t_energy_range(c_long, 3675, 3822);
 assert_eq(f64_gt(c_ramp, 0), 1, "syllable ramp window is not silent (control)");
 assert_eq(f64_gt(c_flat, c_ramp), 1, "syllable plateau carries more energy than the ramp");
-assert_eq(f64_gt(c_flat, f64_mul(c_ramp, T_1_5)), 1, "plateau energy > 1.5x ramp energy (hand bar; mean env^2 1 vs ~1/3)");
+assert_eq(f64_gt(c_flat, f64_mul(c_ramp, T_1_5)), 1,
+  "plateau energy > 1.5x ramp energy (hand bar; mean env^2 1 vs ~1/3)");
 # The oracle's own bar, kept verbatim for parity (it passes on the syllable ramps
 # and carrier zero crossings, not on inter-chirp silence -- see the caveat above).
 assert_gt(t_count_below(c_long, T_1E_3, 0, 8820), 10, "cricket call has near-silent samples (oracle bar)");
@@ -643,7 +649,8 @@ assert_eq(sp_finite, PRANI_SP_COUNT, "all 13 species produce all-finite output")
 assert_eq(sp_audible, PRANI_SP_COUNT, "all 13 species produce audible output (max |s| > 0.001)");
 # Pin the ladder's own dispatch so a wrong support matrix cannot quietly reroute
 # a species onto a different vocalization and still count as 13 successes.
-assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_GROWL), 0, "cricket cannot growl (ladder falls through)");
+assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_GROWL), 0,
+  "cricket cannot growl (ladder falls through)");
 assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_GROWL), 0, "bee cannot growl (ladder falls through)");
 assert_eq(species_supports_vocalization(PRANI_SP_CRICKET, PRANI_VOC_CHIRP), 1, "cricket chirps");
 assert_eq(species_supports_vocalization(PRANI_SP_BEE, PRANI_VOC_CHIRP), 1, "bee chirps");
@@ -715,7 +722,8 @@ assert_eq(f64_gt(t_max_abs(crt_out), T_0_01), 1, "crocodilian rumble audible (ma
 # 0.3 -> 1.5, so the oracle's bar is a 2x ENERGY floor, not a bare inequality.
 test_group("vocal effort -- shout is much louder than whisper");
 var wsp = crvoice_vocalize(crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), 0), PRANI_VOC_HOWL, T_SR, T_DUR_005);
-var sht = crvoice_vocalize(crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), T_1_0), PRANI_VOC_HOWL, T_SR, T_DUR_005);
+var sht = crvoice_vocalize(crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), T_1_0), PRANI_VOC_HOWL, T_SR,
+  T_DUR_005);
 assert_eq(prani_is_err(wsp), 0, "whisper (effort 0.0) non-error");
 assert_eq(prani_is_err(sht), 0, "shout (effort 1.0) non-error");
 assert_eq(t_all_finite(wsp), 1, "whisper all finite");
@@ -753,7 +761,8 @@ var vv = crvoice_new(PRANI_SP_WOLF);
 var br_before = SpeciesParams_breathiness(CreatureVoice_params(vv));
 var _vv = crvoice_with_vocal_effort(vv, T_1_0);   # extreme effort -> breathiness_delta 0.15 (in-place, same ptr)
 crvoice_vocalize(vv, PRANI_VOC_HOWL, T_SR, T_DUR_003);
-assert_eq(SpeciesParams_breathiness(CreatureVoice_params(vv)), br_before, "voice params breathiness unchanged after vocalize");
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(vv)), br_before,
+  "voice params breathiness unchanged after vocalize");
 
 # ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
@@ -777,16 +786,20 @@ assert_eq(CreatureVoice_f0_offset(v2), CreatureVoice_f0_offset(vser), "f0_offset
 assert_eq(CreatureVoice_f0_offset(v2), f64_from(50), "f0_offset is the non-default 50, not a dropped-key 0");
 assert_eq(CreatureVoice_size_scale(v2), CreatureVoice_size_scale(vser), "size_scale (1.2) roundtrips");
 assert_eq(CreatureVoice_vocal_effort(v2), CreatureVoice_vocal_effort(vser), "vocal_effort (0.7) roundtrips");
-assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v2)), 0x3FC3333333333333, "nested params breathiness override (0.15) roundtrips");
-assert_eq(SpeciesParams_resonance_seed(CreatureVoice_params(v2)), PR_SEED_WOLF, "nested params resonance_seed roundtrips");
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v2)), 0x3FC3333333333333,
+  "nested params breathiness override (0.15) roundtrips");
+assert_eq(SpeciesParams_resonance_seed(CreatureVoice_params(v2)), PR_SEED_WOLF,
+  "nested params resonance_seed roundtrips");
 # The oracle's own two roundtrip assertions (2.0.3:rust-old/tests/integration.rs:156-158)
 # read the DERIVED quantities off the deserialized voice, which pull in f0_default,
 # f0_min/f0_max (the clamp) and tract_scale -- fields no direct assertion covers.
 # (400 + 50) / 1.2 = 375, clamp[150,1200] -> 375; 1.2 * 1.2 = 1.44.
 assert_eq(crvoice_effective_f0(v2), crvoice_effective_f0(vser), "effective_f0 survives the roundtrip");
 assert_eq(crvoice_effective_f0(v2), f64_from(375), "deserialized effective_f0 == 375 (hand-computed)");
-assert_eq(crvoice_effective_tract_scale(v2), crvoice_effective_tract_scale(vser), "effective_tract_scale survives the roundtrip");
-assert_eq(crvoice_effective_tract_scale(v2), 0x3ff70a3d70a3d70a, "deserialized effective_tract_scale == 1.44 (hand-computed)");
+assert_eq(crvoice_effective_tract_scale(v2), crvoice_effective_tract_scale(vser),
+  "effective_tract_scale survives the roundtrip");
+assert_eq(crvoice_effective_tract_scale(v2), 0x3ff70a3d70a3d70a,
+  "deserialized effective_tract_scale == 1.44 (hand-computed)");
 var vsb2 = str_builder_new();
 crvoice_to_json(v2, vsb2);
 # length first: memeq over strlen() is a PREFIX compare, so a re-serialization
@@ -809,11 +822,14 @@ test_group("2.0.5 guards -- vocalization / intent tags out of range");
 # enum -> int erasure.
 var gv = crvoice_new(PRANI_SP_WOLF);
 assert_eq(crvoice_vocalize(gv, f64_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag -1 rejected");
-assert_eq(crvoice_vocalize(gv, PRANI_VOC_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag == PRANI_VOC_COUNT rejected");
-assert_eq(crvoice_vocalize(gv, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag 99 rejected (was a 2205-sample success)");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+  "voc tag == PRANI_VOC_COUNT rejected");
+assert_eq(crvoice_vocalize(gv, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+  "voc tag 99 rejected (was a 2205-sample success)");
 assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, f64_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "intent tag -1 rejected");
-assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, PRANI_INTENT_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, PRANI_INTENT_COUNT, T_SR, T_DUR_005),
+  PRANI_ERR_INVALID_VOCALIZATION,
   "intent tag == PRANI_INTENT_COUNT rejected");
 assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "intent tag 99 rejected (was a 2205-sample success)");
@@ -827,12 +843,14 @@ assert_eq(prani_is_err(g_soc), 0, "intent tag PRANI_INTENT_COUNT-1 (SOCIAL) stil
 
 # ================================================================
 test_group("2.0.5 guards -- sample_rate finite and > 0");
-assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_NAN, T_DUR_005), PRANI_ERR_INVALID_TRACT, "NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_NAN, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, PRANI_POS_INF, T_DUR_005), PRANI_ERR_INVALID_TRACT,
   "+inf sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, PRANI_NEG_INF, T_DUR_005), PRANI_ERR_INVALID_TRACT,
   "-inf sample_rate -> PRANI_ERR_INVALID_TRACT");
-assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, 0, T_DUR_005), PRANI_ERR_INVALID_TRACT, "sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, 0, T_DUR_005), PRANI_ERR_INVALID_TRACT,
+  "sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, f64_neg(T_SR), T_DUR_005), PRANI_ERR_INVALID_TRACT,
   "negative sample_rate -> PRANI_ERR_INVALID_TRACT");
 # CONTROL, and the reason the guard is `> 0` and not a threshold: ADR-0001 leaves
@@ -869,7 +887,8 @@ assert_eq(vec_len(g_z), 0, "duration 0 still yields an empty buffer");
 # on a Songbird produced a full 2205-sample ALL-NaN buffer returned as SUCCESS.
 test_group("2.0.5 guards -- a NaN smuggled through a builder is reported");
 var g_bird = crvoice_with_size(crvoice_new(PRANI_SP_SONGBIRD), T_NAN);
-assert_eq(prani_is_finite(crvoice_effective_f0(g_bird)), 0, "NaN size_scale makes effective_f0 non-finite (the precondition)");
+assert_eq(prani_is_finite(crvoice_effective_f0(g_bird)), 0,
+  "NaN size_scale makes effective_f0 non-finite (the precondition)");
 assert_eq(crvoice_vocalize(g_bird, PRANI_VOC_TRILL, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
   "songbird with_size(NaN) -> PRANI_ERR_INVALID_TRACT (was an ALL-NaN success)");
 var g_cri = crvoice_with_size(crvoice_new(PRANI_SP_CRICKET), T_NAN);
@@ -921,7 +940,8 @@ assert_eq(crvoice_synthesize_cat_purr(g_cat, T_SR, (0 - 1), g_mods), PRANI_ERR_I
   "cat purr num_samples -1 -> PRANI_ERR_INVALID_VOCALIZATION");
 # size_scale DIVIDES 27.0 to make purr_f0, and f64_clamp(NaN, 20, 35) is NaN --
 # the [20,35] rails do not catch it.
-assert_eq(crvoice_synthesize_cat_purr(crvoice_with_size(crvoice_new(PRANI_SP_CAT), T_NAN), T_SR, 100, g_mods), PRANI_ERR_INVALID_SPECIES,
+assert_eq(crvoice_synthesize_cat_purr(crvoice_with_size(crvoice_new(PRANI_SP_CAT), T_NAN), T_SR, 100, g_mods),
+  PRANI_ERR_INVALID_SPECIES,
   "cat purr NaN size_scale -> PRANI_ERR_INVALID_SPECIES");
 # CONTROLS: num_samples 0 is VALID (empty buffer, same rule as duration 0).
 var g_p0 = crvoice_synthesize_cat_purr(g_cat, T_SR, 0, g_mods);
@@ -942,7 +962,8 @@ assert_eq(t_all_finite(g_p100), 1, "cat purr 100 samples all finite");
 # divides by.
 test_group("2.0.5 -- apply_nasal_antiformant: fraction > 1.0 no longer aborts");
 var g_nb = t_const_buf(100, T_1_0);
-assert_eq(crvoice_apply_nasal_antiformant(g_nb, T_SR, T_2_0), 0, "fraction 2.0 on a 100-sample buffer returns 0 (was: process abort)");
+assert_eq(crvoice_apply_nasal_antiformant(g_nb, T_SR, T_2_0), 0,
+  "fraction 2.0 on a 100-sample buffer returns 0 (was: process abort)");
 assert_eq(vec_len(g_nb), 100, "fraction 2.0 leaves the buffer length alone");
 assert_eq(t_all_finite(g_nb), 1, "fraction 2.0 leaves every sample finite");
 assert_neq(vec_get(g_nb, 99), T_1_0, "fraction 2.0 filters the LAST sample too -- .take() parity, not a silent no-op");
@@ -993,26 +1014,32 @@ assert_eq(t_all_finite(g_am), 1, "trill AM at 44100 leaves the buffer finite");
 # crvoice_effective_f0 divide by zero, which is the exact hazard ADR-0002 named
 # and deferred.
 test_group("2.0.5 -- from_json_str rejects out-of-range fields");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_0_5))), 0, "CONTROL: an in-range hand-built document is accepted");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_0_5))), 0,
+  "CONTROL: an in-range hand-built document is accepted");
 assert_eq(crvoice_from_json_str("{\"species\":99}"), PRANI_ERR_INVALID_SPECIES, "species 99 rejected");
 assert_eq(crvoice_from_json_str("{\"species\":-1}"), PRANI_ERR_INVALID_SPECIES, "species -1 rejected");
 assert_eq(crvoice_from_json_str("{\"species\":13}"), PRANI_ERR_INVALID_SPECIES, "species == PRANI_SP_COUNT rejected");
-assert_eq(crvoice_from_json_str("{\"species\":0}"), PRANI_ERR_INVALID_SPECIES, "a document with NO params object is rejected");
+assert_eq(crvoice_from_json_str("{\"species\":0}"), PRANI_ERR_INVALID_SPECIES,
+  "a document with NO params object is rejected");
 # size_scale -- with_size's [0.1, 10.0].
 assert_eq(crvoice_from_json_str(t_wolf_json(0, 0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
   "size_scale 0.0 rejected (ADR-0002's divide-by-zero)");
 assert_eq(crvoice_from_json_str(t_wolf_json(0, T_NAN, T_0_5)), PRANI_ERR_INVALID_SPECIES, "size_scale NaN rejected");
 assert_eq(crvoice_from_json_str(t_wolf_json(0, f64_from(100), T_0_5)), PRANI_ERR_INVALID_SPECIES,
   "size_scale 100.0 rejected (above with_size's ceiling)");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_0_1, T_0_5))), 0, "size_scale 0.1 accepted (with_size's floor, inclusive)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_0_1, T_0_5))), 0,
+  "size_scale 0.1 accepted (with_size's floor, inclusive)");
 assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, f64_from(10), T_0_5))), 0,
   "size_scale 10.0 accepted (with_size's ceiling, inclusive)");
 # vocal_effort -- with_vocal_effort's [0, 1].
 assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_2)), PRANI_ERR_INVALID_SPECIES, "vocal_effort 1.2 rejected");
-assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, f64_neg(T_1_0))), PRANI_ERR_INVALID_SPECIES, "vocal_effort -1.0 rejected");
+assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, f64_neg(T_1_0))), PRANI_ERR_INVALID_SPECIES,
+  "vocal_effort -1.0 rejected");
 assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_NAN)), PRANI_ERR_INVALID_SPECIES, "vocal_effort NaN rejected");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, 0))), 0, "vocal_effort 0.0 accepted (inclusive floor)");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_0))), 0, "vocal_effort 1.0 accepted (inclusive ceiling)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, 0))), 0,
+  "vocal_effort 0.0 accepted (inclusive floor)");
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_0))), 0,
+  "vocal_effort 1.0 accepted (inclusive ceiling)");
 # f0_offset -- with_f0_offset's +/-(f0_max - f0_min); Wolf is 1200 - 150 = 1050.
 assert_eq(crvoice_from_json_str(t_wolf_json(f64_from(5000), T_1_0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
   "f0_offset 5000 rejected (Wolf range is 1050)");
@@ -1071,7 +1098,8 @@ assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_
 # Snake's row is f0_min == f0_max == f0_default == 0.0 -- the degenerate case
 # ADR-0002 named, and a LEGITIMATE species row (noise-only, no f0). It must pass,
 # which is why the f0 fields are non-negative rather than positive.
-assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_SNAKE, 0, T_1_0, T_0_5, species_params(PRANI_SP_SNAKE)))), 0,
+assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_SNAKE, 0, T_1_0, T_0_5,
+        species_params(PRANI_SP_SNAKE)))), 0,
   "Snake's 0/0/0 f0 row is accepted (noise-only, legitimately f0-less)");
 
 # ================================================================

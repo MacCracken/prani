@@ -67,6 +67,20 @@ var F64_PI2_SL        = 0xBE4D_DE97_4000_0000;   # split-lo of π/2 hi word
 # Then exp(x) = 2^n * exp(r). 2^n via integer exponent bit-pack.
 # exp(r) via 7th-order Horner polynomial.
 fn _f64_exp_polyfill(x): i64 {
+    # ⛔ ±inf MUST be handled BEFORE the range reduction, and there are TWO independent
+    # reasons — patching only the subtraction would still be wrong.
+    #   1. The reduction computes `x - round(x*log2e)*ln2`, i.e. inf - inf = NaN, and every
+    #      Horner term downstream inherits it.
+    #   2. The 2^n bit-pack reads `f64_to(inf)`, which SATURATES to i64::MIN, so
+    #      `(n_int + 1023) << 52` is not an exponent at all.
+    # C and IEEE-754: exp(+inf) = +inf, exp(-inf) = +0. NaN needs no guard — it propagates
+    # correctly through the reduction on its own. Filed 2026-09-08 from ganita's P(-1) audit,
+    # where sinh(+inf)/cosh(±inf) came back NaN and the consumer could not tell whose bug it
+    # was. CHANGELOG [6.6.1].
+    if ((x & 0x7FFFFFFFFFFFFFFF) == 0x7FF0000000000000) {
+        if (((x >> 63) & 1) == 1) { return 0; }        # exp(-inf) = +0
+        return 0x7FF0000000000000;                      # exp(+inf) = +inf
+    }
     var LOG2E = 0x3FF71547652B82FE;     # 1/ln(2) ≈ 1.4426950408889634
     var LN2   = 0x3FE62E42FEFA39EF;     # ln(2)   ≈ 0.6931471805599453
 
@@ -322,6 +336,13 @@ fn _f64_cos_polyfill(x): i64 {
 # the same 11-term Taylor as _f64_exp_polyfill applies; 2^n via exponent
 # bit-pack. Accuracy matches the exp polyfill (~3e-13 worst-case over [-50,50]).
 fn _f64_exp2_polyfill(x): i64 {
+    # ±inf, same two reasons as _f64_exp_polyfill above: `x - round(x)` is inf - inf, and the
+    # 2^n pack reads a saturated f64_to(inf). exp2 has the SAME limits as exp — exp2(+inf) is
+    # +inf, exp2(-inf) is +0. CHANGELOG [6.6.1].
+    if ((x & 0x7FFFFFFFFFFFFFFF) == 0x7FF0000000000000) {
+        if (((x >> 63) & 1) == 1) { return 0; }
+        return 0x7FF0000000000000;
+    }
     var LN2 = 0x3FE62E42FEFA39EF;                 # ln(2) ≈ 0.6931471805599453
 
     # Range reduction: n = round(x), f = x − n, r = f·ln2 (|r| ≤ ln2/2).

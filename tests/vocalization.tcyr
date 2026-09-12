@@ -109,10 +109,14 @@ assert_eq(IntentModifiers_urgency(social), PR_F_0_3, "social urgency 0.3");
 #   amplitude 0.5 idle     < 0.8 social
 # ================================================================
 test_group("intent modifiers -- cross-intent superlatives are real orderings");
-assert_eq(f64_gt(IntentModifiers_duration_scale(mating), IntentModifiers_duration_scale(terr)), 1, "mating is longest: 2.0 > territorial 1.5");
-assert_eq(f64_gt(IntentModifiers_urgency(distress), IntentModifiers_urgency(a)), 1, "distress is most urgent: 1.0 > alarm 0.9");
-assert_eq(f64_lt(IntentModifiers_pitch_scale(threat), IntentModifiers_pitch_scale(terr)), 1, "threat is lowest-pitched: 0.7 < territorial 0.9");
-assert_eq(f64_lt(IntentModifiers_amplitude_scale(idle), IntentModifiers_amplitude_scale(social)), 1, "idle is quietest: 0.5 < social 0.8");
+assert_eq(f64_gt(IntentModifiers_duration_scale(mating), IntentModifiers_duration_scale(terr)), 1,
+  "mating is longest: 2.0 > territorial 1.5");
+assert_eq(f64_gt(IntentModifiers_urgency(distress), IntentModifiers_urgency(a)), 1,
+  "distress is most urgent: 1.0 > alarm 0.9");
+assert_eq(f64_lt(IntentModifiers_pitch_scale(threat), IntentModifiers_pitch_scale(terr)), 1,
+  "threat is lowest-pitched: 0.7 < territorial 0.9");
+assert_eq(f64_lt(IntentModifiers_amplitude_scale(idle), IntentModifiers_amplitude_scale(social)), 1,
+  "idle is quietest: 0.5 < social 0.8");
 
 # ================================================================
 # Controls for t_mods_same, WITHOUT which the distinctness loop below is
@@ -122,10 +126,14 @@ assert_eq(f64_lt(IntentModifiers_amplitude_scale(idle), IntentModifiers_amplitud
 # ================================================================
 test_group("distinctness helper controls");
 assert_eq(t_mods_same(a, prani_intent_modifiers(PRANI_INTENT_ALARM)), 1, "control: two Alarm lookups compare same");
-assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_5, PR_F_1_5, PR_F_0_7, PR_F_0_9)), 0, "control: pitch_scale-only difference detected");
-assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_4, PR_F_0_7, PR_F_0_9)), 0, "control: amplitude_scale-only difference detected");
-assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_8, PR_F_0_9)), 0, "control: duration_scale-only difference detected");
-assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_7, PR_F_0_8)), 0, "control: urgency-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_5, PR_F_1_5, PR_F_0_7, PR_F_0_9)), 0,
+  "control: pitch_scale-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_4, PR_F_0_7, PR_F_0_9)), 0,
+  "control: amplitude_scale-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_8, PR_F_0_9)), 0,
+  "control: duration_scale-only difference detected");
+assert_eq(t_mods_same(a, prani_intent_modifiers_make(PR_F_1_4, PR_F_1_5, PR_F_0_7, PR_F_0_8)), 0,
+  "control: urgency-only difference detected");
 
 # ================================================================
 # test_all_intents_modify_differently (2.0.3:rust-old/tests/integration.rs:297-320).
@@ -193,7 +201,8 @@ IntentModifiers_to_json(mser, sb);
 var jstr = str_data(str_builder_build(sb));
 var m2 = IntentModifiers_from_json_str(jstr);
 assert_eq(IntentModifiers_pitch_scale(m2), IntentModifiers_pitch_scale(mser), "pitch_scale roundtrips (1.4 exact)");
-assert_eq(IntentModifiers_amplitude_scale(m2), IntentModifiers_amplitude_scale(mser), "amplitude_scale roundtrips (1.5 exact)");
+assert_eq(IntentModifiers_amplitude_scale(m2), IntentModifiers_amplitude_scale(mser),
+  "amplitude_scale roundtrips (1.5 exact)");
 # 0.7 is 1 ULP off after 6-digit decimal serialization -> assert within 1e-6.
 var ddiff = f64_abs(f64_sub(IntentModifiers_duration_scale(m2), IntentModifiers_duration_scale(mser)));
 assert_eq(f64_lt(ddiff, 0x3EB0C6F7A0B5ED8D), 1, "duration_scale roundtrips (0.7 within 1e-6)");

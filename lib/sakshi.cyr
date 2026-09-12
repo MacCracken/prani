@@ -1,5 +1,5 @@
 # sakshi.cyr — tracing, error handling, and structured logging for Cyrius
-# Bundled distribution of sakshi v2.4.12
+# Bundled distribution of sakshi v2.5.2
 # Source: https://github.com/MacCracken/sakshi
 # License: GPL-3.0-only
 #
@@ -127,6 +127,13 @@ var _sk_tsc_freq_hz: i64 = 0;
 # Q32 fixed-point ns-per-tick scale (set in step 3).
 var _sk_tsc_scale: i64 = 0;
 
+# Set once _sk_clock_init has RUN, whether or not it managed to calibrate.
+# Distinct from _sk_tsc_freq_hz on purpose: init used to gate on the frequency
+# being non-zero while _sk_now_ns gated on the SCALE being non-zero, so a host
+# where calibration failed left both at 0 and every single _sk_now_ns re-entered
+# the full 10 ms nanosleep window. One flag, one meaning: "we already tried".
+var _sk_clock_init_done: i64 = 0;
+
 # Read the cycle counter. Returns raw ticks; convert with _sk_ticks_to_ns.
 fn _sk_now_ticks(): i64 {
     var ticks: i64 = 0;
@@ -193,17 +200,38 @@ fn _sk_clock_panic(msg, len): i64 {
     return 0;
 }
 
-# clock_gettime(MONOTONIC_RAW) wrapper used only at calibration time.
-# Inlines the same syscall the v2.1.x _sk_now_ns used so the calibration
-# anchor is in the same time base as a non-cycle-counter implementation.
+# Monotonic reference clock. NOT calibration-only, despite what this comment
+# said before 2.5.0: it is the entire clock on AGNOS (which skips the TSC), and
+# since 2.5.0 it is also the fallback _sk_now_ns uses on any target whose
+# calibration failed. Per-target contract differs — Linux fills the timespec,
+# macOS and Windows return the value in the return register — so read the
+# branches below before adding a caller.
 fn _sk_clock_now_ns_raw(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # agnos: uptime_ms (#40) → monotonic ms since boot (in rax) ×1e6 = ns. #228
-    # (clock_gettime) is out of agnos's frozen syscall range — #40 is the only
-    # monotonic source. Literal #40 (a `var` would defeat const-fold; agnos has
-    # no reroute for it). Mirrors chrono.cyr's agnos clock. Coarse (~10 ms at the
-    # 100 Hz tick) but correct — see _sk_now_ns for why agnos skips the TSC.
-    return syscall(40) * 1000000;
+    # agnos: uptime_us (#95) FIRST, uptime_ms (#40) only as a fallback.
+    #
+    # #40 was the sole source here until 2.5.1, and it is the WRONG one for a
+    # library. AGNOS's own userland ABI (docs/development/agnos-userland-abi.md,
+    # row 95) is explicit: a foreground `run` program starts with IF cleared —
+    # only /bin/agnsh gets IF=1 — so the 100 Hz timer ISR never fires and #40 is
+    # FROZEN for that program's entire duration. sakshi is linked into exactly
+    # such programs, so every event carried an identical timestamp and every
+    # sakshi_span_exit computed elapsed = 0. The AGNOS note records that this
+    # cost two iron burns on the 3D arc before it was understood.
+    #
+    # #95 is rdtsc-backed and calibrated at boot against the live tick, so it
+    # needs no interrupts, and it is microsecond rather than 10 ms granular.
+    # It returns -1 (never a plausible 0) when calibration was refused, which is
+    # what makes the fallback below safe to distinguish.
+    #
+    # Both numbers MUST be literals — a `var` does not const-fold, and agnos has
+    # no reroute for either. ⚠ #95 collides with Linux `umask`, so this must stay
+    # inside the CYRIUS_TARGET_AGNOS guard; that ifdef is the only barrier.
+    var us = syscall(95);
+    if (us >= 0) { return us * 1000; }
+    var ms = syscall(40);
+    if (ms < 0) { return 0; }
+    return ms * 1000000;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     var ts[16];   # {tv_sec,tv_nsec} = 16 B (var[N] byte-sized; [2] would OOB the +8 store).
@@ -218,11 +246,35 @@ fn _sk_clock_now_ns_raw(): i64 {
     return syscall(228, 4, &ts) * 1000000;
     #endif
     #ifndef CYRIUS_TARGET_WIN
-    # Linux: clock_gettime(MONOTONIC_RAW=4) fills the timespec. (x86-macOS is HELD —
-    # 228 is unrouted on x86-macho; arm64-macOS never reaches here.)
+    #ifdef CYRIUS_TARGET_MACOS
+    # macOS returns the answer in the RETURN REGISTER, not through the buffer.
+    # 228 IS rerouted on both Darwin backends — EMACHO_CLOCK_ARM sends it to
+    # libSystem _clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW=4) via __got[6] on
+    # arm64, EMACHO_CLOCK_X86 composes ns on x86_64 — and both hand back u64
+    # nanoseconds directly. cyrius's own _prof_clock_ns
+    # (src/backend/common/runtime.cyr) consumes it exactly this way:
+    # `return syscall(228, 4, &ts);` for macOS, and the timespec decode below
+    # only for Linux.
+    #
+    # This branch did not exist until 2.5.0, so macOS fell through to the Linux
+    # decode and read `load64(&ts)*1e9 + load64(&ts+8)` out of a buffer the
+    # reroute never filled as a timespec — a garbage calibration anchor, and
+    # therefore a garbage TSC frequency and every span duration wrong.
+    #
+    # The buffer must still be a REAL address even though the answer does not
+    # come through it: EMACHO_CLOCK_X86 dereferences the third argument
+    # (`mov rax,[rdi]`), and cyrius v6.5.43 SIGSEGV'd on Intel Mac for passing
+    # a literal 0 there.
+    var mret = syscall(228, 4, &ts);
+    if (mret < 0) { return 0; }
+    return mret;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    # Linux: clock_gettime(MONOTONIC_RAW=4) fills the timespec.
     var ret = syscall(228, 4, &ts);
     if (ret < 0) { return 0; }
     return load64(&ts) * 1000000000 + load64(&ts + 8);
+    #endif
     #endif
     #endif
 }
@@ -231,7 +283,8 @@ fn _sk_clock_now_ns_raw(): i64 {
 # a 10 ms nanosleep window. Stores _sk_tsc_freq_hz (and, in step 3, _sk_tsc_scale).
 # Idempotent — early-returns if already initialized.
 fn _sk_clock_init(): i64 {
-    if (_sk_tsc_freq_hz > 0) { return 0; }
+    if (_sk_clock_init_done != 0) { return 0; }
+    _sk_clock_init_done = 1;
 
     #ifdef CYRIUS_TARGET_AGNOS
     # agnos uses uptime_ms directly (see _sk_now_ns) — no TSC calibration: no
@@ -241,6 +294,7 @@ fn _sk_clock_init(): i64 {
     # idempotent guard + any `_sk_tsc_scale == 0` check are satisfied.
     _sk_tsc_freq_hz = 1;
     _sk_tsc_scale = 1;
+    _sk_clock_init_done = 1;
     return 0;
     #endif
 
@@ -249,9 +303,6 @@ fn _sk_clock_init(): i64 {
     if (_sk_cpuid_invariant_tsc() == 0) {
         _sk_clock_panic("sakshi: clock_init: invariant TSC absent (CPUID 0x80000007 EDX bit 8 = 0)\n", 75);
     }
-
-    var t0_ns = _sk_clock_now_ns_raw();
-    var t0_ticks = _sk_now_ticks();
 
     # nanosleep(10 ms). timespec is { tv_sec, tv_nsec } — two i64 = 16 bytes.
     # var[N] is byte-sized in cyrius, so this must be [16], not [2]: a [2]
@@ -269,18 +320,33 @@ fn _sk_clock_init(): i64 {
     var sleep_ts[16];
     store64(&sleep_ts, 0);
     store64(&sleep_ts + 8, 10000000);
-    syscall(35, &sleep_ts, 0);
 
-    var t1_ticks = _sk_now_ticks();
-    var t1_ns = _sk_clock_now_ns_raw();
-
-    var dn = t1_ns - t0_ns;
-    var dt = t1_ticks - t0_ticks;
-
+    # RETRY the window rather than measuring once. The reference clock is not
+    # always fine-grained enough to resolve 10 ms: on Windows PE
+    # _sk_clock_now_ns_raw is GetTickCount64, whose tick is ~15.6 ms, so both
+    # ends of a single 10 ms window routinely land inside ONE tick. That gives
+    # dn == 0, no frequency, no scale — and _sk_ticks_to_ns then multiplies by a
+    # zero scale, so EVERY timestamp is 0. Observed deterministically: the PE
+    # smoke printed `[0] [INFO] sakshi smoke ok` on 5 of 5 cold runs.
+    # Each retry adds another 10 ms of separation, so a coarse tick is crossed
+    # within a couple of attempts. Bounded so a genuinely dead reference clock
+    # costs a fixed 80 ms once, not an unbounded stall.
     # freq_hz = dt * 1e9 / dn. At 3 GHz, dt ≈ 3e7 over 10 ms, so dt*1e9 ≈ 3e16
     # — well inside i64 (max ≈ 9.2e18).
-    if (dn > 0) {
-        _sk_tsc_freq_hz = dt * 1000000000 / dn;
+    var attempts = 0;
+    while (attempts < 8) {
+        var t0_ns = _sk_clock_now_ns_raw();
+        var t0_ticks = _sk_now_ticks();
+        syscall(35, &sleep_ts, 0);
+        var t1_ticks = _sk_now_ticks();
+        var t1_ns = _sk_clock_now_ns_raw();
+        var dn = t1_ns - t0_ns;
+        var dt = t1_ticks - t0_ticks;
+        if (dn > 0 && dt > 0) {
+            _sk_tsc_freq_hz = dt * 1000000000 / dn;
+            break;
+        }
+        attempts = attempts + 1;
     }
     #endif
 
@@ -316,8 +382,17 @@ fn _sk_now_ns(): i64 {
     return _sk_clock_now_ns_raw();
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    if (_sk_tsc_scale == 0) {
+    if (_sk_clock_init_done == 0) {
         _sk_clock_init();
+    }
+    # Calibration can still come back empty on a host whose reference clock is
+    # too coarse to measure the window even after the retries in
+    # _sk_clock_init. Fall back to that reference clock directly: coarse, but
+    # monotonic and non-zero. A zero timestamp on every event is strictly worse
+    # than a low-resolution one, and gating on _sk_clock_init_done (not on the
+    # scale) is what stops this from re-entering the 10 ms window every call.
+    if (_sk_tsc_scale == 0) {
+        return _sk_clock_now_ns_raw();
     }
     return _sk_ticks_to_ns(_sk_now_ticks());
     #endif
@@ -325,9 +400,15 @@ fn _sk_now_ns(): i64 {
 
 # Re-run the calibration loop and refresh _sk_tsc_freq_hz / _sk_tsc_scale.
 # Useful for long-running consumers (uptime > ~1 hour) where the TSC's true
-# rate has drifted relative to the kernel's MONOTONIC_RAW. Pauses the calling
-# context for ~10 ms (one nanosleep + two clock_gettime syscalls). Returns
-# the new freq in Hz.
+# rate has drifted relative to the kernel's MONOTONIC_RAW. Returns the new freq
+# in Hz.
+#
+# Cost is x86_64-only and is a range, not a fixed 10 ms: the calibration window
+# retries until the reference clock actually advances (up to 8 attempts of one
+# nanosleep + two reference reads each), so this pauses the caller ~10 ms on a
+# fine-grained clock and up to ~80 ms on a coarse one. aarch64 reads CNTFRQ_EL0
+# and returns immediately — architectural, cannot drift, no syscall. AGNOS does
+# no calibration at all.
 #
 # Single-threaded only — sakshi makes no concurrency guarantees, so callers
 # must ensure no other thread is in _sk_now_ns / span / trace during the call.
@@ -336,6 +417,9 @@ fn _sk_now_ns(): i64 {
 # real hardware). aarch64: reads CNTFRQ_EL0 (architectural; cannot drift).
 fn sakshi_clock_recalibrate(): i64 {
     _sk_tsc_freq_hz = 0;
+    # Clear the attempted-flag too, or _sk_clock_init early-returns and this
+    # becomes a silent no-op.
+    _sk_clock_init_done = 0;
     _sk_clock_init();
     return _sk_tsc_freq_hz;
 }
@@ -395,14 +479,6 @@ fn _sk_memcpy(dst, src, n): i64 {
     return dst;
 }
 
-# Fill n bytes at dst with val
-fn _sk_memset(dst, val, n): i64 {
-    for (var i = 0; i < n; i = i + 1) {
-        store8(dst + i, val);
-    }
-    return dst;
-}
-
 # ================================================================
 # Integer formatting
 # ================================================================
@@ -422,10 +498,17 @@ fn _sk_fmt_int(n, buf): i64 {
     # upstream half of it. sakshi 2.4.8.
     if (n < 0) { neg = 1; }
     if (n == 0) { store8(buf + bi, 48); bi = bi - 1; }
+    # ONE division per digit, not two. This was `d = n % 10; ... n = n / 10;`,
+    # which emits two 64-bit idiv for every digit — and a ns timestamp is 14+
+    # digits, on the text hot path, twice per span EXIT line. Both `/` and `%`
+    # truncate toward zero, so `n - (n/10)*10` is exactly `n % 10` for every i64
+    # including negatives, and the `d < 0` negate-the-digit fix above (the 2.4.8
+    # i64::MIN defect) is preserved unchanged.
     while (n != 0) {
-        var d = n % 10;
+        var q = n / 10;
+        var d = n - q * 10;
         if (d < 0) { d = 0 - d; }
-        store8(buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+        store8(buf + bi, 48 + d); bi = bi - 1; n = q;
     }
     if (neg == 1) { store8(buf + bi, 45); bi = bi - 1; }
     var len = 23 - bi;
@@ -560,31 +643,19 @@ enum _SkBinConst {
     _SK_BIN_HDR_SIZE = 12;
 }
 
-# Write a binary event header into buf. Returns header size (12).
-fn _sk_bin_write_hdr(buf, timestamp, level, category, msg_len): i64 {
-    store64(buf, timestamp);
-    store8(buf + 8, level);
-    store8(buf + 9, category);
-    store16(buf + 10, msg_len);
-    return _SK_BIN_HDR_SIZE;
-}
-
-# Read a binary event header from buf. Returns fields via out pointers.
-# out_ts, out_level, out_cat, out_msg_len are pointers to i64.
-fn _sk_bin_read_hdr(buf, out_ts, out_level, out_cat, out_msg_len): i64 {
-    store64(out_ts, load64(buf));
-    store64(out_level, load8(buf + 8));
-    store64(out_cat, load8(buf + 9));
-    store64(out_msg_len, load16(buf + 10));
-    return _SK_BIN_HDR_SIZE;
-}
+# The three binary writers (_sk_write_ring_event, _sk_write_aring_event,
+# _sk_write_udp_event in output.cyr) each build this header inline against
+# their own destination buffer, and sakshi_ring_decode_event reads it inline.
+# Shared _sk_bin_write_hdr / _sk_bin_read_hdr helpers existed here until 2.5.0
+# but had no callers in sakshi or in any of the 66 consuming repos — removed
+# as dead code. The layout above is the contract; keep it accurate.
 
 # --- output.cyr ---
 
 # output.cyr — output targets for sakshi
 # Supports: stderr (default), file, ring buffer (binary), UDP (binary), hook.
 # Target selection via sakshi_set_output / sakshi_set_emit_hook at runtime.
-# Depends: clock.cyr (for _sk_now_ns), format.cyr (for _sk_memcpy, _sk_bin_write_hdr),
+# Depends: clock.cyr (for _sk_now_ns), format.cyr (for _sk_memcpy),
 #          lib/fnptr.cyr (for subscriber hook dispatch — fncall6),
 #          lib/atomic.cyr (for the SK_OUT_ATOMIC_RING reservation writer —
 #          atomic_fetch_add / atomic_load / atomic_store)
@@ -633,6 +704,11 @@ fn sakshi_output_file(path): i64 {
     var fd = _sk_open(path, 1089, 0x1A4);
     #endif
     if (fd < 0) { return fd; }
+    # Close the previous descriptor first. Calling sakshi_output_file twice used
+    # to overwrite _sk_file_fd and leak the old fd for the life of the process —
+    # a log-rotating consumer leaks one per rotation until it hits RLIMIT_NOFILE,
+    # at which point _sk_open starts failing and logging stops.
+    if (_sk_file_fd >= 0) { syscall(_SK_SYS_CLOSE, _sk_file_fd); }
     _sk_file_fd = fd;
     _sk_output_target = SK_OUT_FILE;
     return fd;
@@ -682,24 +758,38 @@ fn sakshi_output_buffer(): i64 {
     return 0;
 }
 
-# Write a single byte into the ring buffer, advancing the write cursor
-fn _sk_ring_put(byte): i64 {
-    store8(&_sk_ring_buf + (_sk_ring_write & _SK_RING_MASK), byte);
-    _sk_ring_write = _sk_ring_write + 1;
-    return 0;
-}
-
 # Write a binary event into the ring buffer.
 # ts: pre-computed timestamp (callers share one _sk_now_ns per event)
 # level: log level, category: error category (0 for trace events)
 # msg: message pointer, msg_len: message length
 fn _sk_write_ring_event(ts, level, category, msg, msg_len): i64 {
+    # Clamp before the header is written. This was the ONE binary writer of the
+    # three that did not: _sk_write_aring_event and _sk_write_udp_event both cap
+    # at 256 first, and the 2026-04-15 audit's SA-001 fixed exactly this shape in
+    # the UDP header, but the ring path was never given the same treatment.
+    #
+    # Two ways the unclamped version went wrong, both silent:
+    #   - msg_len >= 65536: `store16` keeps only the low 16 bits, so the header
+    #     advertised (msg_len & 0xFFFF) while the loop below wrote the FULL
+    #     msg_len bytes. Every subsequent decode is then misaligned — the reader
+    #     resumes mid-event and every later event in the ring is garbage.
+    #   - 4085 <= msg_len <= 65535: the header is accurate but names an event
+    #     larger than the 4096-byte ring, so sakshi_ring_decode_event rejects it
+    #     (its `msg_len > 4084` guard) and the ring is undecodable from there on.
+    #
+    # 4084 = 4096 ring - 12 header: the largest event that can fit, and exactly
+    # what the decoder accepts. Clamping here rather than at 256 keeps every
+    # message that decodes correctly today decoding correctly.
+    var m_len = msg_len;
+    if (m_len > 4084) { m_len = 4084; }
+    if (m_len < 0) { m_len = 0; }
+
     # Build 12-byte header on stack, then copy into ring
     var hdr[12];
     store64(&hdr, ts);
     store8(&hdr + 8, level);
     store8(&hdr + 9, category);
-    store16(&hdr + 10, msg_len);
+    store16(&hdr + 10, m_len);
 
     # Copy header into ring (byte-by-byte for wrap safety)
     var hi = 0;
@@ -711,7 +801,7 @@ fn _sk_write_ring_event(ts, level, category, msg, msg_len): i64 {
 
     # Copy message bytes into ring
     var mi = 0;
-    while (mi < msg_len) {
+    while (mi < m_len) {
         store8(&_sk_ring_buf + (_sk_ring_write & _SK_RING_MASK), load8(msg + mi));
         _sk_ring_write = _sk_ring_write + 1;
         mi = mi + 1;
@@ -770,6 +860,23 @@ fn sakshi_ring_decode_event(buf, buf_len, dst, dst_cap, out_text_len): i64 {
     var cat = load8(buf + 9);
     var msg_len = load16(buf + 10);
 
+    # Reject a header whose level is not one sakshi ever writes. After the ring
+    # wraps, sakshi_ring_read_raw hands back a window that starts MID-EVENT, so
+    # the first 12 bytes the decoder sees are message payload, not a header —
+    # and payload is caller data. Validating the level against the exact set
+    # _sk_level_str knows (0-5 log, 10-11 span, 255 meta) turns a silent
+    # misparse of arbitrary bytes into a caller-visible "cannot decode", and
+    # makes a forged header planted inside a logged string far harder to land.
+    var lvl_ok = 0;
+    if (level >= 0 && level <= 5) { lvl_ok = 1; }
+    if (level == 10) { lvl_ok = 1; }
+    if (level == 11) { lvl_ok = 1; }
+    if (level == 255) { lvl_ok = 1; }
+    if (lvl_ok == 0) {
+        store64(out_text_len, 0);
+        return 0;
+    }
+
     # Sanity: max message that fits in a 4KB ring = 4096 - 12 header bytes
     if (msg_len > 4084) {
         store64(out_text_len, 0);
@@ -817,9 +924,10 @@ fn sakshi_ring_decode_event(buf, buf_len, dst, dst_cap, out_text_len): i64 {
 # Concurrency model — MPSC (multi-producer, single-consumer):
 #   - Writers: lock-free. atomic_fetch_add carries acquire-release ordering
 #     (see lib/atomic.cyr); each event_size reservation is unique and
-#     monotonic, so producers never overlap. Events are clamped to 256 msg
-#     bytes (max event 268 B) so a handful of in-flight reservations stay far
-#     inside the 4096 B window and cannot alias each other.
+#     monotonic, so producers never overlap IN CURSOR SPACE. They DO alias in
+#     BUFFER space once the cursor laps 4096 — see the lapped-reservation check
+#     in _sk_write_aring_event, added in 2.5.1, and the residual window it
+#     documents. Events are clamped to 256 msg bytes (max event 268 B).
 #   - Reader: single. The sakshi_aring_* readers load the cursors atomically,
 #     so they always see a consistent count/length snapshot. LIMITATION: a
 #     bulk read taken while producers are mid-write may observe a partially
@@ -835,6 +943,10 @@ fn sakshi_ring_decode_event(buf, buf_len, dst, dst_cap, out_text_len): i64 {
 var _sk_aring_buf[4096];
 var _sk_aring_write: i64 = 0;   # atomic reservation cursor — total bytes reserved
 var _sk_aring_count: i64 = 0;   # atomic event count
+# Events refused because their reserved range had already been re-issued to a
+# newer producer. Cumulative and never reset — a "how much was lost" figure, not
+# a gauge, matching _sk_spans_dropped in span.cyr.
+var _sk_aring_dropped: i64 = 0;
 enum _SkARingConst {
     _SK_ARING_MASK = 0xFFF;
     _SK_ARING_CAP  = 4096;
@@ -859,11 +971,49 @@ fn _sk_write_aring_event(ts, level, category, msg, msg_len): i64 {
     # concurrent reservations disjoint and matches the UDP packet cap.
     var m_len = msg_len;
     if (m_len > 256) { m_len = 256; }
+    # Clamp the LOW end too. event_size below feeds atomic_fetch_add on the
+    # shared reservation cursor, so a negative length would move that cursor
+    # BACKWARDS and break the disjointness the multi-producer writer depends on
+    # — every later reservation would overlap live data.
+    if (m_len < 0) { m_len = 0; }
     var event_size = _SK_BIN_HDR_SIZE + m_len;
 
     # Reserve a unique, non-overlapping byte range — the single multi-producer
     # synchronization point. atomic_fetch_add returns the pre-add value = start.
     var start = atomic_fetch_add(&_sk_aring_write, event_size);
+
+    # LAPPED-RESERVATION CHECK (2.5.1). Reservations are disjoint in CURSOR
+    # space but ALIAS in BUFFER space: cursor c and cursor c + 4096 mask to the
+    # same bytes. A producer preempted between the fetch_add above and the byte
+    # loops below wakes to find its range already re-issued, and writes straight
+    # through a newer, live event — the reader then decodes a header whose
+    # timestamp came from one producer and whose length came from another.
+    #
+    # Our bytes are [start, start + event_size). The first reservation that
+    # aliases them begins at cursor start + _SK_ARING_CAP, so the cursor having
+    # passed that point means those bytes now belong to a newer event. Drop
+    # ours rather than corrupt theirs — overwrite-oldest is the ring's policy,
+    # and we are the oldest.
+    #
+    # The comment this replaces claimed "a handful of in-flight reservations
+    # stay far inside the 4096 B window and cannot alias each other". That is
+    # true only for a handful; at the benchmarked 66 ns/event one unlucky
+    # preemption is enough.
+    #
+    # Costs ONE atomic_load on the hot path. A single producer can never trip
+    # it: after its own fetch_add the cursor is start + event_size, and
+    # event_size is at most 268.
+    #
+    # ⚠ RESIDUAL WINDOW, stated honestly: this closes the case where we were
+    # ALREADY lapped when we woke, which is the one a preemption produces. It
+    # does not close being lapped DURING the byte loops — that needs per-slot
+    # arbitration (a generation stamp per fixed-size slot) or a CAS commit
+    # protocol, both of which change the event layout or the cursor semantics
+    # and are therefore not patch-release work. Filed for a future minor.
+    if (atomic_load(&_sk_aring_write) - start > _SK_ARING_CAP) {
+        atomic_fetch_add(&_sk_aring_dropped, 1);
+        return 0;
+    }
 
     # Build the 12-byte header on the stack, then copy it in (byte-by-byte for
     # wrap safety across the power-of-2 mask).
@@ -906,6 +1056,15 @@ fn sakshi_aring_read_raw(dst, max_len): i64 {
     return avail;
 }
 
+# Cumulative count of events refused because their reserved range had already
+# been re-issued. Internal (underscore) on purpose, exactly as
+# _sk_spans_dropped_count is in span.cyr: it exists so the test suite can assert
+# the drop path and so a consumer chasing lost events can read it. Promoting it
+# to documented public API is new surface and therefore a MINOR, not this patch.
+fn _sk_aring_dropped_count(): i64 {
+    return atomic_load(&_sk_aring_dropped);
+}
+
 # Number of events written to the atomic ring (atomic load).
 fn sakshi_aring_event_count(): i64 {
     return atomic_load(&_sk_aring_count);
@@ -935,6 +1094,15 @@ fn sakshi_aring_clear(): i64 {
 # the Win64 PE syscall reroute whitelist, so SK_OUT_UDP emits nothing on a
 # PE target. Windows consumers must use the stderr or file target (both
 # routed). Tracked in issues/archive/2026-06-09-windows-pe-var-syscall-no-reroute.md.
+#
+# NOT SUPPORTED ON macOS either (2.5.0). The Mach-O ESYSXLAT table translates
+# `socket` (41 -> BSD 97) but has NO entry for `sendto` (neither the x86 44 nor
+# the aarch64 206). That asymmetry is worse than a missing pair: the socket call
+# SUCCEEDS and returns a real fd, so sakshi_output_udp reported success and
+# flipped the target, and every event afterwards issued an untranslated syscall
+# number — silently emitting nothing on arm64, and on x86 running an unrelated
+# BSD call or taking SIGSYS. Refused up front below so the caller keeps a
+# working stderr/file target, exactly as the AGNOS branch does.
 var _sk_udp_fd: i64 = 0 - 1;
 
 # sockaddr_in: { sin_family: u16, sin_port: u16, sin_addr: u32, zero: u64 } = 16 bytes
@@ -950,10 +1118,18 @@ fn sakshi_output_udp(ip, port): i64 {
     # Return error so the caller keeps the current stderr/file target.
     return 0 - 1;
     #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    # macOS: socket translates, sendto does not (see the note above). Refuse
+    # rather than hand back a usable-looking fd for a transport that cannot send.
+    return 0 - 1;
+    #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_MACOS
     # socket(AF_INET=2, SOCK_DGRAM=2, 0)
     var fd = syscall(_SK_SYS_SOCKET, 2, 2, 0);
     if (fd < 0) { return fd; }
+    # Same fd-leak fix as sakshi_output_file above.
+    if (_sk_udp_fd >= 0) { syscall(_SK_SYS_CLOSE, _sk_udp_fd); }
     _sk_udp_fd = fd;
 
     # Build sockaddr_in
@@ -965,6 +1141,7 @@ fn sakshi_output_udp(ip, port): i64 {
 
     _sk_output_target = SK_OUT_UDP;
     return fd;
+    #endif
     #endif
 }
 
@@ -988,6 +1165,9 @@ fn _sk_write_udp_event(ts, level, category, msg, msg_len): i64 {
     var pkt[268];
     var pkt_msg_len = msg_len;
     if (pkt_msg_len > 256) { pkt_msg_len = 256; }
+    # Lower bound too: a negative length would make `total` below smaller than
+    # the 12-byte header and hand sendto a bogus length.
+    if (pkt_msg_len < 0) { pkt_msg_len = 0; }
 
     store64(&pkt, ts);
     store8(&pkt + 8, level);
@@ -997,7 +1177,9 @@ fn _sk_write_udp_event(ts, level, category, msg, msg_len): i64 {
 
     var total = 12 + pkt_msg_len;
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_MACOS
     syscall(_SK_SYS_SENDTO, _sk_udp_fd, &pkt, total, 0, &_sk_udp_addr, 16);
+    #endif
     #endif
     return 0;
 }
@@ -1169,8 +1351,31 @@ fn _sk_emit_span(ts, action_level, action_str, action_len, name, name_len, elaps
 # ================================================================
 # Public: set output target directly
 # ================================================================
+# Returns 0 when the selected target is actually able to receive events, and a
+# NON-ZERO diagnostic when it is not. The switch is honoured either way — the
+# caller asked for it — so this is additive information, not a behaviour change,
+# and every existing caller that ignores the return keeps working.
+#
+# Selecting a target that was never configured used to be completely silent:
+# sakshi_set_output(SK_OUT_FILE) without a preceding sakshi_output_file() leaves
+# _sk_file_fd at -1, and _sk_write_file then returns 0 without writing. Same for
+# SK_OUT_UDP with no socket, and for SK_OUT_HOOK with no hook installed — every
+# subsequent log call is discarded and NOTHING says so. That is the same class
+# of defect as the full span stack (span.cyr) and the truncating scratch buffer
+# (trace.cyr), both of which were made visible in the 2.4.x line on the same
+# principle: a tracing library that stops tracing has to say so.
+#
+#   -1  SK_OUT_FILE selected but no file is open   (sakshi_output_file first)
+#   -2  SK_OUT_UDP selected but no socket is open  (sakshi_output_udp first)
+#   -3  SK_OUT_HOOK selected but no hook installed (sakshi_set_emit_hook first)
+#   -4  target is not a known SK_OUT_* value       (events fall back to text)
 fn sakshi_set_output(target): i64 {
     _sk_output_target = target;
+    if (target < 0) { return 0 - 4; }
+    if (target > SK_OUT_ATOMIC_RING) { return 0 - 4; }
+    if (target == SK_OUT_FILE && _sk_file_fd < 0) { return 0 - 1; }
+    if (target == SK_OUT_UDP && _sk_udp_fd < 0) { return 0 - 2; }
+    if (target == SK_OUT_HOOK && _sk_emit_hook == 0) { return 0 - 3; }
     return 0;
 }
 
@@ -1571,6 +1776,16 @@ fn sakshi_span_enter(name, name_len): i64 {
 # Exit the current span — pop, compute elapsed, emit.
 # One _sk_now_ns per call: used for both elapsed computation and event ts.
 fn sakshi_span_exit(): i64 {
+    # Upper-bound guard, the mirror of the lower-bound one sakshi_span_enter got
+    # in 2.4.12. Balanced single-threaded use cannot produce a depth above 16 —
+    # enter rejects at _SK_MAX_SPANS and nothing else writes the counter — so
+    # this is defense-in-depth on exactly the reasoning 2.4.12 used for the other
+    # end: memory corruption elsewhere in the process, or a violation of the
+    # single-threaded contract the library cannot enforce. Without it a depth of
+    # 17 makes offset (17-1)*24 = 384, one entry PAST the 384-byte stack, and the
+    # three loads below would take a name pointer and length from the globals
+    # that follow it and hand them to the formatter to dereference.
+    if (_sk_span_depth > _SK_MAX_SPANS) { _sk_span_depth = _SK_MAX_SPANS; }
     if (_sk_span_depth <= 0) { return 0; }
     _sk_span_depth = _sk_span_depth - 1;
     var offset = _sk_span_depth * 24;
@@ -1591,10 +1806,14 @@ fn sakshi_span_depth(): i64 {
 
 # Cumulative count of spans refused because the stack was full.
 #
-# Deliberately NOT prefixed as public API in the 2.4.x line: it exists so the
-# test suite can assert the drop path, and so a consumer debugging lost traces
-# can read it. Promoting it to a documented accessor is a MINOR change (new
-# public surface) and is left for 2.5.0.
+# Deliberately NOT prefixed as public API: it exists so the test suite can assert
+# the drop path, and so a consumer debugging lost traces can read it. Promoting
+# it to a documented accessor is a MINOR change (new public surface).
+#
+# This said "left for 2.5.0", and 2.5.0 is now shipped — but as the P(-1)
+# hardening sweep, which adds no features by definition. Retargeted to 2.6.0,
+# alongside the sakshi_log_err / sakshi_log_fields arc that the roadmap moved for
+# the same reason. It is a one-line alias whenever that release is cut.
 fn _sk_spans_dropped_count(): i64 {
     return _sk_spans_dropped;
 }

@@ -53,6 +53,7 @@
 # encoding moves into the key field.
 
 include "lib/fnptr.cyr"
+include "lib/hashseed.cyr"   # v6.5.39: per-process seed + finalizer (hash-flooding DoS)
 
 # v5.8.26 — key_type symbolic constants. Replaces raw 0/1/2
 # integer literals at the 6 read/write sites in this file.
@@ -68,14 +69,15 @@ enum KeyType {
 # FNV-1a hash for null-terminated string (cstr keys).
 fn hash_str(s): i64 {
     if (s == 0) { return 0; }
-    var h = 0xCBF29CE484222325;
+    # v6.5.39: seeded basis + finalizer — see lib/hashseed.cyr for why both are needed.
+    var h = 0xCBF29CE484222325 ^ _hm_seed_get();
     var hi = 0;
     while (load8(s + hi) != 0) {
         h = h ^ load8(s + hi);
         h = h * 0x100000001B3;
         hi = hi + 1;
     }
-    return h;
+    return _hm_mix(h);
 }
 
 # FNV-1a hash for Str struct (fat pointer keys).
@@ -85,14 +87,14 @@ fn hash_str_v(s): i64 {
     if (s == 0) { return 0; }
     var data = str_data(s);
     var len = str_len(s);
-    var h = 0xCBF29CE484222325;
+    var h = 0xCBF29CE484222325 ^ _hm_seed_get();   # v6.5.39
     var hi = 0;
     while (hi < len) {
         h = h ^ load8(data + hi);
         h = h * 0x100000001B3;
         hi = hi + 1;
     }
-    return h;
+    return _hm_mix(h);
 }
 
 # Internal: pick hash based on map's key_type.
@@ -391,8 +393,24 @@ fn map_iter(m, fp): i64 {
 #   key == MAP_U64_TOMB  (0xFFFFFFFFFFFFFFFF)   → tombstone
 #   otherwise                                    → occupied
 #
-# Consumers that must store key=0 or key=u64::MAX should pre-shift
-# their keys (e.g. +1). No real-world consumer hits this today.
+# ⛔ CORRECTED v6.6.2 — this said "No real-world consumer hits this today" and that was FALSE;
+# six do, and four had already written their own key-remap workarounds. It is also the shape
+# CLAUDE.md calls out as an antipattern: a DEFECT written down as a rule for consumers to comply
+# with. chakshu paid for it — it keys a per-process CPU baseline by pid with -1 meaning "no
+# baseline". Linux has no pid 0 so it was invisible for releases; AGNOS has a pid 0 (`kmain`), the
+# lookup returned 0 instead of -1, and the monitor rendered 59% CPU for an idle kernel thread.
+# Nothing failed: a plausible number, in a column where numbers belong.
+#
+# ⭐ THE ROOT CAUSE IS THE IN-BAND ENCODING, NOT ONE MISSING GUARD. Slot state lives IN the key
+# field, while every public path validated a slot with `load64(ep) != key`. When the caller's key
+# IS a sentinel that comparison is a tautology and the occupancy check evaporates. Measured on
+# 6.6.1 before the fix: `map_u64_has(m, 0)` = 1 on an EMPTY map; `map_u64_delete(m, 0)` returned
+# 1, planted a tombstone in a virgin slot and drove the count to -1; and 2000 writes of key 0 to
+# a one-entry map reported size 574 and grew without bound toward `_hm_die()`.
+# All five public paths now consult `_map_u64_key_reserved` FIRST. Key 0 and key -1 remain
+# unstorable — that part is a real design constraint — but the answers are now truthful.
+# Consumers that need those keys still pre-shift (`k + 1`); the difference is that failing to is
+# no longer silent. Pinned by tests/tcyr/stdlib/hashmap_u64_sentinel_keys.tcyr.
 #
 # Header layout shares the Str-keyed shape so `map_size` reads
 # cleanly against either; `key_type` at offset 24 is set to 2 for
@@ -407,7 +425,9 @@ fn map_iter(m, fp): i64 {
 # modulo page size) pile up in the same bucket and probe chains
 # degenerate to linear scans.
 fn hash_u64(k): i64 {
-    var h = k;
+    # v6.5.39: splitmix64 is INVERTIBLE, so with published constants an attacker computes
+    # preimages for any target bucket directly — no brute force at all. The seed removes that.
+    var h = k ^ _hm_seed_get();
     h = h ^ (h >> 30);
     h = h * 0xBF58476D1CE4E5B9;
     h = h ^ (h >> 27);
@@ -420,6 +440,16 @@ fn hash_u64(k): i64 {
 # the header.
 var MAP_U64_EMPTY = 0;
 var MAP_U64_TOMB = 0xFFFFFFFFFFFFFFFF;
+
+# Is this key one the slot encoding has taken for itself?
+# ⚠ ONE predicate, consulted by every public path. Written as a helper rather than an inline
+# comparison in five places precisely because the previous shape — the same check open-coded per
+# function — is what let `map_u64_has` and `map_u64_delete` be missed while `get_or` was filed.
+fn _map_u64_key_reserved(key): i64 {
+    if (key == MAP_U64_EMPTY) { return 1; }
+    if (key == MAP_U64_TOMB) { return 1; }
+    return 0;
+}
 
 # v5.8.43 — Allocator-as-first-arg variant of map_u64_new.
 # Allocates the 32-byte map header + initial 16-slot entries
@@ -517,6 +547,14 @@ fn _map_u64_grow(m): i64 {
 # any grow through `a`. Returns 0 on success, -1 on grow OOM
 # (caller must check; back-compat map_u64_set aborts instead).
 fn map_u64_set_a(a, m, key, value): i64 {
+    # ⛔ REFUSE rather than pretend. Measured before the fix: 2000 writes of key 0 to a one-entry
+    # map reported a size of 574 and kept growing — each write stored a key the encoding reads
+    # back as "empty", so nothing was retrievable and the load factor climbed until `_hm_die()`.
+    # ⚠ RETURNS -2, NOT -1, AND THAT IS LOAD-BEARING. -1 already means "probe chain full / grow
+    # OOM", and tests/tcyr/memory/alloc_str_extras.tcyr asserts -1 from a loop that STARTS AT
+    # KEY 0 — returning -1 here would make that existing test pass on its first iteration for
+    # entirely the wrong reason. Callers testing `rc < 0` still see an error, as they should.
+    if (_map_u64_key_reserved(key) == 1) { return 0 - 2; }
     if (load64(m + 16) * 10 >= load64(m + 8) * 7) {
         var rc = _map_u64_grow_a(a, m);
         if (rc < 0) { return 0 - 1; }
@@ -545,6 +583,8 @@ fn map_u64_set(m, key, value): i64 {
 
 # Get value for key. Returns value or 0 if not found.
 fn map_u64_get(m, key): i64 {
+    # A reserved key can never have been stored, so "absent" is the only truthful answer.
+    if (_map_u64_key_reserved(key) == 1) { return 0; }
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep) != key) { return 0; }
@@ -553,6 +593,11 @@ fn map_u64_get(m, key): i64 {
 
 # Get value with default if key not found.
 fn map_u64_get_or(m, key, default_val): i64 {
+    # THE FILED DEFECT (chakshu, 2026-09-08): without this the `load64(ep) != key` guard below
+    # is `0 != 0` for key 0, so the function fell through and returned the EMPTY slot's value —
+    # 0 — instead of the caller's sentinel. The whole point of the third argument is to tell
+    # absent from present, and for exactly the reserved keys it silently did not.
+    if (_map_u64_key_reserved(key) == 1) { return default_val; }
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return default_val; }
     if (load64(ep) != key) { return default_val; }
@@ -561,6 +606,9 @@ fn map_u64_get_or(m, key, default_val): i64 {
 
 # Check if key exists. Returns 1 or 0.
 fn map_u64_has(m, key): i64 {
+    # ⚠ The filing called this one "accidentally correct". It is not: measured `map_u64_has(m, 0)`
+    # = 1 on an EMPTY map, because the empty slot's key field IS 0 and matches the caller's.
+    if (_map_u64_key_reserved(key) == 1) { return 0; }
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep) != key) { return 0; }
@@ -569,6 +617,11 @@ fn map_u64_has(m, key): i64 {
 
 # Delete key. Returns 1 if found, 0 if not.
 fn map_u64_delete(m, key): i64 {
+    # ⛔ The worst of the five: measured `map_u64_delete(m, 0)` on an empty map returned 1,
+    # wrote a TOMBSTONE into a slot that had never been occupied, and decremented the count to
+    # -1 — corrupting both the probe chain and the size for every subsequent operation.
+    # Guarded BEFORE _map_u64_find so no slot is touched.
+    if (_map_u64_key_reserved(key) == 1) { return 0; }
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep) != key) { return 0; }

@@ -1,0 +1,90 @@
+# hashseed.cyr — per-process hash seed + finalizer, shared by every hashmap variant.
+# Usage: include "lib/hashseed.cyr"
+# Requires: syscalls.cyr (SYS_GETRANDOM / sys_getrandom), atomic.cyr (atomic_cas)
+#
+# ⭐ WHY THIS IS ITS OWN MODULE. `lib/hashmap.cyr` and `lib/hashmap_fast.cyr` each carried a
+# VERBATIM copy of the same unseeded FNV-1a — the second one's own comment says "same as
+# hashmap.cyr". Seeding them independently would have re-created exactly the duplication that
+# produced the second unseeded copy. One definition, two includers.
+#
+# THE DEFECT THIS CLOSES (filed 2026-08-30). Every hash in the stdlib was a published
+# constant with no per-process state, and the bucket index is the LOW bits of it
+# (`idx = hash & (cap - 1)`, power-of-2 capacity, linear probing). So an attacker who can
+# choose keys computes a colliding set ONCE, offline, from the published constants and reuses
+# it against every cyrius process forever. Measured on live 6.5.38 with 8192 distinct 39-byte
+# keys: cstr `map_set` 4.05 s colliding vs 4.34 ms distinct — **934x** — and `hash_str_v`
+# 329x. Insert and every rehash-on-grow degrade to O(n^2). A value precomputed in Python, in
+# another process, predicted the live bucket exactly. Consumers could not mitigate it: no
+# public entry point takes a hash function.
+#
+# ⚠ SEEDING THE BASIS ALONE IS NOT ENOUGH, which is why `_hm_mix` exists. FNV-1a mod 2^k is
+# closed on the low k bits, so XORing a seed into the 64-bit basis leaves the LOW bits of the
+# result still largely seed-invariant — and the low bits are precisely what the bucket index
+# uses. The finalizer diffuses the high bits down, so every bit of the index depends on the
+# whole key AND the seed.
+#
+# ⚠ `>>` IS LOGICAL IN CYRIUS and `>>>` is arithmetic — the reverse of C/Java/JS. The mix
+# below REQUIRES the logical shift; writing `>>>` here would sign-extend and destroy the
+# avalanche for any input with the high bit set. (See lib/hashmap.cyr's `hash_u64`, which has
+# always used `>>` for the same reason.)
+
+include "lib/syscalls.cyr"
+include "lib/atomic.cyr"
+
+var _hm_seed = 0;        # 0 = not yet drawn; never a legal seed value
+var _hm_seed_buf[1];     # 8 bytes (a top-level `var x[N]` is N*8), so no allocator dependency
+
+# splitmix64 finalizer — diffuses every input bit into every output bit.
+fn _hm_mix(h): i64 {
+    h = h ^ (h >> 33);
+    h = h * 0xFF51AFD7ED558CCD;
+    h = h ^ (h >> 33);
+    h = h * 0xC4CEB9FE1A85EC53;
+    h = h ^ (h >> 33);
+    return h;
+}
+
+# Per-process seed, drawn once on first use.
+#
+# ⚠ PUBLISHED WITH atomic_cas, NOT a plain store, and that is a correctness requirement, not
+# hygiene. Two threads hitting first-use concurrently would otherwise each draw a DIFFERENT
+# seed and hash the same key to different buckets — corrupting the map far worse than the
+# flooding this fixes. The CAS makes exactly one draw win; the loser adopts the winner's
+# value. On aarch64 `atomic_cas` is ldaxr/stlxr, so the publish carries release ordering and
+# needs no separate fence.
+#
+# Randomness is acquired per-target, never via a hardcoded syscall number — the same policy as
+# `lib/patra.cyr`'s `_pt_rand64`: the syscall peer defines SYS_GETRANDOM (#318 x86-linux /
+# #278 aarch64 / #318 macOS / #45 agnos), and Windows has NO raw getrandom syscall — its peer
+# deliberately omits the constant, so a raw `syscall(SYS_GETRANDOM, ...)` cannot even link
+# there and randomness MUST route through the `sys_getrandom()` wrapper (ProcessPrng).
+fn _hm_seed_get(): i64 {
+    var cur = _hm_seed;
+    if (cur != 0) { return cur; }
+
+    #ifdef CYRIUS_TARGET_WIN
+    var nr = sys_getrandom(&_hm_seed_buf, 8, 0);
+    #else
+    var nr = syscall(SYS_GETRANDOM, &_hm_seed_buf, 8, 0);
+    #endif
+
+    var v = 0;
+    if (nr == 8) {
+        v = load64(&_hm_seed_buf);
+    } else {
+        # CSPRNG unavailable (ancient kernel, restricted container, seccomp). Fall back to a
+        # time mix — weaker, but still not a published constant, which is the property that
+        # matters here. Same fallback policy as _pt_rand64.
+        #ifdef CYRIUS_TARGET_AGNOS
+        var t = syscall(SYS_TIME_UNIX);
+        #else
+        var t = syscall(201, 0);
+        #endif
+        v = t * 2654435761 + 1099511628211;
+    }
+    # 0 is the "not yet drawn" sentinel, so it can never be handed back as a seed.
+    if (v == 0) { v = 0x9E3779B97F4A7C15; }
+
+    if (atomic_cas(&_hm_seed, 0, v) == 1) { return v; }
+    return _hm_seed;   # lost the race — adopt the winner so every thread agrees
+}

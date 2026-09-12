@@ -113,7 +113,8 @@ var dmax = 0;
 while (di < vec_len(dsam)) { if (prani_is_finite(vec_get(dsam, di)) == 0) { dfin = 0; } di = di + 1; }
 assert_eq(dfin, 1, "all emotion-driven samples finite");
 di = 0;
-while (di < vec_len(dsam)) { var da = f64_abs(vec_get(dsam, di)); if (f64_gt(da, dmax) == 1) { dmax = da; } di = di + 1; }
+while (di < vec_len(dsam)) { var da = f64_abs(vec_get(dsam, di)); if (f64_gt(da,
+        dmax) == 1) { dmax = da; } di = di + 1; }
 assert_eq(f64_gt(dmax, E_0_001), 1, "emotion-driven bark is audible (max |s| > 0.001)");
 # control: the identical call at the default 0.5 effort renders a different
 # waveform, so the emotion-derived 0.76 demonstrably reaches synthesis.
@@ -121,7 +122,8 @@ var dbase = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_WOLF), dvoc, dint,
 assert_eq(vec_len(dbase), 15434, "control render has the same length");
 var dj = 0;
 var dmax2 = 0;
-while (dj < vec_len(dbase)) { var db = f64_abs(vec_get(dbase, dj)); if (f64_gt(db, dmax2) == 1) { dmax2 = db; } dj = dj + 1; }
+while (dj < vec_len(dbase)) { var db = f64_abs(vec_get(dbase, dj)); if (f64_gt(db,
+        dmax2) == 1) { dmax2 = db; } dj = dj + 1; }
 assert_neq(dmax2, dmax, "effort 0.5 and effort 0.76 render differently");
 
 var rc = assert_summary();

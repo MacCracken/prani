@@ -288,7 +288,8 @@ var pjson = str_data(str_builder_build(psb));
 var ph2 = sequence_call_phrase_from_json_str(pjson);
 assert_eq(CallPhrase_intent(ph2), PRANI_INTENT_MATING, "phrase intent roundtrips");
 assert_eq(vec_len(CallPhrase_elements(ph2)), 2, "phrase 2 elements roundtrip");
-assert_eq(CallElement_vocalization(vec_get(CallPhrase_elements(ph2), 1)), PRANI_VOC_TRILL, "phrase elem[1] voc roundtrips");
+assert_eq(CallElement_vocalization(vec_get(CallPhrase_elements(ph2), 1)), PRANI_VOC_TRILL,
+  "phrase elem[1] voc roundtrips");
 assert_eq(CallElement_gap(vec_get(CallPhrase_elements(ph2), 1)), F64_HALF, "phrase elem[1] gap roundtrips");
 var psb2 = str_builder_new();
 sequence_call_phrase_to_json(ph2, psb2);

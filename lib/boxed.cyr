@@ -1,0 +1,99 @@
+# boxed.cyr — runtime-tagged BOX primitives (the general tagged-union representation)
+# Usage: include "lib/boxed.cyr"
+# Requires: alloc.cyr
+#
+# ⭐ v6.6.2 — RESTORED. `tagged_new` was deleted at v6.6.0 on a survey that could not see its
+# consumers, and this module brings the capability back under names that cannot be confused
+# with the value form.
+#
+# ── What this is, and why it is NOT Result/Option/Either ──────────────────
+#
+# `Result` / `Option` / `Either` are declared `: stack` (lib/result.cyr, lib/tagged.cyr): they
+# return a REGISTER PAIR and allocate nothing. That is the right representation for a value
+# that is produced and consumed in the same frame.
+#
+# It is not a representation you can STORE. Measured at 6.6.1, the value form:
+#   - cannot be put in a struct field (hard error)
+#   - cannot be a vec element
+#   - keeps only its tag across a one-argument boundary
+#
+# A BOX can do all three, because it is one pointer. That is what `tagged_new` was for — a
+# general runtime-tag constructor for hand-rolled unions with more than two variants, which is
+# a different job from Result's. agnostik's LLM content blocks (8 variants), stream events (5),
+# metric values and seccomp actions are all this shape; agnova's SystemOp likewise.
+#
+# ── THE LAYOUT IS A PUBLISHED CONTRACT ────────────────────────
+#
+#     +0   the tag       (i64)
+#     +8   the payload   (i64)
+#     16 bytes, from the global bump allocator.
+#
+# Hand-rolled `load64(p)` / `load64(p + 8)` reads against this layout exist in the wild and
+# stay correct. It matches what a plain (non-`: stack`) `enum Foo { A(v); }` still emits at
+# 6.6.1 — verified, not assumed — so a box built here and a box built by an enum constructor
+# are interchangeable, and `boxed_tag` can read either.
+#
+# ── ⛔ WHY `payload()` IS NOT COMING BACK, AND MUST NOT ──────────────────
+#
+# "Restore `payload` too, it is symmetric" is the obvious next suggestion and it is wrong.
+# The two consumer repos use that ONE name on BOTH classes:
+#
+#     agnostik/src/agent.cyr:39   payload(sr)      <- a BOX from tagged_new
+#     agnostik/src/error.cyr:133  payload(res)     <- a value-form Result
+#     agnova/src/disk_backend.cyr:99  boxed        agnova/src/cli.cyr:327  Result
+#
+# Restoring `payload` would make ~518 stale Result reads across 23 repos COMPILE, and each one
+# would dereference a tag — 0 or 1 — as a pointer. That converts a named compile error into a
+# SIGSEGV, and in the cases where the tag lands on a mapped page, into a silent wrong read.
+# A migration that fails at its own line is worth more than one that fails at a random address.
+# Boxed reads go through `boxed_payload`; Result reads bind both halves. No shared spelling.
+#
+# ── ⛔ WHY `tag()` IS GONE AND `tagged_new` KEPT ITS NAME ──────────────────
+#
+# The rule this release establishes: A NAME WHOSE MEANING CHANGED MUST BE RETIRED, NOT
+# REDEFINED. `tag(t)` meant `load64(t)` before the flip and `return t;` after it — same name,
+# same arity, opposite meaning — so on a box it silently returned the POINTER. It is deleted;
+# stale sites now get `undefined function` instead of a plausible number.
+#
+# `tagged_new` is the opposite case: its meaning never changed. It builds the same 16-byte box
+# it always did. So it keeps its name, and all 28 ecosystem construction sites need zero edits.
+# Retire what changed; keep what did not.
+#
+# See CHANGELOG [6.6.2] and docs/development/ecosystem-migration-6.6.2.md.
+
+include "lib/alloc.cyr"
+
+# Build a box: 16 bytes, tag at +0, payload at +8.
+fn boxed_new(t, value): i64 {
+    var b = alloc(16);
+    store64(b, t);
+    store64(b + 8, value);
+    return b;
+}
+
+# The pre-v6.6.0 spelling of boxed_new, retained deliberately.
+# Its behaviour is byte-for-byte what it always was, so every existing call site is correct as
+# written. Kept as a wrapper rather than a duplicate body so the two can never drift.
+fn tagged_new(t, value): i64 {
+    return boxed_new(t, value);
+}
+
+# Read the discriminant out of a box.
+# ⚠ Takes a BOX POINTER, never a value-form tag. Passing a bound `t` from `var t, v = f();`
+# reads address `t` (0 or 1) and faults — which is the loud direction, deliberately.
+fn boxed_tag(b): i64 {
+    return load64(b);
+}
+
+# Read the payload out of a box.
+fn boxed_payload(b): i64 {
+    return load64(b + 8);
+}
+
+# Does this box carry the expected tag?
+# The boxed counterpart of `is_tag`. Kept separate BECAUSE `is_tag` now compares its first
+# argument directly — correct for the value form, and silently 0 for every box.
+fn boxed_is(b, expected): i64 {
+    if (load64(b) == expected) { return 1; }
+    return 0;
+}

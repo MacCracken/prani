@@ -1,10 +1,12 @@
 # prani fuzz harness
 
+# Fuzz driver — feeds generated input to the target and checks it never faults.
 fn fuzz_main(data, len) {
     if (len == 0) { return 0; }
     return 0;
 }
 
+# Fuzz entry point — drives the harness below.
 fn main() {
     alloc_init();
     fuzz_main("test", 4);

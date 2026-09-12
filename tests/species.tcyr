@@ -125,8 +125,10 @@ assert_eq(SpeciesParams_spectral_tilt(snake), f64_from(0), "snake tilt 0 (neutra
 test_group("resonance_seed -- precomputed f32-bit-pattern parity");
 assert_eq(species_params_resonance_seed(species_params(PRANI_SP_WOLF)), PR_SEED_WOLF, "wolf seed");
 assert_eq(species_params_resonance_seed(wolf), 2180968338894094337, "wolf seed literal");
-assert_eq(species_params_resonance_seed(species_params(PRANI_SP_SONGBIRD)), 3639187878752649217, "songbird seed literal");
-assert_eq(species_params_resonance_seed(species_params(PRANI_SP_DOG)), (0 - 4557473707297210367), "dog seed literal (negative)");
+assert_eq(species_params_resonance_seed(species_params(PRANI_SP_SONGBIRD)), 3639187878752649217,
+  "songbird seed literal");
+assert_eq(species_params_resonance_seed(species_params(PRANI_SP_DOG)), (0 - 4557473707297210367),
+  "dog seed literal (negative)");
 
 # ================================================================
 test_group("supports_vocalization matrix");
@@ -312,9 +314,12 @@ var rt_bird = t_sp_roundtrip(PRANI_SP_SONGBIRD);
 assert_eq(SpeciesParams_apparatus(rt_bird), PRANI_APP_SYRINGEAL, "songbird apparatus roundtrips (1 syringeal)");
 assert_eq(SpeciesParams_f0_default(rt_bird), f64_from(3000), "songbird f0_default roundtrips (3000)");
 assert_eq(SpeciesParams_resonance_seed(rt_bird), PR_SEED_SONGBIRD, "songbird resonance_seed roundtrips");
-assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_CRICKET)), PRANI_APP_STRIDULATORY, "cricket apparatus roundtrips (2 stridulatory)");
-assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_BEE)), PRANI_APP_VIBRATILE, "bee apparatus roundtrips (3 vibratile)");
-assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_SNAKE)), PRANI_APP_NOISE_ONLY, "snake apparatus roundtrips (4 noise-only)");
+assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_CRICKET)), PRANI_APP_STRIDULATORY,
+  "cricket apparatus roundtrips (2 stridulatory)");
+assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_BEE)), PRANI_APP_VIBRATILE,
+  "bee apparatus roundtrips (3 vibratile)");
+assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_SNAKE)), PRANI_APP_NOISE_ONLY,
+  "snake apparatus roundtrips (4 noise-only)");
 # control: an object with no apparatus key reads back 0 -- the exact reason the
 # five assertions above use species whose apparatus discriminant is not 0.
 assert_eq(SpeciesParams_apparatus(SpeciesParams_from_json_str("{}")), 0, "control: absent apparatus key reads 0");

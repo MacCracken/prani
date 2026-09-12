@@ -57,7 +57,8 @@ var one = fatigue_new();
 fatigue_record_call(one, F64_ONE, 0);
 assert_eq(fatigue_fatigue(one), 0x3f8eb851eb851eb8, "1x1s -> fatigue == 0.015");
 assert_eq(f64_gt(fatigue_fatigue(acc), fatigue_fatigue(one)), 1, "30 calls > 1 call (fatigue accumulates)");
-assert_eq(f64_gt(FatigueState_bout_calling_time(acc), FatigueState_bout_calling_time(one)), 1, "30 calls > 1 call (bout time accumulates)");
+assert_eq(f64_gt(FatigueState_bout_calling_time(acc), FatigueState_bout_calling_time(one)), 1,
+  "30 calls > 1 call (bout time accumulates)");
 # Modifiers off the accumulated state. The oracle asserts only the three signs
 # (2.0.3:rust-old/tests/integration.rs:801-803); the exact values are
 # hand-computed from fatigue 0.4500000000000003 with habituation 0, in
@@ -65,7 +66,8 @@ assert_eq(f64_gt(FatigueState_bout_calling_time(acc), FatigueState_bout_calling_
 var macc = fatigue_modifiers(acc);
 assert_eq(FatigueModifiers_pitch_offset(macc), 0xc022000000000003, "accumulated pitch == -9.000000000000005");
 assert_eq(f64_lt(FatigueModifiers_pitch_offset(macc), 0), 1, "pitch drifts down (< 0)");
-assert_eq(FatigueModifiers_breathiness_delta(macc), 0x3fb70a3d70a3d70f, "accumulated breathiness == 0.09000000000000007");
+assert_eq(FatigueModifiers_breathiness_delta(macc), 0x3fb70a3d70a3d70f,
+  "accumulated breathiness == 0.09000000000000007");
 assert_eq(f64_gt(FatigueModifiers_breathiness_delta(macc), 0), 1, "more breathy (> 0)");
 assert_eq(FatigueModifiers_amplitude_scale(macc), 0x3fea3d70a3d70a3c, "accumulated amplitude == 0.8199999999999998");
 assert_eq(f64_lt(FatigueModifiers_amplitude_scale(macc), F64_ONE), 1, "quieter (< 1.0)");
@@ -258,7 +260,8 @@ FatigueModifiers_to_json(fm, sbm);
 var mstr = str_data(str_builder_build(sbm));
 var fm2 = FatigueModifiers_from_json_str(mstr);
 assert_eq(FatigueModifiers_pitch_offset(fm2), FatigueModifiers_pitch_offset(fm), "pitch_offset roundtrips");
-assert_eq(FatigueModifiers_breathiness_delta(fm2), FatigueModifiers_breathiness_delta(fm), "breathiness_delta roundtrips");
+assert_eq(FatigueModifiers_breathiness_delta(fm2), FatigueModifiers_breathiness_delta(fm),
+  "breathiness_delta roundtrips");
 assert_eq(FatigueModifiers_amplitude_scale(fm2), FatigueModifiers_amplitude_scale(fm), "amplitude_scale roundtrips");
 assert_eq(FatigueModifiers_jitter_scale(fm2), FatigueModifiers_jitter_scale(fm), "jitter_scale roundtrips");
 # re-serialize is idempotent
@@ -301,7 +304,8 @@ assert_eq(prani_in_range(PRANI_NEG_INF, 0, PR_FAT_MAX_DURATION_S), 0, "duration 
 assert_eq(prani_in_range(G_NEG_ONE, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects -1.0");
 assert_eq(prani_in_range(G_1E300, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects 1e300");
 assert_eq(prani_in_range(0, 0, PR_FAT_MAX_DURATION_S), 1, "duration guard ACCEPTS 0 (zero duration is valid)");
-assert_eq(prani_in_range(PR_FAT_MAX_DURATION_S, 0, PR_FAT_MAX_DURATION_S), 1, "duration guard accepts the bound itself");
+assert_eq(prani_in_range(PR_FAT_MAX_DURATION_S, 0, PR_FAT_MAX_DURATION_S), 1,
+  "duration guard accepts the bound itself");
 
 # ================================================================
 # record_call has no error channel, so a bad duration is logged (prani_log_error)
@@ -333,7 +337,8 @@ var gc = fatigue_new();
 fatigue_record_call(gc, f64_from(10), 1);
 fatigue_record_call(gc, f64_from(10), 0);
 assert_eq(fatigue_fatigue(g), fatigue_fatigue(gc), "fatigue bit-identical to a clean run");
-assert_eq(FatigueState_bout_calling_time(g), FatigueState_bout_calling_time(gc), "bout time bit-identical to a clean run");
+assert_eq(FatigueState_bout_calling_time(g), FatigueState_bout_calling_time(gc),
+  "bout time bit-identical to a clean run");
 assert_eq(fatigue_alarm_habituation(g), fatigue_alarm_habituation(gc), "habituation bit-identical to a clean run");
 assert_eq(FatigueState_alarm_count(g), FatigueState_alarm_count(gc), "alarm count bit-identical to a clean run");
 
@@ -424,7 +429,10 @@ assert_eq(FatigueModifiers_amplitude_scale(mk), F64_ONE, "the finite fields are 
 # write can still carry a NaN bit pattern. That is the deserializer-field-range
 # half of 2.0.5 and it belongs with the derive, not with this module -- the log
 # line from modifiers_make is the only report available here.
-var jbad = "{\"fatigue\":9221120237041090560,\"alarm_habituation\":0,\"bout_calling_time\":0,\"alarm_count\":0,\"alarm_reinforced\":0}";
+var jb = str_builder_new();
+str_builder_add_cstr(jb, "{\"fatigue\":9221120237041090560,\"alarm_habituation\":0,");
+str_builder_add_cstr(jb, "\"bout_calling_time\":0,\"alarm_count\":0,\"alarm_reinforced\":0}");
+var jbad = str_data(str_builder_build(jb));
 var sbad = FatigueState_from_json_str(jbad);
 assert_gt(sbad, 0, "the hand-written document still parses (it is well-formed)");
 assert_eq(FatigueState_fatigue(sbad), G_NAN, "and still carries a NaN fatigue -- known gap");

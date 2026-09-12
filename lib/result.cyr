@@ -2,47 +2,94 @@
 # Usage: include "lib/result.cyr"
 # Requires: alloc.cyr, fmt.cyr (for result_print)
 #
-# v5.8.28 carve-out (2026-05-03) — Result extracted from
-# `lib/tagged.cyr` into its own module with the typed
-# `Result<T, E>` shape using v5.8.21 generic-parameter syntax.
-# Tagged.cyr transitively `include`s this file so existing
-# consumers (lib/net.cyr, lib/ws_server.cyr, lib/sandhi.cyr,
-# tests/tcyr/stdlib/tagged.tcyr) stay working unchanged.
+# ⭐ v6.6.0 — THE VALUE FORM. `Result` is declared `: stack`, so `Ok(v)` / `Err(e)` return a
+# REGISTER PAIR (tag in rax, payload in rdx) and allocate ZERO bytes. Before this, every
+# construction took 16 bytes from the global bump allocator whose only reclaim is
+# `alloc_reset()` — which invalidates every pointer the allocator has ever handed out, so a
+# long-running server could never call it. `100x sock_send` grew the heap by exactly 1600 B.
+# That is now 0 B, structurally, for every payload-carrying Result in the ecosystem.
 #
-# Layout — same as the v5.8.23 compiler-generated form:
-#   tag at +0  (0 = Ok, 1 = Err — matches prior OK/ERR convention)
-#   payload at +8 (16-byte alloc total)
+# ⛔ THIS CHANGED THE ARITY OF EVERY VALUE, WHICH IS WHY IT COULD NOT BE A QUIET SWAP.
+# A pair is two registers, and rdx does not reach a parameter, so a helper cannot receive a
+# Result in one argument any more. The consumption rules:
 #
-# Type parameters T/E are syntactically accepted but not yet
-# bound semantically (mono-only, erasure semantics — same status
-# as `enum TwoParams<T, E>` in tests/tcyr/lang/enum_generics.tcyr).
-# Subsequent slots in the v5.8.28–v5.8.32 sub-suite layer the
-# `?` propagation operator (v5.8.29) and stdlib migrations
-# (v5.8.30/.31) on top.
+#     var t, v = f();          # bind BOTH halves — the ONLY correct receive
+#     is_ok(t) / is_err_result(t)          # 1 arg: arg 1 receives rax, which IS the tag
+#     result_unwrap(t, v)                  # 2 args
+#     err_code_of(t, v) / result_print(t, v)
+#     result_unwrap_or(t, v, fallback)     # 3 args
+#     f()?                                 # propagates BOTH halves (v6.5.74)
+#
+# `var r = f();` — a single-variable bind — is now a hard compile ERROR naming the fix, because
+# it would keep the tag and silently drop the payload. That diagnostic is the migration tool:
+# every stale site fails at its own line instead of miscompiling.
+#
+# ⚠ `payload(r)` is GONE and has no 1-argument replacement — rdx never reaches a parameter.
+# Under the value form the payload is already a plain variable, so `payload(r)` becomes `r`.
+#
+# History: v5.8.28 carved Result out of lib/tagged.cyr with the typed `Result<T, E>` shape;
+# v6.5.55 shipped the `: stack` capability; v6.5.67 made it SAFE (lossy binds refused, nullary
+# variants allowed); v6.5.74 taught `?` to propagate the pair with its Err payload intact.
+# CHANGELOG [6.6.0].
+#
+# Layout note for anyone porting old code: the boxed form published `tag` at +0 and `payload`
+# at +8 as a USER-FACING contract, and hand-rolled `load64(p)` / `load64(p + 8)` reads exist in
+# the wild. Those reads must become the two bound variables.
+#
+# ⛔ CORRECTED v6.6.2 — this said such reads "do NOT fail loudly on their own". They DO.
+# MEASURED: a stale `load64(p + 8)` against a value-form Result exits **139 (SIGSEGV)**, because
+# the thing being dereferenced is the TAG, and the tags are **0 and 1** — addresses no process
+# ever has mapped. This note pointed the reader at the wrong hazard class and would have had them
+# looking for silent corruption where the failure is in fact immediate and obvious.
+#
+# ⚠ THE GENUINELY SILENT CLASS IS THE SAME-ARITY PREDICATES, not the raw reads. `is_ok`,
+# `is_err_result`, `is_none`, `is_some`, `is_left`, `is_right` and `is_tag` kept their arity and
+# had their bodies rewritten from `load64(box)` to a direct register compare. On a box every one
+# of them answers wrongly, compiling clean and exiting 0 — `is_some(box)` and `is_none(box)` are
+# BOTH 0. Boxes go through `boxed_*` (lib/boxed.cyr) and nothing else.
 
-enum Result<T, E> {
+enum Result<T, E>: stack {
     Ok(v);
     Err(e);
 }
 
-# Return 1 if result is Ok
-fn is_ok(res): i64 {
-    if (load64(res) == Ok) { return 1; }
+# ── Allocator-parameterised constructors (v6.5.41), now allocation-free ──
+#
+# These existed as the escape hatch from the per-construction 16-byte global alloc: build the
+# same box out of a caller-supplied arena so a server could reset it per request. The value form
+# removes the allocation entirely, so the hatch is obsolete — but the NAMES stay, returning the
+# pair, so the sites that adopted them keep working (they must now bind both halves like any
+# other Result producer). The allocator argument is accepted and ignored ON PURPOSE: deleting
+# the parameter would break every call site for no benefit, and there is no longer anything to
+# allocate from. CHANGELOG [6.6.0].
+fn ok_via(a, v): i64 {
+    return Ok(v);
+}
+
+# Build an `Err(e)` the same way. See `ok_via` above for why both survive the flip.
+fn err_via(a, e): i64 {
+    return Err(e);
+}
+
+# Return 1 if result is Ok. Takes the TAG — a single argument receives rax, which is the tag,
+# so `is_ok(t)` and `is_ok(f())` are both correct and neither reads the payload.
+fn is_ok(t): i64 {
+    if (t == Ok) { return 1; }
     return 0;
 }
 
-# Return 1 if result is Err
-fn is_err_result(res): i64 {
-    if (load64(res) == Err) { return 1; }
+# Return 1 if result is Err. Takes the TAG (see is_ok).
+fn is_err_result(t): i64 {
+    if (t == Err) { return 1; }
     return 0;
 }
 
-# Unwrap Result: return value or abort with error
-fn result_unwrap(res): i64 {
-    if (load64(res) == Err) {
+# Unwrap Result: return value or abort with error. Takes BOTH halves.
+fn result_unwrap(t, v): i64 {
+    if (t == Err) {
         syscall(1, 2, "result_unwrap on Err(", 21);
         var ebuf[24];
-        var elen = fmt_int_buf(load64(res + 8), &ebuf);
+        var elen = fmt_int_buf(v, &ebuf);
         syscall(1, 2, &ebuf, elen);
         syscall(1, 2, ")\n", 2);
         # Portable abort: agnos exit=#0; else #60 (backend → per-target exit).
@@ -56,30 +103,30 @@ fn result_unwrap(res): i64 {
         syscall(60, 1);
         #endif
     }
-    return load64(res + 8);
+    return v;
 }
 
-# Unwrap or default
-fn result_unwrap_or(res, fallback): i64 {
-    if (load64(res) == Err) { return fallback; }
-    return load64(res + 8);
+# Unwrap or default. Takes both halves plus the fallback.
+fn result_unwrap_or(t, v, fallback): i64 {
+    if (t == Err) { return fallback; }
+    return v;
 }
 
-# Get error code (0 if Ok)
-fn err_code_of(res): i64 {
-    if (load64(res) == Ok) { return 0; }
-    return load64(res + 8);
+# Get error code (0 if Ok). Takes both halves.
+fn err_code_of(t, v): i64 {
+    if (t == Ok) { return 0; }
+    return v;
 }
 
-# Print a Result value as "Ok(n)" or "Err(n)"
-fn result_print(res): i64 {
-    if (load64(res) == Ok) {
+# Print a Result value as "Ok(n)" or "Err(n)". Takes both halves.
+fn result_print(t, v): i64 {
+    if (t == Ok) {
         syscall(1, 1, "Ok(", 3);
-        fmt_int(load64(res + 8));
+        fmt_int(v);
         syscall(1, 1, ")", 1);
     } else {
         syscall(1, 1, "Err(", 4);
-        fmt_int(load64(res + 8));
+        fmt_int(v);
         syscall(1, 1, ")", 1);
     }
     return 0;

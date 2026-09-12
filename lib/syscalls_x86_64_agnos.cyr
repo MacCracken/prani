@@ -86,6 +86,22 @@ enum SysNrAgnos {
     SYS_RENAME = 31;               # rename(old, oldlen, new, newlen) → 0 / -1  (uses a4=r10)
     SYS_LINK = 32;                 # link(target, targetlen, linkpath, linkpathlen) → 0 / -1 (a4)
     SYS_STAT = 33;                 # stat(path, pathlen, statbuf) → 0 / -1
+    # v6.5.37 — the three peers that closed the agnos ABI gate (kernel 104 · doc 104 · cyrius 101).
+    SYS_FORK = 96;                 # fork() → child pid (parent) / 0 (child) / -1 (agnos 1.56.55)
+    SYS_LSTAT = 102;               # lstat(path,len,statbuf) → 0/-1; no-follow on the FINAL symlink (1.56.53)
+    SYS_STATFS = 103;              # statfs(path, pathlen, buf) → 0 / -1; fills a FROZEN 32-byte record (1.56.56/.57)
+    SYS_MOUNTLIST = 104;           # mountlist(buf, max) → record count / -1; 80-byte records (1.56.59)
+    # ⛔ SYS_BLKSTATS = 105 WAS HERE AND IS WITHDRAWN (v6.5.45). agnos minted it in the
+    # 1.56.59 cut, filed it, and cyrius shipped the peer in 6.5.44 — then an extend-vs-mint
+    # audit of the whole 106-syscall surface found it never needed a number: a closed 5-value
+    # tag enum over flat by-tag arrays is exactly a fixed-size tail block, so the counters
+    # belong in `sysinfo`#35's tail and now live at +104 (see sys_sysinfo_n in lib/sys.cyr).
+    # ⚠ REMOVED RATHER THAN LEFT STANDING: a needless syscall number is PERMANENT SURFACE —
+    # every consumer, every ABI gate and every peer carries it forever, and it becomes the
+    # obvious place to hang the next block-telemetry field. Verified against the LIVE agnos
+    # kernel, not the filing: `kernel/core/syscall.cyr` has no `num == 105` arm and `blkstats`
+    # appears nowhere in kernel/. A wrapper with no kernel arm does not error — the caller gets
+    # the dispatch fall-through value and may render it as a statistic. Do not re-add 105.
     SYS_UNAME = 34;                # uname(buf, len=64) → 0; 4×16-byte fields (§4.3)
     SYS_SYSINFO = 35;             # sysinfo(buf, len=40) → 0; 5×u64, byte-direct (§4.4)
     SYS_LSEEK = 58;               # lseek(fd, offset, whence) → new pos / -1; whence 0=SET/1=CUR/2=END
@@ -192,7 +208,8 @@ fn sys_ptrscan(buf, max): i64 {
 #   +8   u64 state       1 = ready · 2 = running · 3 = claiming (0 = dead is skipped)
 #   +16  u64 ppid        0 = init
 #   +24  u8  name[32]    NUL-terminated basename, recorded by the ELF loader
-#   +56  u64 reserved    always 0 today
+#   +56  u64 packed      LOW u32 = cpu ticks (100 Hz) · HIGH u32 = rss pages (4 KiB)
+#                    (agnos 1.56.59; the record size did NOT change)
 #
 # ⭐ WHY IT EXISTS. Before this, AGNOS had NO enumeration primitive of any kind — the
 # ring-3 surface offered getpid/spawn/waitpid/kill and nothing that could answer "what is
@@ -203,15 +220,82 @@ fn sys_ptrscan(buf, max): i64 {
 # cannot change mid-walk, but a pid may exit before the caller acts on it. That race is
 # inherent to any ps(1) and belongs to the caller — re-probe before signalling.
 #
-# ⚠ THE RESERVED FIELD IS NOT SPARE SPACE. Per-process rss and cpu time are not tracked by
-# the kernel yet; when they are, they land at +56 and the record size does NOT change.
-# Consumers should zero-check it rather than assuming it stays 0 forever.
+# ⛔ READ THE HALVES, NEVER THE SLOT. `load32(rec + 56)` is the cpu tick count and
+# `load32(rec + 60)` the rss page count on little-endian targets; equivalently
+# `load64(rec + 56) & 0xFFFFFFFF` and `(load64(rec + 56) >> 32) & 0xFFFFFFFF`. Rendering the
+# packed u64 as EITHER field yields a positive, plausible, nonsensical number — on a live
+# process it is about 6.6e12, which formats fine and reads as 2,000 years of ticks or 25 PB of
+# pages.
+#
+# ⚠ THIS SLOT WAS DOCUMENTED AS `reserved, always 0` UNTIL v6.5.46, and agnos 1.56.59 had
+# filled it (`kernel/core/syscall.cyr`, one `store64(pl_rec + 56, (pl_rs << 32) | pl_tk)`).
+# A consumer trusting the old text does one of two things and both are bad: zero-check the u64
+# and skip it — staying CORRECT while silently reading no data, which is what chakshu did for a
+# release — or render it, and publish the nonsense number above. This is the second release
+# chakshu lost to a stale note in this file; `proclist` itself was recorded as "blocked
+# upstream" for five releases after it shipped.
+#
+# ⚠ THE RSS HALF IS 4 KiB PAGES BUT ITS RESOLUTION IS 2 MB: the kernel counts present-AND-user
+# PDEs and adds 512 pages each, so the value is always a multiple of 512. It is honest as
+# "physical memory committed to this process", not as a precise footprint.
 #
 # ⚠ GUARD THE CALL SITE. A kernel older than 1.56.47 has no `#99` arm. Treat a negative
 # return as "this kernel cannot enumerate" and degrade, rather than reporting an empty
 # system — the two are different facts and a monitor must not conflate them.
 fn sys_proclist(buf, max): i64 {
     return syscall(SYS_PROCLIST, buf, max);
+}
+
+# Accessors for the `+56` packed pair. Named, because hand-decoding a packed field at every
+# call site is how the halves get swapped — and both halves are plausible positive integers, so
+# a swap produces a wrong number rather than an obvious failure.
+# `rec` is a record base as returned by walking the sys_proclist buffer in 64-byte strides.
+fn proclist_cpu_ticks(rec): i64 { return load64(rec + 56) & 0xFFFFFFFF; }
+# RSS in 4 KiB pages. ⚠ Always a multiple of 512 — see the resolution note above.
+fn proclist_rss_pages(rec): i64 { return (load64(rec + 56) >> 32) & 0xFFFFFFFF; }
+
+# ── Mount-enumeration band (agnos 1.56.59, `#104 mountlist`) ────────
+#
+# Snapshot of the live `{prefix -> backend}` mount table. Returns the NUMBER OF RECORDS
+# written, or -1 on a bad pointer, a wrapping `max`, or `max < 1`.
+#
+# ⚠ `max` IS A RECORD COUNT, NOT A BYTE LENGTH — `buf` must hold `max * 80` bytes.
+#
+# Record (80 B, little-endian). All-u64 header per the ABI doc's §4.1 no-sub-word-fields
+# rule, so there is no Cyrius struct-padding ambiguity to resolve here:
+#   +0   u64 backend    FsBackend — 1 = ext2 · 2 = FAT · 3 = exFAT (0 = FS_NONE never emitted)
+#   +8   u64 prefixlen  1..64
+#   +16  64B prefix     NUL-PADDED to the full 64 bytes
+#
+# ⚠ THE PREFIX TAIL IS PADDING, NOT DATA. Read exactly `prefixlen` bytes; the kernel pads
+# the remainder with NULs and a consumer must not assume the tail is meaningful.
+#
+# ⭐ WHY ENUMERATION AND NOT A PROBE — the part most likely to look like redundant surface,
+# given `statfs`#103 already exists. `statfs` answers "is this string mounted"; it cannot
+# answer "are these two the same volume". agnos's `vfs_mount_init` gives an ext2-less boot
+# the SAME backend under BOTH `/` and its `/mnt/...` prefix — its own comment calls them
+# "harmless redundant aliases", harmless to routing but one volume listed TWICE in a file
+# manager's sidebar. The backend id travelling alongside the prefix is what distinguishes
+# them, and no probe can recover it. Filed by crab (the AGNOS file manager) and chakshu (the
+# system monitor) on the same day.
+#
+# ⚠ A NEW NUMBER, NOT A WIDENING OF `mount`#11, and the reason is measured rather than
+# stylistic: #11 takes no arguments in agnos's frozen ABI table, and unused syscall argument
+# registers carry STALE VALUES rather than zero (the rule #100 and #101 both record). A
+# widened #11 would hand every already-shipped caller an arbitrary pointer.
+#
+# ⚠ GUARD THE CALL SITE, same as `sys_proclist` above. A kernel older than 1.56.59 has no
+# `#104` arm; treat a negative return as "this kernel cannot enumerate mounts" and degrade,
+# rather than reporting an unmounted system — those are different facts.
+#
+# ⚠ AGNOS-ONLY, DELIBERATELY — the same honest-gap reasoning `sys_statfs` records below. A
+# consumer that calls this builds on agnos and fails to LINK elsewhere. Inventing Linux /
+# macOS / aarch64 / PE numbers from memory is precisely the defect class v6.5.36 and v6.5.37
+# spent two releases repairing (`sys_pause` issuing flock, `sys_umount2` issuing getpid), and
+# a fail-closed -1 stub would be worse on the hosts that genuinely have a mount table: it
+# would claim unsupported where support exists.
+fn sys_mountlist(buf, max): i64 {
+    return syscall(SYS_MOUNTLIST, buf, max);
 }
 
 # ── Local-IPC channel band (agnos 1.56.40, `#97 chan_op`) ───────────
@@ -397,9 +481,10 @@ enum SysNrAgnosNet {
     SYS_ICMP_ECHO_EX = 100; # icmp_echo_ex(dst_ip, timeout_ms) → RTT ms (≥0) / -1 (agnos 1.56.48)
     SYS_SOCK_LISTEN = 56;  # sock_listen(port) → listen_id 0..7 / -1; merges bind+listen, non-blocking (1.45.5)
     SYS_SOCK_ACCEPT = 57;  # sock_accept(listen_id) → conn_id / -1 (WOULD_BLOCK / bad id); non-blocking (1.45.5)
-    # net_config(field) → packed IPv4 (0..3) / counter (4..7) / -1 bad field.
+    # net_config(field) → packed IPv4 (0..3) / counter (4..11) / -1 bad field.
     #   0=ip 1=netmask 2=gateway 3=dns_server                      (agnos 1.45.16)
     #   4=icmp_tx 5=icmp_rx 6=icmp_replies_sent 7=icmp_timeouts    (agnos 1.56.48)
+    #   8=net_tx_packets 9=net_rx_packets 10=net_tx_bytes 11=net_rx_bytes  (agnos 1.56.59)
     SYS_NET_CONFIG = 61;
 }
 
@@ -722,6 +807,72 @@ fn sys_getdents(dir_fd, buf, bufsize): i64 { return syscall(SYS_GETDENTS, dir_fd
 # Returns 0, or -1.
 fn sys_stat(path, pathlen, statbuf): i64 { return syscall(SYS_STAT, path, pathlen, statbuf); }
 
+# ⭐ v6.5.37 — `lstat`#102: `stat` that does NOT follow the FINAL symlink. Mid-path symlinks
+# still resolve. Same 48-byte record and same failure shape as #33; ext2 only (FAT/exFAT
+# cannot represent a symlink and return -1, matching `readlink`#70).
+#
+# WHY IT EXISTS, and it was found on iron rather than predicted: agnos's roadmap carried
+# lstat as "blocked on a consumer" for months. The 2026-08-30 validation burn produced two
+# root-filesystem entries that could be LISTED but neither stat'd nor removed — `/sl_s` and
+# `/lp`, leftover selftest fixtures — because kriya's `rm` never follows a symlink and
+# classifies every operand with `fs_lstat_at` first, which on agnos routed to path-based #33
+# and followed the link into nothing. A correctly-written no-follow userland could not be
+# correct on agnos. `unlink`#30 was never at fault.
+fn sys_lstat(path, pathlen, statbuf): i64 { return syscall(SYS_LSTAT, path, pathlen, statbuf); }
+
+# ⭐ v6.5.37 — `statfs`#103: volume capacity for a PATH (no fd needed), 32-byte record, all
+# u64 LE: f_bsize @0 (bytes per allocation unit — an ext2 block, a FAT/exFAT cluster),
+# f_blocks @8, f_bfree @16, f_bavail @24. The kernel reports UNITS, not bytes; userland does
+# the multiply, which is why the record never carries a scale factor.
+#
+# ⛔ THE RECORD SIZE IS FROZEN ABI, and unusually hard-frozen: the call is 3-arg with NO
+# length parameter (like #33's hardcoded 48), so there is no `len` for a caller to raise and
+# no way for the kernel to tell an old caller from a new one. A wider record needs a NEW
+# number — do not add a speculative fifth field to any accessor built on this.
+#
+# ⚠ f_bfree is LIVE on every backend, not a mount-time snapshot (agnos's own gates assert it
+# drops after a write), so a caller must not cache it. f_bavail == f_bfree on FAT and exFAT —
+# neither format has a reservation concept; only ext2's can differ.
+# ⚠ -1 is legitimate and must be passed through, not normalised: an unresolvable path is
+# refused deliberately (that refusal is the assertion catching an implementation that ignores
+# its path argument), and FAT/exFAT refuse rather than guess when a FAT or bitmap read fails.
+# ⚠ AGNOS-ONLY, AND THAT ASYMMETRY IS DELIBERATE RATHER THAN OVERLOOKED. `sys_fork` and
+# `sys_lstat` exist on the other peers already; `sys_statfs` exists NOWHERE else in this
+# repo, so a consumer that calls it builds on agnos and fails to LINK on linux / aarch64 /
+# macOS / PE. It is left that way on purpose: the filing asked for the agnos peer (crab's M6
+# VOLUMES panel targets agnos), no caller exists yet ecosystem-wide, and the alternative was
+# to invent statfs numbers for four more targets from memory. Guessing a syscall number is
+# precisely the defect class v6.5.36 and v6.5.37 spent two releases repairing — `sys_pause`
+# issuing flock, `sys_umount2` issuing getpid — so an honest gap beats a plausible wrong
+# number. A fail-closed -1 stub would be worse still on Linux and macOS, which genuinely
+# HAVE statfs: it would claim unsupported where support exists.
+# UPGRADE PATH when a cross-platform consumer appears: add the real numbers (verified against
+# each kernel's table, not from memory) to the peers that have the call, and a documented
+# fail-closed stub only where the OS truly lacks it — the shape `sys_fstat` above uses.
+fn sys_statfs(path, pathlen, buf): i64 { return syscall(SYS_STATFS, path, pathlen, buf); }
+
+# ⭐ v6.5.37 — `fork`#96: a second process resuming at the caller's own fork site. Returns the
+# child's pid to the parent and 0 to the child, -1 on failure — the POSIX shape.
+#
+# ⛔ THIS ONE IS DISPATCHED FROM THE RING-3 ENTRY STUB, NOT `ksyscall`, and that fact nearly
+# kept it unminted here. agnos implements it in `kernel/arch/x86_64/syscall_hw.cyr`
+# (`if (sc_num == 96) { return sys_fork(user_rsp); }`) because the child's resume context
+# comes from `pcpu_sc_entry_regs`, valid only on a path reached from the entry stub. So
+# `grep 'num == 96' kernel/core/syscall.cyr` returns ZERO — and BOTH projects' gates were
+# scanning exactly that file. agnos's ABI doc records the same trap ("its absence was not
+# caught, because the check scans only kernel/core/syscall.cyr — kernel, doc and cyrius all
+# agreed by mutual absence") and its gate now carries `ENTRY_STUB_ONLY = {44, 96}`.
+# tests/gates/platform/syscall_wrapper_pass.sh asserted the CONSTANT MUST NOT EXIST on that
+# same stale premise; that assertion is inverted at v6.5.37.
+#
+# ⚠ A forked child of a FOREGROUND `exec_and_wait` process does not run until the foreground
+# run ends (IF=0, not preempted). fork is for processes under the scheduler — spawned via
+# `spawn_path`#43 — which is how a server like agora runs anyway.
+# ⚠ `waitpid`#4 gained WAIT-ANY in the same cut: `sys_waitpid(-1)` returns a finished child's
+# exit code, -2 while children are still running, -1 when there are none. A fork-per-
+# connection loop wants that, not the single-pid poll.
+fn sys_fork(): i64 { return syscall(SYS_FORK); }
+
 # agnos has NO fstat-by-fd syscall — the kernel exposes only path-based
 # `sys_stat`#33 (there is no fstat number in the 0–63 table). fd→stat in
 # ring 3 cannot be synthesized portably, so this peer fails closed (-1),
@@ -801,6 +952,7 @@ fn sys_blk_read(h, lba, buf, nsec): i64  { return syscall(SYS_BLK_READ, h, lba, 
 fn sys_blk_write(h, lba, buf, nsec): i64 { return syscall(SYS_BLK_WRITE, h, lba, buf, nsec); }
 # blk_info(h, out) — device geometry → 0 / -1 (writes {capacity_lbas, lba_bytes}).
 fn sys_blk_info(h, out): i64             { return syscall(SYS_BLK_INFO, h, out); }
+
 # blk_close(h) — release the handle → 0 / -1.
 fn sys_blk_close(h): i64                 { return syscall(SYS_BLK_CLOSE, h); }
 
@@ -1266,7 +1418,9 @@ fn sys_winsize(): i64 { return syscall(SYS_WINSIZE); }
 # net_config(field) — kernel network-config getter (#61). Each field is a
 # packed IPv4 (oct1<<24|...|oct4): 0=net_ip, 1=net_netmask, 2=net_gateway,
 # 3=net_dns_server. Returns the packed addr (>=0; 0 if the global is
-# unconfigured) or -1 for an unknown field. No buffer, non-blocking,
+# unconfigured) or -1 for an unknown field. Fields 4..11 are COUNTERS, not
+# config — 4..7 ICMP (agnos 1.56.48), 8..11 interface packet/byte totals
+# (agnos 1.56.59); both banded below with their own accessors. No buffer, non-blocking,
 # IF=0-safe (like uptime_ms#40 / winsize#60). Lets a ring-3 resolver target
 # the DHCP-leased on-subnet DNS instead of an off-subnet public IP. Consumers
 # MUST use these wrappers (not bare syscall(61,...)) — on Linux #61 is wait4.
@@ -1302,6 +1456,30 @@ fn sys_net_icmp_rx(): i64 { return syscall(SYS_NET_CONFIG, 5); }
 fn sys_net_icmp_replies_sent(): i64 { return syscall(SYS_NET_CONFIG, 6); }
 # Echo waits that expired without a matching reply.
 fn sys_net_icmp_timeouts(): i64 { return syscall(SYS_NET_CONFIG, 7); }
+
+# --- Interface traffic counters, net_config fields 8..11 (agnos 1.56.59) -----
+# Monotonic since boot and NEVER reset, so a monitor differences two samples to draw a rate;
+# anything that cleared them would produce a negative delta and a nonsense rate line. Same
+# `0` caveat as the ICMP band above: only `-1` means "this kernel does not know" (i.e. older
+# than 1.56.59), while `0` legitimately means "nothing has moved yet".
+#
+# ⚠ THESE NEEDED NO WRAPPER CHANGE TO BE REACHABLE — `sys_net_config(field)` already passes an
+# arbitrary field through, which is exactly WHY agnos extended #61 rather than minting a number:
+# it reaches consumers with no toolchain release. What was wrong was only the documented RANGE,
+# which said `4..7`. That is worth recording because a stale range is how a consumer concludes a
+# capability is absent and writes a workaround for something that already works — agnos's tracker
+# has two of those this week alone, one of which carried a phantom blocker for FIVE releases.
+# Named accessors are added here anyway because this file's doctrine is that consumers use the
+# wrappers and never a bare `syscall(61, ...)`: on Linux #61 is `wait4`.
+
+# Frames handed to the NIC and accepted.
+fn sys_net_tx_packets(): i64 { return syscall(SYS_NET_CONFIG, 8); }
+# Frames taken off the wire.
+fn sys_net_rx_packets(): i64 { return syscall(SYS_NET_CONFIG, 9); }
+# Total length of the transmitted frames, in bytes.
+fn sys_net_tx_bytes(): i64 { return syscall(SYS_NET_CONFIG, 10); }
+# Total length of the received frames, in bytes.
+fn sys_net_rx_bytes(): i64 { return syscall(SYS_NET_CONFIG, 11); }
 
 # Lazily zero the conn table (defensive — globals are zero-init, but the
 # explicit pass mirrors lib/chrono.cyr's _chrono_init_mdays idiom and is

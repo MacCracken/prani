@@ -779,12 +779,83 @@ fn file_write_all_r(path, buf, len): Result {
 # agnos hands ring-3 only ~12 KB of init stack (agnoshi_147 #PF, CHANGELOG [6.1.12]). A heap
 # buffer reserves no frame at all, so that hazard is gone by construction — but the agnos
 # early-return stays, because agnos has no /proc at all and uses the init-stack envp instead.
+# v6.5.45: `_env_load`'s macOS branch reads the init-stack envp through the args peer's argv
+# anchor, so io.cyr must include its definer rather than free-ride on the caller's include order
+# (self-sufficient modules). args_macos.cyr is standalone, so there is no cycle.
+#ifdef CYRIUS_TARGET_MACOS
+include "lib/args_macos.cyr"
+#endif
+
 var _env_blk = 0;      # cached environ bytes (0 = not loaded yet)
 var _env_len = 0 - 1;  # cached length; -1 = not loaded, 0 = loaded-but-empty/unavailable
 
 fn _env_load(): i64 {
     if (_env_len >= 0) { return 0; }
     _env_len = 0;
+    # ⛔ v6.5.45 — macOS HAS NO /proc, so the open below failed, `_env_len` stayed 0, and
+    # `getenv` returned 0 for EVERY name on a process whose environment was fully populated.
+    # A silent wrong answer, not a crash: every consumer reading the environment on macOS
+    # behaved as if the variable were unset. Found by thoth 0.44.3, its first macOS build since
+    # 0.6.4 — i.e. it sat there for as long as nobody built a macOS consumer that read env.
+    #
+    # ⚠ THE SHAPE IS THE LESSON: the AGNOS branch in `getenv` below exists precisely because
+    # THAT target has no /proc, and macOS is the same class of target with no branch. Windows
+    # has the reroute (0xF015 GetEnvironmentVariableA) but NOTHING IN THE STDLIB CALLED IT, so
+    # Windows was broken here too — found by the release gate's cross-host leg reddening on cass
+    # once the macOS half was fixed. Three targets, one defect: the general case had been handled
+    # once per target instead of once for the CLASS, so each new target inherited the gap.
+    #
+    # The environment is on the init stack, exactly where cycc's own `_read_env`
+    # (src/backend/common/runtime.cyr) has read it since v6.0.33 — that fix is what let a
+    # natively-running cycc see CYRIUS_MACHO_ARM and ended the v5.3.13->v6.0.32 macOS
+    # self-host rot. This is the same derivation at stdlib level, reusing the argv anchor the
+    # args peer already parks (arm64 x28 / x86-macOS r15).
+    #ifdef CYRIUS_TARGET_MACOS
+    var mb = _macho_argv_base();
+    if (mb == 0) { return 0; }
+    var margc = load64(mb);
+    if (margc < 0) { return 0; }
+    # envp sits immediately past argv + its NULL terminator. The two Mach-O targets differ in
+    # ONE deref and getting it wrong reads a stale register as a pointer:
+    #   arm64  x28 -> [base]=argc, [base+8]=argv (a char**), so envp = argv + (argc+1)*8
+    #   x86    r15 =  the init rsp; argv is INLINE at rsp+8, so envp = base + 8 + (argc+1)*8
+    #ifdef CYRIUS_ARCH_AARCH64
+    var menvp = load64(mb + 8) + (margc + 1) * 8;
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
+    var menvp = mb + 8 + (margc + 1) * 8;
+    #endif
+    # Flatten the NULL-terminated char** into the same NUL-separated blob the /proc path
+    # produces, so the matching loop in `getenv` is untouched and both targets share it.
+    var mtot = 0;
+    var mi = 0;
+    var me = load64(menvp);
+    while (me != 0) {
+        mtot = mtot + strlen(me) + 1;
+        mi = mi + 1;
+        if (mi > 4096) { break; }        # a runaway array means the anchor is wrong; stop.
+        me = load64(menvp + mi * 8);
+    }
+    if (mtot == 0) { return 0; }
+    var mbuf = alloc(mtot);
+    if (mbuf == 0) { return 0; }
+    var mo = 0;
+    mi = 0;
+    me = load64(menvp);
+    while (me != 0) {
+        var ml = strlen(me);
+        memcpy(mbuf + mo, me, ml);
+        mo = mo + ml;
+        store8(mbuf + mo, 0);
+        mo = mo + 1;
+        mi = mi + 1;
+        if (mi > 4096) { break; }
+        me = load64(menvp + mi * 8);
+    }
+    _env_blk = mbuf;
+    _env_len = mo;
+    return 0;
+    #endif
     var fd = file_open("/proc/self/environ", 0, 0);
     if (fd < 0) { return 0; }
     # Grow-and-read to EOF. /proc files are not stat-sizeable, so the only honest
@@ -822,6 +893,26 @@ fn getenv(name): i64 {
     # the stdlib include order). See ABI §4.6. v6.0.87.
     #ifdef CYRIUS_TARGET_AGNOS
     return _agnos_getenv(name);
+    #endif
+    # ⛔ v6.5.45 — WINDOWS WAS THE THIRD MEMBER OF THE SAME CLASS, and it was found by the
+    # cross-host leg of the release gate reddening on cass after the macOS half was fixed.
+    # Like AGNOS and macOS, Windows has no /proc, so this fell through to `_env_load` and
+    # `getenv` returned 0 for every name there too. The PE backend has routed
+    # `GetEnvironmentVariableA` since v6.1.x — but that reroute served cycc's OWN `_read_env`,
+    # and NOTHING in the stdlib ever called it. An earlier draft of the comment above this
+    # function asserted "Windows is served"; it was repeating the filing rather than checking,
+    # and the reroute existing is not the same as the stdlib using it.
+    # GetEnvironmentVariableA(name, buf, size) returns the character count written, excluding
+    # the NUL, or 0 when the variable does not exist — so 0 is an honest miss, not an error.
+    #ifdef CYRIUS_TARGET_WIN
+    alloc_init();
+    var wbuf = alloc(4096);
+    if (wbuf == 0) { return 0; }
+    var wn = syscall(0xF015, name, wbuf, 4096);
+    if (wn <= 0) { return 0; }
+    if (wn >= 4096) { return 0; }        # truncated: refuse rather than hand back a cut value
+    store8(wbuf + wn, 0);
+    return wbuf;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     _env_load();

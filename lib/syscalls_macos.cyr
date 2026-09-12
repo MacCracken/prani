@@ -97,6 +97,13 @@ enum SysNr {
     # the alias documents itself, and ESYSXLAT/_msx32 renumber 1362→362 / 1363→363.
     SYS_KQUEUE = 1362;
     SYS_KEVENT = 1363;
+    # v6.5.43 (band J phase 1) — Darwin concurrency primitives, same private-alias band.
+    # macOS has no clone and no futex: threading is bsdthread_*, blocking is __ulock_*.
+    SYS_BSDTHREAD_CREATE = 1360;
+    SYS_BSDTHREAD_TERMINATE = 1361;
+    SYS_BSDTHREAD_REGISTER = 1366;
+    SYS_ULOCK_WAIT = 1515;
+    SYS_ULOCK_WAKE = 1516;
     SYS_CLONE = 56;
     SYS_MUNMAP = 11;
     SYS_FUTEX = 202;
@@ -500,3 +507,30 @@ fn sys_kqueue(): i64 {
 fn sys_kevent(kq, changelist, nchanges, eventlist, nevents, timeout): i64 {
     return syscall(SYS_KEVENT, kq, changelist, nchanges, eventlist, nevents, timeout);
 }
+# ── v6.5.43 (band J phase 1) — Darwin concurrency primitives, x86-macOS peer.
+# Landed in the SAME release as the arm64 peer (lib/syscalls_aarch64_linux.cyr, which is what
+# `lib/syscalls.cyr` selects for arm64-macOS) and the same bite as both backend route sets —
+# macho_route_parity.sh records four past routes that reached one Mach-O backend and not the
+# other, each caught a release later by ach. See the arm64 peer for the arity note and for why
+# these do not by themselves create a thread.
+# Register the thread-start and workqueue trampolines. MUST precede any bsdthread_create.
+fn sys_bsdthread_register(threadstart, wqthread, flags, stack_addr_hint, targetconc, dq_offset): i64 {
+    return syscall(SYS_BSDTHREAD_REGISTER, threadstart, wqthread, flags, stack_addr_hint, targetconc, dq_offset);
+}
+# Create a thread that begins in the REGISTERED trampoline (not `func`).
+fn sys_bsdthread_create(func, func_arg, stack_addr, pthread, flags): i64 {
+    return syscall(SYS_BSDTHREAD_CREATE, func, func_arg, stack_addr, pthread, flags);
+}
+# Terminate the calling thread and free its stack. Does not return on success.
+fn sys_bsdthread_terminate(stackaddr, freesize, port, sem): i64 {
+    return syscall(SYS_BSDTHREAD_TERMINATE, stackaddr, freesize, port, sem);
+}
+# Block until *addr changes from `value`. UL_COMPARE_AND_WAIT = 1; timeout in microseconds.
+fn sys_ulock_wait(operation, addr, value, timeout_us): i64 {
+    return syscall(SYS_ULOCK_WAIT, operation, addr, value, timeout_us);
+}
+# Wake a thread blocked in __ulock_wait on `addr`. ULF_WAKE_ALL = 0x100.
+fn sys_ulock_wake(operation, addr, wake_value): i64 {
+    return syscall(SYS_ULOCK_WAKE, operation, addr, wake_value);
+}
+
