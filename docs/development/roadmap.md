@@ -11,19 +11,22 @@ this roadmap.
 language port through parity re-verification, input-range validation, runnable
 examples and the Rust comparison, and ended by retiring `rust-old/` in 2.0.8;
 2.0.9–2.0.11 then repaired what its own measurements found. All of it is in the
-CHANGELOG. What is left below is **2.1.0** — the first release that changes the
+CHANGELOG. What is left below is **2.2.0** — the first release that changes the
 public surface — plus two externally-blocked items and the watch list.
 
 ---
 
 ## 2.x — the work that changes the public surface
 
-### 2.1.0 — two lanes: f32 throughout, and the allocation-failure contract
+### 2.2.0 — two lanes: f32 throughout, and the allocation-failure contract
+
+*Numbered 2.1.0 until that number went to the cyrius 6.7.x floor release. The dated
+records, the 2026-08-30 audit and ADR-0006 among them, still call it that.*
 
 Both are minor-bump work on the same functions, so they share a release. **Lane B
 (allocation) can start today; Lane A (f32) is blocked on svara and naad.** If
-Lane A is still blocked when Lane B is ready, ship Lane B as 2.1.0 and Lane A
-becomes 2.2.0 — do not hold a finished contract behind a blocked dependency.
+Lane A is still blocked when Lane B is ready, ship Lane B as 2.2.0 and Lane A
+becomes 2.3.0 — do not hold a finished contract behind a blocked dependency.
 
 #### Lane A — f32 throughout, to match the oracle
 
@@ -168,4 +171,4 @@ Things deliberately left alone, with the condition that would change that.
   is spent**: 2.0.7 captured the comparison while it still built, and
   `docs/benchmarks.md` records it with its method. If a crate is ever yanked, a
   *re-run* becomes impossible — the recorded figures do not. Only revisit this if
-  someone needs a fresh comparison, e.g. after 2.1.0 Lane A makes it f32-vs-f32.
+  someone needs a fresh comparison, e.g. after 2.2.0 Lane A makes it f32-vs-f32.

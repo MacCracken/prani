@@ -2,13 +2,14 @@
 # Usage: include "lib/hashmap_fast.cyr"
 # Includes its own definers: alloc.cyr, string.cyr, vec.cyr, fnptr.cyr, hashseed.cyr.
 #
-# **Status (v5.8.62 audit): experimental, zero consumers.** Not in
-# cyrius.cyml's `[deps].stdlib` auto-prepend, not included by any
-# tcyr / program / sibling-distfile. Production code uses
-# `lib/hashmap.cyr` (open-addressing, 3 key-type surfaces). Kept in
-# tree as a future optimization candidate — promote to stdlib only
-# once a consumer benchmarks a measurable win over hashmap.cyr;
-# pinned for re-evaluation in the pre-v6.0 hardening sweep.
+# **Status: experimental.** Not in cyrius.cyml's `[deps].stdlib`
+# auto-prepend, and no program calls it (kavach, agnosai and agnostic
+# list it in their stdlib, but none calls an fhm_* fn — surveyed at
+# 6.7.3). Its tests: tests/tcyr/stdlib/hashmap_fast_*.tcyr and
+# hashmap_ext.tcyr. Production code uses `lib/hashmap.cyr`
+# (open-addressing, 3 key-type surfaces). Kept in tree as a future
+# optimization candidate — promote it only once a consumer benchmarks
+# a measurable win over hashmap.cyr.
 #
 # Layout: separate metadata array (1 byte per slot) + key/value
 # arrays (8 bytes each). Header (48 B): { meta, keys, vals, cap, count, tombs }.
@@ -197,8 +198,8 @@ fn fhm_get_or(m, key, default_val): i64 {
 # Alias for fhm_count
 fn fhm_size(m): i64 { return load64(m + 32); }
 
-# Set key-value pair. Returns 0, or -1 when the table had to grow and the grow's allocation
-# was refused — the map is then UNCHANGED (the old table stays live). CHANGELOG [6.6.7]
+# Set key-value pair. Returns 0, or -1 when the table had to DOUBLE and the doubling's
+# allocation was refused — the map is then UNCHANGED (the old table stays live). CHANGELOG [6.6.7]
 #
 # ⛔ TOMBSTONES COUNT AS OCCUPIED (v6.6.8). The rehash trigger counted only LIVE entries while
 # fhm_delete leaves a 255 tombstone in every slot it frees, and an insert only ever took an
@@ -206,20 +207,68 @@ fn fhm_size(m): i64 { return load64(m + 32); }
 # the whole table, fell out of the loop and returned 0 — success — WITHOUT inserting, and
 # every get/has on a missing key scanned the whole table. Now:
 #   * the trigger is (live + tombstones) at 87.5%; it DOUBLES only when the live load alone
-#     is past 43.75%, otherwise it rehashes at the same capacity, which drops the tombstones —
+#     is past 43.75%, otherwise it rebuilds at the same capacity, which drops the tombstones —
 #     so churn at a steady size does not grow the table without bound;
 #   * a new key reuses the FIRST tombstone on its probe path (once the key is known absent);
 #   * the trigger keeps at least one empty slot, so the probe always ends; the fall-through is
 #     a -1, never a silent 0. CHANGELOG [6.6.8]
+# ⚠ THE SAME-CAPACITY REBUILD IS IN PLACE AND ALLOCATES NOTHING (_fhm_rebuild_in_place). It went
+# through _fhm_rehash, which allocates three fresh arrays and never releases the old ones; the
+# default allocator is a bump whose free is a no-op, so every same-capacity rebuild leaked ~17 B
+# per slot without bound (7,000 live in 16,384 slots: 3 x 278,528 B over 3M churned keys), and a
+# steady-size insert could fail where it needed no memory at all. Only doubling allocates now, so
+# a steady-size fhm_set cannot return -1. Entries MOVE inside the same arrays during that rebuild
+# (as lib/hashmap.cyr's do), so a caller that walks the arrays across an fhm_set that INSERTS can
+# see an entry twice or not at all. CHANGELOG [6.7.3]
+# ⚠ AN OVERWRITE NEVER REBUILDS (lib/hashmap.cyr's rule since 6.6.20). The trigger ran before
+# anything looked the key up, so overwriting a PRESENT key at the trigger — which adds no entry
+# and needs no room — doubled the table (14 live in 16 slots: 16 -> 32, 544 B), returned -1
+# WITHOUT storing the value when that doubling was refused, and moved entries under a caller
+# walking the arrays. At the trigger the key is now looked up first; a hit stores the value in
+# its slot and returns 0, allocating nothing (below the trigger _fhm_insert overwrites in place
+# anyway), so a walk that overwrites as it goes stays valid. CHANGELOG [6.7.9]
 fn fhm_set(m, key, val): i64 {
     var cap = load64(m + 24);
     var count = load64(m + 32);
     if ((count + load64(m + 40)) * 8 >= cap * 7) {
-        var nc = cap;
-        if (count * 16 >= cap * 7) { nc = cap * 2; }
-        if (_fhm_rehash(m, nc) < 0) { return 0 - 1; }
+        var hit = _fhm_slot(m, key);
+        if (hit >= 0) {
+            store64(load64(m + 16) + hit * 8, val);
+            return 0;
+        }
+        var rc = 1;
+        if (count * 16 < cap * 7) { rc = _fhm_rebuild_in_place(m); }
+        if (rc != 0) {
+            var nc = cap;
+            if (count * 16 >= cap * 7) { nc = cap * 2; }
+            if (_fhm_rehash(m, nc) < 0) { return 0 - 1; }
+        }
     }
     return _fhm_insert(m, key, val);
+}
+
+# The slot holding `key`, or -1 when it is absent: the find half of fhm_set, which needs it
+# before the trigger can rebuild the table (an overwrite never rebuilds). CHANGELOG [6.7.9]
+fn _fhm_slot(m, key): i64 {
+    var meta = load64(m);
+    var keys = load64(m + 8);
+    var cap = load64(m + 24);
+    var h = _fhm_hash(key);
+    var h2 = _fhm_h2(h);
+    var idx = (h & (cap - 1)) & (0 - 16);
+    var probes = 0;
+    while (probes < cap) {
+        var mask = _fhm_probe16(meta, idx, h2);
+        while (mask != 0) {
+            var si = idx + _fhm_ctz(mask);
+            if (streq(load64(keys + si * 8), key) == 1) { return si; }
+            mask = mask & (mask - 1);
+        }
+        if (_fhm_empty16(meta, idx) != 0) { return 0 - 1; }
+        idx = (idx + 16) & (cap - 1);
+        probes = probes + 16;
+    }
+    return 0 - 1;
 }
 
 # The probe-and-place half of fhm_set, on a table the caller has already made room in.
@@ -276,8 +325,80 @@ fn _fhm_grow(m): i64 {
     return _fhm_rehash(m, load64(m + 24) * 2);
 }
 
-# Rebuild the table at `new_cap` slots (live entries only, so every tombstone is dropped).
-# Returns 0, or -1 when an allocation is refused.
+# Rebuilds done by any fhm map in this process, in place or into fresh arrays. Diagnostic only,
+# not API: tests/tcyr/stdlib/hashmap_fast_rebuild_in_place.tcyr reads it (an in-place rebuild
+# changes neither the arrays nor alloc_used). Unsynchronised: maps used on different threads can
+# lose a count, never anything else. CHANGELOG [6.7.3]
+var _fhm_rebuilds = 0;
+
+# Same-capacity rebuild, IN PLACE, allocating nothing. Returns 0 when done, 1 when no group has
+# an EMPTY slot to anchor the walk (fhm_set then rebuilds into fresh arrays; reachable only when
+# metadata was written outside this API).
+#   1. s = the first group with an EMPTY slot, chosen BEFORE any tombstone is converted. A probe
+#      stops at the first group with an EMPTY slot, so no live entry's probe path crosses s (an
+#      entry may sit IN s). A group whose only EMPTY slots are converted tombstones is no anchor.
+#   2. Every tombstone becomes EMPTY.
+#   3. Walk the groups once, from the one after s round to s ITSELF — s last, because entries
+#      sitting in it may be homed in earlier groups (hashmap.cyr skips its anchor; an EMPTY slot
+#      holds nothing, but a group can). Each live entry moves to the lowest EMPTY slot of the
+#      first group on its probe path, from its home group, that has one — when that group lies
+#      before its own. Its path lies after s in walk order (step 1), so it covers only groups
+#      already walked, and a walked group is only ever filled afterwards, never emptied — so
+#      every entry stays reachable, and no group a live entry's path crosses keeps an EMPTY slot
+#      (what fhm_delete relies on).
+# Moved-from key/value words are left as they are: only the meta byte says a slot is live.
+fn _fhm_rebuild_in_place(m): i64 {
+    var meta = load64(m);
+    var keys = load64(m + 8);
+    var vals = load64(m + 16);
+    var cap = load64(m + 24);
+    var cmask = cap - 1;
+    var s = 0;
+    while (s < cap) {
+        if (_fhm_empty16(meta, s) != 0) { break; }
+        s = s + 16;
+    }
+    if (s >= cap) { return 1; }
+    var i = 0;
+    while (i < cap) {
+        if (load8(meta + i) == _FHM_TOMB) { store8(meta + i, _FHM_EMPTY); }
+        i = i + 1;
+    }
+    var n = 16;
+    while (n <= cap) {
+        var g = (s + n) & cmask;
+        var p = 0;
+        while (p < 16) {
+            var j = g + p;
+            var b = load8(meta + j);
+            if (b != _FHM_EMPTY) {
+                var t = (_fhm_hash(load64(keys + j * 8)) & cmask) & (0 - 16);
+                while (t != g) {
+                    var e = _fhm_empty16(meta, t);
+                    if (e != 0) {
+                        var d = t + _fhm_ctz(e);
+                        store8(meta + d, b);
+                        store64(keys + d * 8, load64(keys + j * 8));
+                        store64(vals + d * 8, load64(vals + j * 8));
+                        store8(meta + j, _FHM_EMPTY);
+                        break;
+                    }
+                    t = (t + 16) & cmask;
+                }
+            }
+            p = p + 1;
+        }
+        n = n + 16;
+    }
+    store64(m + 40, 0);
+    _fhm_rebuilds = _fhm_rebuilds + 1;
+    return 0;
+}
+
+# Rebuild the table into fresh arrays at `new_cap` slots (live entries only, so every tombstone
+# is dropped). Used to double, and at the same capacity only when _fhm_rebuild_in_place finds no
+# group with an EMPTY slot (metadata written outside this API). Returns 0, or -1 when an
+# allocation is refused.
 # ⚠ All three arrays are allocated and CHECKED before `m` is touched, so a refused grow
 # leaves the old table fully intact. They were unchecked, so a refusal memset through 0.
 # CHANGELOG [6.6.7]
@@ -293,6 +414,7 @@ fn _fhm_rehash(m, new_cap): i64 {
     var new_vals = alloc(new_cap * 8);
     if (new_vals == 0) { return 0 - 1; }
     memset(new_meta, 0, new_cap);
+    _fhm_rebuilds = _fhm_rebuilds + 1;
     store64(m, new_meta);
     store64(m + 8, new_keys);
     store64(m + 16, new_vals);
@@ -354,9 +476,10 @@ fn fhm_delete(m, key): i64 {
                 store64(m + 32, load64(m + 32) - 1);
                 # A group that still has an empty slot ends every probe that reaches it, so
                 # nothing lies "past" this slot and it can go back to EMPTY. Only a full
-                # group needs the tombstone. (Groups are 16-aligned, and a group that was
-                # full when a later key was placed can never regain an empty — so this
-                # cannot strand an entry.) CHANGELOG [6.6.8]
+                # group needs the tombstone. (Groups are 16-aligned, and a group that any live
+                # entry's probe path crosses has no EMPTY slot — every path into fhm keeps
+                # that, fhm_set's in-place rebuild included — so this cannot strand an entry.)
+                # CHANGELOG [6.6.8] [6.7.3]
                 if (_fhm_empty16(meta, idx) != 0) {
                     store8(meta + si, _FHM_EMPTY);
                 } else {

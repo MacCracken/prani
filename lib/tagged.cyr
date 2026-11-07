@@ -34,7 +34,7 @@
 # BOXES at 6.6.x, so the language kept a representation the stdlib no longer had a reader for.
 # ⭐ `tagged_new` is RESTORED in lib/boxed.cyr (included below) alongside `boxed_new` /
 # `boxed_tag` / `boxed_payload` / `boxed_is`. It kept its name because its MEANING never changed.
-# See docs/development/ecosystem-migration-6.6.2.md and CHANGELOG [6.6.2].
+# See docs/development/ecosystem-migration.md § 6.6.0 – 6.6.2 and CHANGELOG [6.6.2].
 #
 # ⚠ A NULLARY variant carries no payload, so it needs no second register: `None()` returns its
 # tag ALONE and is correctly NOT pair-returning. A function that returns `None()` on one path

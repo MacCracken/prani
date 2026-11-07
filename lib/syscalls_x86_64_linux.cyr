@@ -179,6 +179,11 @@ enum SysNr {
     # gate's "is the declared value the x86 number for this call?" discriminator had no
     # x86 declaration to compare against. Declaring it here retires that exception.
     SYS_FACCESSAT = 269;
+    # 6.7.9 — ppoll, which this peer never named: the aarch64 peer has spelled it 1073 (the
+    # private alias ESYSXLAT renumbers to native 73) since v6.5.36, and yukti carried a local
+    # `SYS_PPOLL = 271` for the one raw call no wrapper covered. sys_ppoll
+    # (lib/syscalls_linux_common.cyr) issues it. CHANGELOG [6.7.9]
+    SYS_PPOLL = 271;
     # v6.1.3 — bare-name fs syscalls + POSIX *at() family (kriya M2 surfaced).
     SYS_LSTAT = 6;
     SYS_RENAME = 82;

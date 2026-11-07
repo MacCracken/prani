@@ -128,7 +128,7 @@ fn prani_ffi_voice_destroy(handle) {
 # A FINITE out-of-range value still clamps, unchanged: that is the oracle's
 # documented RTPC saturation (`voice.set_vocal_effort(effort)` clamps), it is
 # pinned by tests/ffi.tcyr's "finite 1.5 still clamps to 1.0". Rejecting it
-# instead is the builder-contract question in roadmap 2.1.0, not this milestone.
+# instead is the builder-contract question in roadmap 2.2.0, not this milestone.
 # ================================================================
 
 # voice_set_effort(handle, effort) -- real-time vocal-effort update

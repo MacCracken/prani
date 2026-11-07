@@ -552,14 +552,14 @@ while (ri < 11) {
 assert_eq(rt_ok, 11, "all 11 built-in presets are ACCEPTED by their own codec");
 assert_eq(rt_eq, 11, "all 11 roundtrip with every scalar bit-identical");
 
-test_group("preset_make / preset_build -- constructor contract unchanged (2.1.0)");
+test_group("preset_make / preset_build -- constructor contract unchanged (2.2.0)");
 # Measured, not wished for. preset_make hands back a VoicePreset and nothing
 # else -- the same shape as the crvoice_with_* builders it feeds -- so it has no
 # channel to report a bad field on, and preset_build is the same. 2.0.5 puts the
 # range check where a failure CAN be reported (the codec above) and leaves the
-# constructor contract to roadmap 2.1.0; the NaN's remaining path to svara is
+# constructor contract to roadmap 2.2.0; the NaN's remaining path to svara is
 # closed downstream at the fallible point of use (crvoice_vocalize / the tract
-# constructor). Pinned here so 2.1.0 has to notice it is changing this.
+# constructor). Pinned here so 2.2.0 has to notice it is changing this.
 var nanp = preset_make("NaN Probe", PRANI_SP_WOLF, T_NAN, 0, 0);
 assert_eq(prani_is_err(nanp), 0, "preset_make still returns a preset for a NaN size");
 assert_eq(VoicePreset_size(nanp), T_NAN, "preset_make stores the NaN size verbatim (no clamp, no guard)");

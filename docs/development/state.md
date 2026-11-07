@@ -5,23 +5,25 @@
 
 ## Version
 
-**2.0.14** — cyrius 6.6.20 and the dep set that pins it. ⭐ **`f64_to` has saturated
-since cyrius 6.6.8**, and `crvoice_vocalize` guarded its sample count with a floor
-check that only the old `i64::MIN` tripped: rebuilt unchanged, a 1e300 s duration
-aborted the host process. The count is now ranged in f64 before the cast.
-⭐ **One buffer now has a ceiling**: past `VEC_CAP_MAX`, 2^28 samples, a push exits the
-process, so `crvoice_vocalize` and every other path that builds one buffer refuse
-such a count first (`prani_buffer_count_ok`). `stream_new` keeps 2^53 and carries
-anything longer. 39 deprecated `bayan_json_v_obj_get` calls migrated;
-`dist/prani.deps` is gone, by design. **2013 assertions / 18 suites**, audit exit 0.
+**2.1.0** — cyrius 6.7.9 and the dep set that pins it. A minor because the floor for
+consumers moves: **they now need cyrius 6.7.2 or later** (measured on a from-scratch
+consumer: 6.7.2 through 6.7.18 build and run, 6.7.1 and below fail at compile time).
+No logic changed and no computed value moved. **Not the roadmap's allocation and f32
+milestone**, which is renumbered 2.2.0. **2013 assertions / 18 suites**, audit exit 0.
+
+Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
+cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
+that builds one buffer refuses such a count first (`prani_buffer_count_ok`).
+`stream_new` keeps 2^53 and carries anything longer.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`).
 - `lib/` is a clean resolve at that pin: 42 files, 38 byte-identical to the
-  snapshot (sakshi 2.5.7, bayan **1.5.12** and ganita **1.2.14** among them) and
+  snapshot (sakshi 2.5.8, bayan **1.5.13** and ganita **1.2.15** among them) and
   svara/naad/hisab/goonj byte-identical to their tags' `dist/`. `cyrius deps --verify`
-  passes all 42. After a pin move, delete `cyrius.lock` and re-run `cyrius lib sync`
+  passes all 42, and `cyrius deps --locked` confirms `lib/` and the lock are what the
+  tags resolve. After a pin move, delete `cyrius.lock` and re-run `cyrius lib sync`
   then `cyrius deps`: deps keeps old commit rows beside the new ones. `--full`
   copies the whole snapshot, which this project does not want.
 - Build: `cyrius build src/main.cyr build/prani`
@@ -52,21 +54,21 @@ anything longer. 39 deprecated `bayan_json_v_obj_get` calls migrated;
 
 Consumed as Cyrius distlib bundles (git+tag in `cyrius.cyml`):
 
-- **svara** 3.5.6 — glottal source, formant filter, vocal tract (the excitation
+- **svara** 3.6.0 — glottal source, formant filter, vocal tract (the excitation
   + resonance engine tract/voice bridge to).
-- **naad** 2.2.5 — biquad filters (noise-only bandpass shaping).
-- **hisab** 3.3.7 — `ease_in_out_smooth` (envelope curves) + transitive math.
-- **goonj** 2.0.6, **sakshi** 2.5.7 — goonj referenced transitively by the
+- **naad** 2.3.0 — biquad filters (noise-only bandpass shaping).
+- **hisab** 3.4.0 — `ease_in_out_smooth` (envelope curves) + transitive math.
+- **goonj** 2.1.0, **sakshi** 2.5.8 — goonj referenced transitively by the
   svara/naad bundles; sakshi both transitive and called directly by
   `src/logging.cyr`.
 - stdlib: syscalls, string, alloc, str, fmt, vec, io, args, assert, math, ganita,
   hashmap, bayan, tagged, fnptr, callback, bench.
 
-This is the matched set for cyrius 6.6.20, and it moves together. svara 3.5.6, naad
-2.2.5, hisab 3.3.7 and goonj 2.0.6 each pin 6.6.20 exactly and agree on each other's
-sub-pins; sakshi 2.5.7 is the copy the snapshot bundles, so the resolver no longer
-skips the pinned dep. The next tag of svara, naad, hisab and goonj each needs cyrius 6.7.x,
-and naad 2.2.5 needs hisab 3.x, so none of these can move alone.
+This is the matched set for cyrius 6.7.9, and it moves together. svara 3.6.0, naad
+2.3.0, hisab 3.4.0 and goonj 2.1.0 each pin 6.7.9 exactly and agree on each other's
+sub-pins. sakshi 2.5.8 is the copy the snapshot bundles and hisab declares; 2.5.9 and
+2.5.10 also pin 6.7.9, but neither is the matched copy. The next tag of svara, naad,
+hisab and goonj each needs cyrius 6.7.18, so none of these can move alone.
 
 ## Port progress
 
@@ -90,7 +92,7 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.0.14: fmt · lint · docs · tests · bench,
+`cyrius audit` is green end to end as of 2.1.0: fmt · lint · docs · tests · bench,
 **exit 0**. 18 suites / **2013 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
@@ -118,7 +120,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 
 ## In flight
 
-Nothing. The port is complete, on the cyrius 6.6.20 matched dep set, audited
+Nothing. The port is complete, on the cyrius 6.7.9 matched dep set, audited
 (2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), and with a gate that would catch the next one (2.0.11).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work

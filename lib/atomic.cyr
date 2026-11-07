@@ -1,5 +1,6 @@
 # atomic.cyr — atomic memory primitives for concurrent stdlib code
 # Usage: include "lib/atomic.cyr"
+# cybs (the bootstrap compiler) compiles this file on the seed chain: no 6.7.x syntax, float, unary minus or `>>>`.
 # Requires: none (pure inline asm + cyrius primitives)
 #
 # Provides race-safe 8-byte read-modify-write and memory-ordering
@@ -16,7 +17,7 @@
 # Semantics: `atomic_load` / `atomic_store` are atomicity-only
 # (no ordering) — aligned 8-byte loads/stores are atomic on both
 # x86_64 (TSO) and aarch64 (naturally aligned). `atomic_cas` /
-# `atomic_fetch_add` carry ACQUIRE-RELEASE ordering (CVE-28, v6.1.38:
+# `atomic_fetch_add` carry ACQUIRE-RELEASE ordering (the aarch64 atomics-barrier bug, v6.1.38:
 # x86 lock-prefixed RMW is full/seq-cst; aarch64 uses ldaxr/stlxr =
 # acquire-release — sufficient for lock acquire/release and the
 # publish-after-init pattern). The aarch64 bodies previously used bare
@@ -98,7 +99,7 @@ fn atomic_cas(ptr, expected, new): i64 {
         param_load(x2, 2);             # new
         0x03; 0x00; 0x80; 0xD2;        # movz x3, #0           ; result = 0 (fail default)
         # retry:
-        # CVE-28 (v6.1.38): ldaxr (load-ACQUIRE exclusive) — byte[1] 0x7C→0xFC
+        # the aarch64 atomics-barrier bug (v6.1.38): ldaxr (load-ACQUIRE exclusive) — byte[1] 0x7C→0xFC
         # vs plain ldxr sets the acquire bit; same size, branch offsets unchanged.
         0x04; 0xFC; 0x5F; 0xC8;        # ldaxr x4, [x0]        ; load-acquire-exclusive
         0x9F; 0x00; 0x01; 0xEB;        # cmp x4, x1            ; compare to expected
@@ -151,7 +152,7 @@ fn atomic_fetch_add(ptr, delta): i64 {
         param_load(x0, 0);             # ptr
         param_load(x1, 1);             # delta
         # retry:
-        # CVE-28 (v6.1.38): ldaxr/stlxr (acquire/release exclusive) — byte[1]
+        # the aarch64 atomics-barrier bug (v6.1.38): ldaxr/stlxr (acquire/release exclusive) — byte[1]
         # 0x7C→0xFC vs plain ldxr/stxr; same size, retry offset unchanged.
         0x03; 0xFC; 0x5F; 0xC8;        # ldaxr x3, [x0]        ; old (acquire)
         0x64; 0x00; 0x01; 0x8B;        # add x4, x3, x1        ; old + delta

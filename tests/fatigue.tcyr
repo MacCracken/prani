@@ -414,7 +414,7 @@ assert_eq(FatigueModifiers_pitch_offset(mpm), 0xc008000000000000, "pitch == -3.0
 # ================================================================
 # What 2.0.5 could NOT close in this module, pinned so it is not believed fixed.
 # modifiers_make returns a POINTER and has no error channel; giving it one is a
-# return-contract change (roadmap 2.1.0). It therefore REPORTS a non-finite
+# return-contract change (roadmap 2.2.0). It therefore REPORTS a non-finite
 # field through prani_log_error and hands back what it was given, unaltered --
 # substituting the identity modifiers (0, 0, 1, 1) would be exactly the
 # plausible fabrication ADR-0001 rules out.

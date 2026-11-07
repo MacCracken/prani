@@ -6,7 +6,7 @@ call to the **ported Cyrius symbol names** in `lib/svara.cyr` / `lib/naad.cyr`
 (resolved via cyrius.cyml). Verify against `../svara/src/{glottal,formant,tract}.cyr`
 and `../naad/src/filter.cyr` if a signature looks off.
 
-**Checked against svara 3.5.6 / naad 2.2.5** — the tags pinned in `cyrius.cyml`.
+**Checked against svara 3.6.0 / naad 2.3.0** — the tags pinned in `cyrius.cyml`.
 Written as a porting map, kept as the standing description of the surface prani
 consumes: **re-verify it on every svara or naad bump.** 2.0.3's CRITICAL was a
 return value whose name and arity did not change while its *meaning* did.

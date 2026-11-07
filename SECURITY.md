@@ -15,7 +15,8 @@ Only the current release is supported. Fixes land forward; nothing is backported
 
 | Version | Supported | |
 |---------|-----------|---|
-| 2.0.14 | Yes | current release |
+| 2.1.0 | Yes | current release; needs cyrius 6.7.2 or later |
+| 2.0.14 | No | superseded; no known unrepaired defect, and the last release that builds below cyrius 6.7.2 |
 | 2.0.6 – 2.0.13 | No | superseded; `crvoice_vocalize` aborts the process past 2^28 samples on any toolchain, and on an overflowing sample count when built with cyrius 6.6.8 or later, or for aarch64 |
 | 2.0.0 – 2.0.5 | No | ships defects repaired in 2.0.3, 2.0.5 and 2.0.6 |
 | 1.x | No | the pre-port Rust crate, frozen in git history and unmaintained |

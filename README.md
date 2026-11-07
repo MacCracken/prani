@@ -63,7 +63,7 @@ rot against the API.
 ## Consuming prani
 
 Downstream Cyrius projects include the distlib bundle and resolve prani's
-dependencies from their own `cyrius.cyml`:
+dependencies from their own `cyrius.cyml`. They need cyrius 6.7.2 or later:
 
 ```
 include "lib/hisab.cyr"
@@ -77,7 +77,7 @@ include "lib/prani.cyr"
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.0.14"
+tag = "2.1.0"
 modules = ["dist/prani.cyr"]
 ```
 

@@ -100,7 +100,7 @@ source-filter interaction. **This measures the two stacks as shipped, not one
 algorithm in two languages,** and it is not evidence that Cyrius is 15× slower
 than Rust. The honest prior is that codegen dominates and float width is second.
 
-Closing the float-width variable is [roadmap 2.1.0 Lane A](development/roadmap.md),
+Closing the float-width variable is [roadmap 2.2.0 Lane A](development/roadmap.md),
 filed as **P0 on naad and svara** — prani cannot convert alone, because the
 per-sample svara calls are f64 on both sides. It is no longer *forced*: ganita
 1.1.4 ships an f32 scalar tier and prani calls nothing outside it.

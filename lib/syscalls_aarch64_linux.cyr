@@ -127,7 +127,8 @@ enum SysNr {
     # row rewrites 73 (x86 flock) → 32, so a native 73 was *matched as an x86 number* and
     # sys_pause() issued flock(2). Both candidates are owned — 73 is eaten by the shim and
     # the x86 ppoll number (271) is not a usable escape — so this takes the >=1000 band.
-    SYS_PPOLL = 1073;       # private alias → ESYSXLAT 1073→73 (a64). → sys_pause (NULL fds, NULL timeout)
+    # → sys_ppoll (6.7.9; the x86 peer's SYS_PPOLL is 271) and sys_pause (NULL fds, NULL timeout).
+    SYS_PPOLL = 1073;       # private alias → ESYSXLAT 1073→73 (a64)
 
     # Directory + cwd
     SYS_GETCWD = 17;

@@ -122,7 +122,7 @@ fn fatigue_alarm_habituation(self) {
 # unreinforced-alarm count and, when not reinforced, raise habituation by 0.1.
 # 2.0.5: `duration` must be in [0, 1e9] seconds (see PR_FAT_MAX_DURATION_S).
 # record_call has NO error channel -- it returns nothing and adding one would
-# be a signature change (roadmap 2.1.0's constructor/mutator-contract work) --
+# be a signature change (roadmap 2.2.0's constructor/mutator-contract work) --
 # so a bad duration is REPORTED through prani_log_error and the whole call
 # event is dropped, leaving the accumulators exactly as they were. Refusing one
 # call is strictly less lossy than admitting a NaN that makes every field, and
@@ -236,7 +236,7 @@ struct FatigueModifiers {
 # prani builds passes, including the one modifiers() derives -- so a non-finite
 # field here is the F11 symptom wherever it originated. It CANNOT reject: it
 # returns a pointer with no error channel, and giving it one would change the
-# return contract (roadmap 2.1.0). It therefore reports and returns the values
+# return contract (roadmap 2.2.0). It therefore reports and returns the values
 # it was given, unaltered: substituting the identity modifiers (0, 0, 1, 1)
 # would be precisely the plausible fabrication ADR-0001 rules out. The one
 # reachable producer of a non-finite field left in this module is a FatigueState

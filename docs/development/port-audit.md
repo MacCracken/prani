@@ -28,7 +28,7 @@ Proven reference template: **`src/error.cyr`, `src/rng.cyr`, `src/dsp.cyr`**
   buy precision that counts: the bar is parity with an **f32** oracle, so the
   extra mantissa is what *forces* the loosened tolerances below, not a gain.
   Widening is now a **choice nobody has revisited**, filed as
-  [roadmap 2.1.0 Lane A](roadmap.md) and as **P0 on naad and svara** — prani
+  [roadmap 2.2.0 Lane A](roadmap.md) and as **P0 on naad and svara** — prani
   cannot convert alone, because `svara_glottal_next_sample` and
   `svara_tract_process_sample` are called per sample and are f64 on both sides.
   Until those move, **keep new modules f64**: a half-converted prani would widen
@@ -116,7 +116,7 @@ tolerance. stdlib (assert/vec/math/alloc) auto-resolves — do not include it.
 
 ## Toolchain & commands
 
-- cycc pin: **6.6.20** (`cyrius.cyml [package].cyrius`).
+- cycc pin: **6.7.9** (`cyrius.cyml [package].cyrius`).
 - Deps: svara/naad/hisab/goonj/sakshi as `dist/*.cyr` git+tag bundles, vendored in
   `lib/`. Do not modify `lib/`.
 - **Concurrency**: `cyrius test`/`build`/`deps` re-resolve deps and race on
@@ -214,7 +214,7 @@ magnitude** as well: peak / energy against the oracle's own bars. The structural
 bar alone was not enough, and 2.0.4 proved it: an all-zero buffer satisfied every
 synthesis assertion in the project. Structural + magnitude is the meaningful bar
 once the port widens f32→f64 through a dependency compiled in f64; bit-exactness
-becomes available only if [2.1.0 Lane A](roadmap.md) converts the stack to f32.
+becomes available only if [2.2.0 Lane A](roadmap.md) converts the stack to f32.
 
 ## Deferred / follow-up work
 

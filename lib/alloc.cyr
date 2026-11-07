@@ -1,5 +1,6 @@
 # alloc.cyr — heap allocator with per-OS dispatch.
 # Usage: include "lib/alloc.cyr"
+# cybs (the bootstrap compiler) compiles this file on the seed chain: no 6.7.x syntax, float, unary minus or `>>>`.
 #
 # v5.8.37: alloc_init() is now OPTIONAL — alloc() lazy-inits the
 # heap on first call if alloc_init() was never invoked. Pre-v5.8.37
@@ -1012,7 +1013,7 @@ fn default_alloc(): i64 {
         store64(s + 16, &_alloc_free_noop);
         store64(s + 24, &_bump_reset);
         store64(s + 32, 0);
-        # CVE-28 (v6.1.38): fence so the 40-byte vtable's writes are committed
+        # the aarch64 atomics-barrier bug (v6.1.38): fence so the 40-byte vtable's writes are committed
         # before the pointer is published — a peer thread observing the published
         # pointer must see the fully-built vtable, not stale slots.
         atomic_fence();

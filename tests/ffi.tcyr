@@ -198,7 +198,7 @@ assert_eq(crvoice_vocal_effort(vnf), T_0_9, "set_effort(+inf) rejected -- effort
 prani_ffi_voice_set_effort(vnf, PRANI_NEG_INF);
 assert_eq(crvoice_vocal_effort(vnf), T_0_9, "set_effort(-inf) rejected -- effort unchanged");
 # NOT overreach: a FINITE out-of-range effort still saturates, as the oracle's
-# set_vocal_effort does. Rejecting that instead is 2.1.0's constructor contract.
+# set_vocal_effort does. Rejecting that instead is 2.2.0's constructor contract.
 prani_ffi_voice_set_effort(vnf, T_1_5);
 assert_eq(crvoice_vocal_effort(vnf), T_1_0, "finite 1.5 still clamps to 1.0 (not rejected)");
 

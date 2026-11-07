@@ -56,7 +56,7 @@
 #                               f64_clamp passes NaN through (measured), so
 #                               crvoice_with_size(v, NaN) / with_vocal_effort
 #                               smuggle a NaN into the voice; the builders return
-#                               `self` and have no error channel (roadmap 2.1.0),
+#                               `self` and have no error channel (roadmap 2.2.0),
 #                               so the guard lands here, where the stream
 #                               SNAPSHOTS them -- upstream of every svara call
 #                               this module makes.            -> INVALID_SPECIES
@@ -216,7 +216,7 @@ fn stream_new(voice, voc, intent, sample_rate, duration) {
     # f64_clamp(NaN, lo, hi) is NaN (measured), so every builder that clamps --
     # crvoice_with_size, crvoice_with_vocal_effort, crvoice_with_f0_offset --
     # will hand a NaN straight through. The builders return `self` and cannot
-    # report it (roadmap 2.1.0's constructor contract), so it is caught here,
+    # report it (roadmap 2.2.0's constructor contract), so it is caught here,
     # before the snapshot is stored and long before it reaches svara as a
     # contour f0, a tilt coefficient or an output gain.
     if (prani_finite3(f0, effort_amp, spectral_tilt) == 0) {
@@ -248,7 +248,7 @@ fn stream_new(voice, voc, intent, sample_rate, duration) {
     # this one of them. The other two are storage, not values -- see the struct
     # header. Neither return is checked, exactly as the `alloc` two lines above
     # is not: F9's arena-exhaustion class is library-wide and accepted (roadmap
-    # 2.1.0), and this adds no new exposure to it.
+    # 2.2.0), and this adds no new exposure to it.
     SynthStream_set_urgency(self, IntentModifiers_urgency(modifiers));
     SynthStream_set_options(self, crtract_options_default());
     SynthStream_set_contour_pts(self, vec_new());

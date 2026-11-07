@@ -162,7 +162,7 @@ fn prani_sample_count_ok(raw) {
 # The limit is lib/vec.cyr's own constant, not a copy of it, so this refuses
 # exactly what could never have succeeded. It is not a memory estimate: a buffer
 # at the limit costs ~4 GiB of bump arena, and an allocation refused below it is
-# still a process exit (roadmap 2.1.0 Lane B).
+# still a process exit (roadmap 2.2.0 Lane B).
 #must_use
 fn prani_buffer_count_ok(raw) {
     return prani_in_range(raw, 0, f64_from(VEC_CAP_MAX));

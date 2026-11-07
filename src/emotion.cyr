@@ -140,7 +140,7 @@ fn emotion_set(self, valence, arousal) {
 #
 # with_values / with_smoothing / set / update return the struct or nothing, so
 # they have no error channel and are left alone (the constructor contract is
-# roadmap 2.1.0). The guard therefore sits at the point of USE: every function
+# roadmap 2.2.0). The guard therefore sits at the point of USE: every function
 # here that already returns "value or negative code" -- the two zone
 # classifiers, the two selectors, evaluate -- checks the state before deriving
 # anything from it. That covers every way a bad value can arrive (a clamped

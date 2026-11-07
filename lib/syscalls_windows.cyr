@@ -427,23 +427,23 @@ fn sys_munmap(addr, length) {
     return syscall(SYS_MUNMAP, addr, length);
 }
 
-# brk-shaped allocator anchor — NOT rerouted on PE: syscall 12 returns -38 (-ENOSYS). Nothing
-# on Windows needs it: lib/alloc_windows.cyr reserves its heap, and maps each request too large
-# for it, through mmap (syscall 9 → VirtualAlloc) — since v6.0.39 found that the brk reroute this
-# comment used to promise had never been implemented. Kept so Linux-shaped source still compiles
-# for PE. CHANGELOG [6.6.20]
-fn sys_brk(addr) {
-    return syscall(SYS_BRK, addr);
-}
+# brk-shaped allocator anchor — a STUB on PE: returns -38 (-ENOSYS). Nothing on Windows needs
+# it: lib/alloc_windows.cyr reserves its heap, and maps each request too large for it, through
+# mmap (syscall 9 → VirtualAlloc) — since v6.0.39 found that the brk reroute this comment used
+# to promise had never been implemented. Kept so Linux-shaped source still compiles for PE.
+# CHANGELOG [6.6.20]. It returns the -38 itself and issues no `syscall(SYS_BRK, ..)`: no PE route
+# takes 12, so that raw call (same -38) drew the compiler's unrouted-syscall warning on EVERY PE
+# build that included lib/syscalls.cyr, called or not. CHANGELOG [6.7.9]
+fn sys_brk(addr): i64 { return 0 - 38; }
 
-# v6.2.12 (CVE-19 follow-on): real Windows CSPRNG via bcryptprimitives.dll!
+# v6.2.12 (the entropy-fallback hardening item follow-on): real Windows CSPRNG via bcryptprimitives.dll!
 # ProcessPrng, reached through the 0xF01A PE reroute (src/backend/pe/emit.cyr +
 # x86/emit.cyr). `BOOL ProcessPrng(PBYTE pbData, SIZE_T cbData)` fills `buf` with
 # `len` cryptographically-secure bytes and returns nonzero on success; on the
 # (practically-never) failure we return -1 so random_bytes() and its
 # ws/sandhi/sigil/tls_native consumers fail loudly. NEVER add a weak fallback
 # (uninitialised buffer / clock-ns / PID-mix) — a predictable mask/TXID/key is
-# worse than a failed op (exactly what CVE-19 closed). `flags` is ignored
+# worse than a failed op (exactly what the entropy-fallback hardening item closed). `flags` is ignored
 # (Linux getrandom flags have no ProcessPrng analog). See
 # issues/archived/2026-06-11-windows-entropy-primitive.md.
 # The BOOL is masked to 32 bits: EPROCPRNG_PE defines only eax, so a failure whose upper half
@@ -902,6 +902,13 @@ fn fd_wait_ready(fd, want_write, timeout_ms): i64 {
     if ((load16(&pfd + 10) & 0x4) != 0) { return 0 - 10038; }  # POLLNVAL → -WSAENOTSOCK
     return 1;
 }
+
+# ppoll — the linux_common wrapper's PE peer. Declines (-38): WSAPoll's WSAPOLLFD is
+# { SOCKET (8 bytes); SHORT events, revents } with Winsock event bits, not ppoll's 8-byte
+# { int fd; short, short }, it waits on sockets only, and it takes int ms rather than a
+# timespec and a signal mask — so a caller's pollfd array cannot be handed to it unchanged.
+# fd_wait_ready above is the portable one-socket wait. CHANGELOG [6.7.9]
+fn sys_ppoll(fds, nfds, tsp, sigmask, sigsetsize): i64 { return 0 - 38; }
 
 # ── PE peers for the linux_common wrappers a cross-platform consumer names on paths that
 # are dead on Windows (yukti's optical / eject / netlink-monitor / network-probe / mount /

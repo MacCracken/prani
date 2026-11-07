@@ -1,5 +1,6 @@
 # vec.cyr — dynamic array (vector)
 # Usage: include "lib/vec.cyr"
+# cybs (the bootstrap compiler) compiles this file on the seed chain: no 6.7.x syntax, float, unary minus or `>>>`.
 # Requires alloc_init() called first.
 #
 # v6.6.6: SELF-SUFFICIENT. The usage line said "include lib/alloc.cyr THEN include lib/vec.cyr"
@@ -73,7 +74,7 @@ fn _vec_die(): i64 {
     syscall(0, 1);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    # CVE-22 (v6.1.34): exit(1) — the backend translates 60 to the per-target
+    # the vec_die recursion bug (v6.1.34): exit(1) — the backend translates 60 to the per-target
     # exit (Darwin/PE/aarch64). v6.0.56 regressed this to `_vec_die()` (infinite
     # self-recursion → stack-overflow SIGSEGV instead of a clean abort).
     syscall(60, 1);

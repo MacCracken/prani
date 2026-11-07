@@ -73,7 +73,7 @@
 # The builders (crvoice_with_*) return `self` with no error channel, so a NaN
 # handed to one is stored (f64_clamp(NaN, lo, hi) == NaN -- NaN passes every
 # clamp) and only reported at the POINT OF USE, at the top of
-# crvoice_vocalize_with_intent. Giving the builders an error channel is 2.1.0's
+# crvoice_vocalize_with_intent. Giving the builders an error channel is 2.2.0's
 # constructor-contract work; guarding the consumer catches every path to svara
 # with zero API change. Measured before the guard: a NaN through with_size or
 # with_breathiness produced a full-length ALL-NaN buffer returned as SUCCESS.

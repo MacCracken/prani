@@ -147,7 +147,7 @@ fn fmt_byte(b): i64 {
 
 # Convert integer to string in buffer, return length.
 # Writes EXACTLY len + 1 bytes at buf (the digits and a NUL) — at most 21 (sign + 19 digits
-# + NUL). ⛔ CVE-78: the digits used to be built in place from buf+23 downward and then
+# + NUL). ⛔ CYRIUS-2026-0028: the digits used to be built in place from buf+23 downward and then
 # shifted, so every call wrote 24 bytes whatever the number's length, overrunning any
 # `buf + pos` caller with less room — fmt_float_buf inside fmt_float's own stack buffer,
 # and heap callers such as `alloc(32) + 10`. The scratch is a local now (the fmt_hex_buf
@@ -180,7 +180,7 @@ fn fmt_int_buf(n, buf): i64 {
 # Convert hex number to string in buffer, return length.
 # Writes len + 1 <= 17 bytes at buf (up to 16 digits + NUL): a stack caller needs
 # `var b[24]`, not `[16]` — fmt_sprintf's %x scratch was 16 and its NUL landed on the
-# neighbouring slot (CVE-78's class). tests/gates/memory/fmt_buf_callers_sized.sh holds
+# neighbouring slot (CYRIUS-2026-0028's class). tests/gates/memory/fmt_buf_callers_sized.sh holds
 # every `&local` caller of this and fmt_int_buf (len + 1 <= 21) to it. CHANGELOG [6.6.20]
 fn fmt_hex_buf(n, buf): i64 {
     var bi = 15;
@@ -474,7 +474,7 @@ fn fmt_float_buf(val, buf, decimals): i64 {
 }
 
 # Print f64 to stdout with given decimal places.
-# CVE-78: `buf` was 32 bytes, short of fmt_float_buf's worst case (see its header) — sign,
+# CYRIUS-2026-0028: `buf` was 32 bytes, short of fmt_float_buf's worst case (see its header) — sign,
 # a 20-char integer field, '.', and the fraction field.
 # At most 18 decimals are formatted into the buffer (43 bytes at worst); any wider field is
 # the same '0' padding fmt_float_buf would write, sent in pieces — no heap, any `decimals`.

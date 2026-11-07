@@ -85,8 +85,9 @@ benchmark warning below.
   Deserializers must reject input that does not parse
   ([ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)).
 - **No panics, no unchecked dereferences.** `alloc()` returns 0 on exhaustion and
-  `vec_push` returns -1; the library-wide contract for that is roadmap 2.1.0, but
-  do not add new unchecked sites in the meantime.
+  `vec_push` exits the process on failure (`vec_push_a` is the form that returns
+  -1); the library-wide contract for that is roadmap 2.2.0, but do not add new
+  unchecked sites in the meantime.
 - **Structured logging via `src/logging.cyr`** (`prani_log_info` / `_warn` /
   `_error` / `_debug` / `_fatal`, sakshi-backed) — never a raw write.
 - **Float literals**: integers via `f64_from(n)`; non-integers as a module-top

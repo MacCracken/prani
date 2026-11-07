@@ -46,6 +46,11 @@ silently *empty* buffer rather than a crash.
 > the duplicate is what goes stale. It refuses exactly what could never have succeeded,
 > so every render that worked still does, and `stream_new` carries longer ones.
 
+> **Note, 2.1.0 (2026-11-07) — the roadmap item this ADR defers to moved.** Where this
+> ADR says "roadmap 2.1.0" it means the constructor contract, now numbered **2.2.0**.
+> The number 2.1.0 went to the cyrius 6.7.x floor release, which closes none of the
+> holes listed here.
+
 The oracle has the same holes. Rust's `f32::clamp` is documented to return NaN
 for a NaN input, so `2.0.3:rust-old/src/voice.rs`'s `offset.clamp(-range, range)`
 passes NaN through exactly as the port did. **This is an inherited defect class,

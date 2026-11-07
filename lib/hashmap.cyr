@@ -202,9 +202,8 @@ fn map_count(m): i64 { return load64(m + 16); }
 # 5000 live) — and made a steady-size insert fallible where it had needed no memory at all.
 # Only doubling allocates, and a map that has reached its steady size never doubles again
 # (the one exception is a table with no EMPTY slot at all — see _map_rebuild_in_place).
-# ⛔ hashmap_fast still has THIS defect: its same-capacity _fhm_rehash allocates three fresh
-# arrays and never releases the old ones, so steady-size fhm churn still leaks (filed:
-# docs/development/issues/stdlib-hashmap-fast-same-capacity-rehash-leak.md). CHANGELOG [6.6.20]
+# lib/hashmap_fast.cyr's same-capacity rebuild is in place too (_fhm_rebuild_in_place, a group
+# walk of the same shape — CHANGELOG [6.7.3]). CHANGELOG [6.6.20]
 fn _map_tombp(m): i64 { return load64(m) + load64(m + 8) * 24; }
 fn _map_u64_tombp(m): i64 { return load64(m) + load64(m + 8) * 16; }
 
@@ -346,7 +345,7 @@ fn _hm_die(): i64 {
     syscall(0, 1);
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    # CVE-22 (v6.1.34): exit(1) — backend translates 60 per target. v6.0.56
+    # the vec_die recursion bug (v6.1.34): exit(1) — backend translates 60 per target. v6.0.56
     # regressed this to `_hm_die()` (infinite self-recursion → SIGSEGV instead
     # of a clean abort).
     syscall(60, 1);

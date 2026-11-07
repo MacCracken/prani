@@ -6,8 +6,9 @@
 #           f64_log2 / f64_exp2 / f64_atan builtins on aarch64 and behind
 #           f64_sin / f64_cos on EVERY target (6.6.9);
 #           f64_clamp, f64_min, f64_max, f64_lerp, f64_sign,
-#           f64_fract, gcd, lcm, f64_parse, f64_parse_ok
-#           (correctly rounded — a port of bayan 1.5.10's parser, CHANGELOG [6.6.13]).
+#           f64_fract, gcd, lcm, f64_parse, f64_parse_n, f64_parse_ok
+#           (correctly rounded — a port of bayan 1.5.10's parser, CHANGELOG [6.6.13];
+#           f64_parse_n, the length-bounded form, CHANGELOG [6.7.9]).
 #           (sinh, cosh, tanh, pow and hypot live in lib/ganita.cyr.)
 # All f64 functions operate on f64 bit patterns.
 
@@ -1106,8 +1107,10 @@ fn _f64p_decexp_index(E): i64 {
 # 800 digits are enough because an f64 midpoint has at most 767 significant
 # decimal digits; past them, only whether ANY nonzero digit follows matters.
 # The state lives in a caller-owned block so the parser stays reentrant:
-#   st+0 nd, st+8 dp, st+16 trunc. Buffers: digits 800 B, shift scratch 832 B.
-var _F64P_DEC_CAP = 800;
+#   st+0 nd, st+8 dp, st+16 trunc. Buffers: digits _F64P_DEC_CAP bytes, shift scratch
+#   _F64P_DEC_CAP + 32 (a shift adds at most 18 digits, _f64p_dec_lsh), both sized by this
+#   const (6.7.6).
+const _F64P_DEC_CAP = 800;
 # Largest shift per step. Every intermediate stays below 10 * 2^59 < 2^63, so the
 # signed compares and `/` on i64 are exact.
 var _F64P_DEC_MAXSH = 59;
@@ -1294,8 +1297,8 @@ fn _f64p_dec_set(dg, st, s, n, xe): i64 {
 # Scales the decimal into [0.5, 1) by exact binary shifts, counting them, then
 # reads off the top 53 bits with one correct rounding (Go: decimal.floatBits).
 fn _f64p_exact(s, n, xe, neg): i64 {
-    var dg[800];
-    var tmp[832];
+    var dg[_F64P_DEC_CAP];
+    var tmp[_F64P_DEC_CAP + 32];
     var st[24];
     var sign = 0;
     if (neg != 0) { sign = _F64P_BIT63; }
@@ -1347,9 +1350,9 @@ fn _f64p_exact(s, n, xe, neg): i64 {
 # Parse a decimal number to an f64 bit pattern, reading at most `n` bytes from `s`
 # and stopping at the first non-number byte. Handles sign, integer/fraction, e/E
 # exponent, Inf/NaN. The exponent accumulator SATURATES (no O(exp) loop -> no DoS).
-# Any n/N start reads as NaN and any i/I start as +/-Inf (bayan's JSON leniency);
-# f64_parse screens those first. The length-bounded core is the delegation point
-# for bayan (one algorithm in the ecosystem) — internal until bayan calls it.
+# Any n/N start reads as NaN and any i/I start as +/-Inf (bayan's JSON leniency),
+# so this core stays internal: f64_parse_n is the public bounded entry and screens
+# those starts first with the strict front (bayan keeps its leniency on its side).
 fn _f64_parse_n(s, n): i64 {
     var i = 0;
     var neg = 0;
@@ -1432,35 +1435,55 @@ fn _f64_parse_n(s, n): i64 {
     return _f64p_exact(s + ms, me - ms, xe, neg);
 }
 
-# Parse a NUL-terminated cstring to the correctly rounded f64 bit pattern.
-# Leading spaces/tabs, then an optional sign; a strict `nan` (any case, sign
-# ignored) -> quiet NaN, a strict `inf` -> +/-Inf, any other n/N/i/I start -> 0.
-# Otherwise digits, an optional fraction and an optional e/E exponent; the scan
-# stops at the NUL or the first non-number byte. No digits -> 0; "-0" -> -0.0.
-# The exponent accumulator saturates at 100000 (CHANGELOG [6.4.69]: "1e100000000"
-# used to burn ~237 ms in an O(exp) loop), so the cost is O(len) and tier 3's
-# scaling is bounded by the gross range gates (|dp| <= 330).
-fn f64_parse(s): i64 {
+# Parse the decimal number in the span s[0..n) to the correctly rounded f64 bit
+# pattern, reading at most n bytes: a field inside a larger buffer (the (ptr, len)
+# a JSON / TOML / CSV reader holds) needs no NUL and no copy, and the bytes after
+# it are never read. f64_parse_n("2.57,", 3) == 2.5. The grammar is f64_parse's:
+# leading spaces/tabs, then an optional sign; a strict `nan` (any case, sign
+# ignored) -> quiet NaN, a strict `inf` -> +/-Inf, each whole inside the span (at
+# n = 2, "na" is 0), any other n/N/i/I start -> 0. Otherwise digits, an optional
+# fraction and an optional e/E exponent; the scan stops at n or the first
+# non-number byte (a NUL inside the span is one). No digits, or n <= 0 -> 0;
+# "-0" -> -0.0. The exponent accumulator saturates at 100000 (CHANGELOG [6.4.69]:
+# "1e100000000" used to burn ~237 ms in an O(exp) loop), so the cost is O(n) and
+# tier 3's scaling is bounded by the gross range gates (|dp| <= 330).
+fn f64_parse_n(s, n): i64 { return _f64p_strict_n(s, n); }
+
+# Parse a NUL-terminated cstring to the correctly rounded f64 bit pattern: the
+# grammar and results of f64_parse_n, the span running to the NUL (the scan stops
+# there, as at any non-number byte, and never reads past it).
+fn f64_parse(s): i64 { return _f64p_strict_n(s, 2147483647); }
+
+# The one strict front both entries share, under the private prefix: a program that
+# defines its own f64_parse_n (last definition wins) cannot swap f64_parse's body.
+fn _f64p_strict_n(s, n): i64 {
     var i = 0;
     var neg = 0;
-    while (load8(s + i) == 32 || load8(s + i) == 9) { i = i + 1; }
-    if (load8(s + i) == 45) { neg = 1; i = i + 1; }
-    elif (load8(s + i) == 43) { i = i + 1; }
-    var c = load8(s + i);
+    while (i < n && (load8(s + i) == 32 || load8(s + i) == 9)) { i = i + 1; }
+    if (i < n && load8(s + i) == 45) { neg = 1; i = i + 1; }
+    elif (i < n && load8(s + i) == 43) { i = i + 1; }
+    var c = 0;
+    if (i < n) { c = load8(s + i); }
+    # The strict words read byte by byte, each read inside the span and only after
+    # the one before it matched: a NUL-terminated "n" is never read past its NUL.
     if (c == 78 || c == 110) {
-        if ((load8(s+i+1) == 97 || load8(s+i+1) == 65) && (load8(s+i+2) == 78 || load8(s+i+2) == 110)) {
-            return 0x7FF8000000000000;
+        if (i + 1 < n && (load8(s + i + 1) == 97 || load8(s + i + 1) == 65)) {
+            if (i + 2 < n && (load8(s + i + 2) == 78 || load8(s + i + 2) == 110)) {
+                return 0x7FF8000000000000;
+            }
         }
         return 0;
     }
     if (c == 73 || c == 105) {
-        if ((load8(s+i+1) == 110 || load8(s+i+1) == 78) && (load8(s+i+2) == 102 || load8(s+i+2) == 70)) {
-            if (neg == 1) { return 0xFFF0000000000000; }
-            return 0x7FF0000000000000;
+        if (i + 1 < n && (load8(s + i + 1) == 110 || load8(s + i + 1) == 78)) {
+            if (i + 2 < n && (load8(s + i + 2) == 102 || load8(s + i + 2) == 70)) {
+                if (neg == 1) { return 0xFFF0000000000000; }
+                return 0x7FF0000000000000;
+            }
         }
         return 0;
     }
-    return _f64_parse_n(s, 2147483647);
+    return _f64_parse_n(s, n);
 }
 
 # Parse with success flag. Writes f64 result to *out, returns 1 on

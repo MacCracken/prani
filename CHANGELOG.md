@@ -20,6 +20,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.1.0] - cyrius 6.7.9, and a new floor for consumers
+
+Toolchain and dependency release. `cyrius` 6.6.20 -> **6.7.9**, `svara` 3.5.6 ->
+**3.6.0**, `naad` 2.2.5 -> **2.3.0**, `hisab` 3.3.7 -> **3.4.0**, `goonj` 2.0.6 ->
+**2.1.0**, `sakshi` 2.5.7 -> **2.5.8**, with bayan 1.5.12 -> 1.5.13 and ganita 1.2.14 ->
+1.2.15 from the snapshot. This is the matched set for 6.7.9: svara, naad, hisab and goonj
+each pin it exactly and agree on each other's sub-pins, sakshi 2.5.8 is the copy the
+toolchain bundles, and the next tag of each of the four needs cyrius 6.7.18.
+
+It is a minor because the floor for consumers moves: **they now need cyrius 6.7.2 or
+later.** No API change, no logic change, and no computed value moves. The `src/` diff
+has no non-comment line.
+
+**This is not the 2.1.0 the roadmap described.** That milestone, the allocation-failure
+contract and f32 throughout, is renumbered **2.2.0** and none of it is here.
+
+### Changed
+
+- ⚠ **Consumers need cyrius 6.7.2 or later.** sakshi 2.5.8 declares its syscall numbers
+  `const`, which arrives in 6.7.2, and goonj pulls sakshi in. Measured with a from-scratch
+  consumer of this bundle: 6.7.2, 6.7.5, 6.7.8, 6.7.9 and 6.7.18 build and run; 6.6.20,
+  6.7.0 and 6.7.1 fail at compile time, in `lib/goonj.cyr`. The failure is loud, not
+  silent. 2.0.14 is the last prani that builds below this floor.
+- **The roadmap's 2.1.0 is now 2.2.0.** 33 references in comments, tests and docs moved
+  with it. The dated records keep the old number, and the roadmap and
+  [ADR-0006](docs/adr/0006-reject-non-finite-numeric-input.md) say so.
+- **sakshi is 2.5.8, not the newest tag that pins 6.7.9.** 2.5.9 and 2.5.10 pin it too,
+  but 2.5.8 is what hisab 3.4.0 declares and what the toolchain bundles.
+- **`build/prani` grows from 2.77 MB to 3.10 MB**, because hisab's bundle does.
+  `dist/prani.cyr` changes only its version line.
+- **`lib/` and `cyrius.lock` are a clean resolve at the pin.** 42 files, 38 byte-identical
+  to the snapshot and four to their tag's `dist/`; five commit rows. `cyrius deps --verify`
+  passes all 42, and `cyrius deps --locked`, new in 6.7.x, confirms `lib/` and the lock
+  are exactly what the tags resolve.
+
+### Fixed
+
+- **`CONTRIBUTING.md` still said `vec_push` returns -1.** It exits the process on a failed
+  allocation; `vec_push_a` is the form that returns -1. 2.0.14 corrected the same claim
+  in the roadmap and missed this copy.
+
+### Upgrading
+
+- **Move the pins together:** cyrius 6.7.9, svara 3.6.0, naad 2.3.0, hisab 3.4.0 and
+  goonj 2.1.0. A consumer that calls one of hisab 3.4.0's 27 retired names itself gets a
+  build error; hisab's changelog has the replacements.
+- **A consumer that cannot reach cyrius 6.7.2 stays on 2.0.14.**
+
+### Verified
+
+Every figure below was measured on x86_64, against this tree, and nothing here ran on
+aarch64.
+
+- **Value sweep, 2.0.14 on 6.6.20 against this tree on 6.7.9.** All 3,198,946 values
+  across 1,799 renders are **byte-identical**: every species, vocalization and intent at
+  two rates, the builders, streams, a bout, a phrase, a chorus, spatial, the nasal path and
+  the RNG. The same sweep moved 2,682,303 values last release, so it can see a change.
+- **The consumed surface was diffed.** Of the 58 external names prani calls, 41 have
+  identical bodies, `ease_in_out_smooth` among them, and 16 are compiler builtins. One
+  changed: `bayan_json_v_parse_buf` names its 48-byte state through a constant, which is
+  still 48. prani calls none of hisab's 27 retired names.
+- **The language changes do not reach prani's source.** Outside strings and comments it
+  has no lone `!` (a no-op until 6.7.3, so a real one would have flipped), no `~`, no
+  `>>>`, no unary `-` on a non-literal, and no name that became a keyword. 6.7.7's arity
+  check on forward calls compiles the whole tree.
+- **Hostile inputs, one process per case.** The 2.0.14 probe: 12 values through 34
+  entry-point and parameter combinations, 408 cases per tree, 25 s each. All 408 exit 0
+  on both trees, and **no case moved**: the same exit, return code, length and
+  non-finite count throughout.
+- **The 2.0.14 guards still hold on 6.7.9.** An off-by-one in either ceiling helper,
+  `stream_next_block` ignoring its return, `prani_vec_push_zeros` without its sum check
+  and an unguarded Doppler each still fail their suite.
+- **Benchmarks are flat**: six alternating rounds on one machine, best of each, median
+  0.99x and every row from 0.89x to 1.02x. The `f64_sin`-heavy paths 2.0.14 slowed did
+  not move again.
+- **Gate:** `cyrius audit` exit 0, 18 suites / 2013 assertions; `cyrius fuzz`,
+  `scripts/run-examples.sh`, `cyrius distlib --check`, `cyrius deps --verify` and
+  `cyrius deps --locked` all clean.
+
 ## [2.0.14] - cyrius 6.6.20, and a guard that saturation walked past
 
 Toolchain and dependency release. `cyrius` 6.6.3 -> **6.6.20**, `svara` 3.5.4 ->

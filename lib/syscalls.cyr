@@ -218,7 +218,7 @@ fn signal_default(signum): i64 {
 #
 # ⛔ WHY: a flagless write(2) to a peer that has reset the connection raises SIGPIPE, whose
 # default disposition TERMINATES the process — so any peer could kill a lib/net.cyr client or
-# server it was talking to, remotely and unauthenticated (CVE-74; CVE-66 was the same class on
+# server it was talking to, remotely and unauthenticated (CYRIUS-2026-0025; CYRIUS-2026-0021 was the same class on
 # the TLS transport, lib/tls_native_conn.cyr).
 #   Linux: send(MSG_NOSIGNAL 0x4000) — sendto with no destination IS write(2) on a connected
 #     socket, with the same O_NONBLOCK and SO_SNDTIMEO behaviour. ENOTSOCK (88: a pipe, a file,

@@ -494,7 +494,7 @@ assert_eq(vec_len(z_purr), 0, "purr: 0 samples -> empty buffer");
 # ================================================================
 test_group("2.0.5 SynthesisOptions -- non-finite fields rejected where they are read");
 # crtract_options_new has no error channel (it returns the struct), and 2.0.5
-# does not give it one -- that is 2.1.0's constructor-contract work, and
+# does not give it one -- that is 2.2.0's constructor-contract work, and
 # stream.cyr uses its result as a pointer without a check. So the NaN is caught
 # at the point of USE instead, which covers every path into svara with no API
 # change. Before: a NaN subharmonic_amp silently took the no-subharmonic arm

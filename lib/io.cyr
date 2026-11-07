@@ -884,7 +884,7 @@ fn file_replace_atomic(path, buf, len): i64 {
     return file_write_atomic(real, buf, len);
 }
 
-# ⛔ 6.6.20 (CVE-98) — a REPLACE that follows a symlink only to a file INSIDE `root`.
+# ⛔ 6.6.20 (the committed-symlink write bug) — a REPLACE that follows a symlink only to a file INSIDE `root`.
 # The CLI rewrote a checkout's own files through file_replace_atomic / cbt's _aw_open_replace,
 # which follow a link wherever it leads — so a COMMITTED link wrote outside the project: a
 # dangling `cyrius.cyml -> ~/.ssh/authorized_keys` made `cyrius update` CREATE that file from the

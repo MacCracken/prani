@@ -472,13 +472,13 @@ fn _sb_grow_a(a, sb, n): i64 {
 }
 
 # Ensure builder has room for n more bytes. Returns 0 on success or -1 on grow
-# OOM. CVE-25 (v6.1.38): previously dropped `_sb_grow_a`'s rc and returned 0, so
+# OOM. CYRIUS-2026-0004 (v6.1.38): previously dropped `_sb_grow_a`'s rc and returned 0, so
 # the back-compat builders below wrote past the un-grown buffer on OOM.
 fn _sb_grow(sb, n): i64 {
     return _sb_grow_a(default_alloc(), sb, n);
 }
 
-# CVE-25 (v6.1.38): abort on a string-builder grow OOM, mirroring _vec_die — the
+# CYRIUS-2026-0004 (v6.1.38): abort on a string-builder grow OOM, mirroring _vec_die — the
 # back-compat builders have no error return, so (like vec_push) they write the
 # diagnostic + exit(1) rather than corrupt the heap past the old allocation.
 fn _sb_die(): i64 {

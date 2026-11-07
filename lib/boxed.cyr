@@ -59,7 +59,7 @@
 # it always did. So it keeps its name, and all 28 ecosystem construction sites need zero edits.
 # Retire what changed; keep what did not.
 #
-# See CHANGELOG [6.6.2] and docs/development/ecosystem-migration-6.6.2.md.
+# See CHANGELOG [6.6.2] and docs/development/ecosystem-migration.md § 6.6.0 – 6.6.2.
 
 include "lib/alloc.cyr"
 

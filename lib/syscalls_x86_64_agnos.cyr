@@ -592,7 +592,13 @@ enum AgnosRedirOp {
     REDIR_CLEAR = 0x200;   # #62 a1 = exactly REDIR_CLEAR: empty the caller's redirect set
 }
 var SPAWN_LINE_MAX = 127;    # #43 line form (flags == 0) and #37: payload bytes
-var SPAWN_ARGV_MAX = 1024;   # #43 SPAWN_F_ARGV blob: total bytes, NULs included (min 2)
+const _SPAWN_ARGV_MAX = 1024;   # #43 SPAWN_F_ARGV blob: total bytes, NULs included (min 2)
+var SPAWN_ARGV_MAX = _SPAWN_ARGV_MAX;   # the const sizes every argv blob buffer (6.7.6)
+const _SPAWN_ENV_MAX = 1024;    # #43 env blob (a3 / a4): total bytes, NULs included — the kernel's limit
+var SPAWN_ENV_MAX = _SPAWN_ENV_MAX;     # the const sizes every env blob buffer (6.7.9)
+# ⚠ SPAWN_ARGV_MAX and SPAWN_ENV_MAX tell a caller the kernel's limits; every buffer, cap and check
+# in the peer reads the CONST, so writing either var changes nothing here (before 6.7.9 a raised
+# SPAWN_ARGV_MAX let an argv blob run past its const-sized stack buffer). CHANGELOG [6.7.9]
 var SPAWN_ARGC_MAX = 16;     # entries / tokens, both forms — MORE IS REFUSED (-SPAWN_E_ARGS), never dropped
 
 # ================================================================
@@ -872,6 +878,21 @@ fn fd_restore_flags(fd, saved): i64 { return 0 - 38; }
 # already deadline-bounded inside the peer (_agnos_sock_recv_block / _agnos_sock_send_dl take
 # the wait in µs). CHANGELOG [6.6.13]
 fn fd_wait_ready(fd, want_write, timeout_ms): i64 { return 0 - 38; }
+# ── 6.7.9: agnos peers for three linux_common wrappers this peer lacked, so portable source
+# naming them failed to COMPILE here ("reachable undefined function") and yukti `#ifdef`'d
+# every call. ⛔ Same rule as the blocks above — no Linux `SYS_*` constant is minted: Linux 16
+# (ioctl) is agnos `kill` (SYS_KILL above), and 262 (newfstatat) / 271 (ppoll) are no agnos
+# call, so they would fall through the dispatch chain. Each declines with -38/-ENOSYS.
+# CHANGELOG [6.7.9]
+# Wait on an array of pollfd entries. agnos has no poll (fd_wait_ready's reason above).
+fn sys_ppoll(fds, nfds, tsp, sigmask, sigsetsize): i64 { return 0 - 38; }
+# Device control. agnos has no ioctl; its devices are reached through their own calls
+# (blk_open / blk_read, the gpu band).
+fn sys_ioctl(fd, request, argp): i64 { return 0 - 38; }
+# stat relative to a directory fd. agnos has no at-family and no dirfd; its stat family is
+# length-carrying by path (sys_stat / sys_lstat(path, pathlen, buf)), so a real fstatat over
+# them is a later choice — this declines rather than guessing a dirfd's meaning.
+fn sys_fstatat(dirfd, path, buf, flags): i64 { return 0 - 38; }
 
 # at-family constants. The Linux values, defined here so the PORTABLE surface is
 # complete: this peer is STANDALONE (it does not include syscalls_linux_common.cyr,
@@ -1799,7 +1820,7 @@ fn _agnos_spawn_refuse(): i64 { return syscall(SYS_SPAWN_PATH, 0, 0x40000, 0, 0)
 # oversized len bleeds into the flag bits and silently arms CLEANFD. CHANGELOG [6.6.7]
 fn sys_spawn_argv(blob, len, env, envlen, flags): i64 {
     if (len < 2) { return _agnos_spawn_refuse(); }
-    if (len > SPAWN_ARGV_MAX) { return _agnos_spawn_refuse(); }
+    if (len > _SPAWN_ARGV_MAX) { return _agnos_spawn_refuse(); }
     if (flags != 0) { if (flags != SPAWN_F_CLEANFD) { return _agnos_spawn_refuse(); } }
     return syscall(SYS_SPAWN_PATH, blob, len | SPAWN_F_ARGV | flags, env, envlen);
 }
@@ -1809,7 +1830,7 @@ fn sys_spawn_argv(blob, len, env, envlen, flags): i64 {
 # staged onto the child's init stack); `sys_spawn_path` is exactly this with `env = 0`, so
 # every existing caller is unaffected.
 #
-# Blob format: packed `KEY=VALUE\0…`, ≤1024 B, ≤16 entries. This is how an endowed channel
+# Blob format: packed `KEY=VALUE\0…`, ≤ _SPAWN_ENV_MAX (1024) B, ≤16 entries. This is how an endowed channel
 # reaches its child: `sys_chan_endow` returns the fd, the parent packs `AGNOS_CHAN=<fd>`,
 # and the child getenv's it.
 #
@@ -2150,7 +2171,7 @@ fn _agnos_sa_in(sa, len, ip_out, port_out): i64 {
 
 # Bind a socket fd to the sockaddr_in `sockaddr`. agnos merges bind into listen, so this records
 # the port and the address class for sys_listen — 127/8 a LOOPBACK listener, 0.0.0.0 or this
-# host's address ANY (CVE-48's rule, _agnos_listen_class). 0, or -88 (ENOTSOCK), the sockaddr's
+# host's address ANY (CYRIUS-2026-0008's rule, _agnos_listen_class). 0, or -88 (ENOTSOCK), the sockaddr's
 # -14 / -22 / -97, -99 (EADDRNOTAVAIL: an address this host does not have — refused, never
 # widened), -22 (EINVAL: port 0 or above 65535; agnos has no ephemeral bind).
 fn sys_bind(fd, sockaddr, addrlen): i64 {
@@ -2457,7 +2478,7 @@ fn _agnos_listen_stash_port(fd, port): i64 {
 # The #56 listen class for a bind to `ip` (the kernel ip4() form), or -1 when agnos cannot bind
 # that address: 127/8 → SOCK_LISTEN_LOOPBACK; 0.0.0.0 or this host's net_ip → 0 (ANY);
 # anything else → -1 (an address this host does not have — refused, never widened).
-# ⛔ CVE-48 (v6.6.7): the adapter used to IGNORE the bind address and always listen class 0, so
+# ⛔ CYRIUS-2026-0008 (v6.6.7): the adapter used to IGNORE the bind address and always listen class 0, so
 # `sock_bind(fd, INADDR_LOOPBACK(), p)` — a server meaning "local clients only", daimon's
 # unauthenticated control API among them — was reachable from the NETWORK, with no diagnostic.
 fn _agnos_listen_class(ip): i64 {

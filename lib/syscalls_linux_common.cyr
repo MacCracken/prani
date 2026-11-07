@@ -1242,6 +1242,28 @@ fn fd_wait_ready(fd, want_write, timeout_ms): i64 {
     return 1;
 }
 
+# ppoll(fds, nfds, tsp, sigmask, sigsetsize) — wait on `nfds` struct pollfd entries
+# ({ int fd; short events, revents; }, 8 bytes each) until one is ready, `tsp` (a struct
+# timespec *, 0 = no timeout) passes, or a signal arrives; while it waits the signal mask is
+# `sigmask` (0 = unchanged; else `sigsetsize` must be 8). Returns the number of entries with a
+# nonzero revents, 0 on a timeout, or -errno. The multi-fd, caller-owned-array form of
+# fd_wait_ready above — the kernel call itself, with its own timespec, not poll's int ms.
+# x86_64 issues 271; aarch64 the peer's 1073, the private alias ESYSXLAT renumbers to native
+# 73 (the x86-compat flock row eats a native 73). Darwin has no ppoll and neither Mach-O
+# backend routes either number, so macOS declines with -78 (Darwin ENOSYS) and the number is
+# never compiled there; the default arm is cx's -38 (cxvm does not translate these pointer
+# arguments), and the Windows and agnos peers decline with -38 too. Asked by yukti, whose
+# `_yk_ppoll` spelled the one raw syscall itself. CHANGELOG [6.7.9]
+fn sys_ppoll(fds, nfds, tsp, sigmask, sigsetsize): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifdef CYRIUS_TARGET_LINUX
+    return syscall(SYS_PPOLL, fds, nfds, tsp, sigmask, sigsetsize);
+    #endif
+    return 0 - 38;
+}
+
 # Accept a connection on a listening socket; `flags` accepts
 # SOCK_CLOEXEC | SOCK_NONBLOCK to set them atomically.
 # v6.5.16: Darwin has NO accept4 — it is absent from the syscall table on both macOS

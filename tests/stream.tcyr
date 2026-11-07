@@ -415,7 +415,7 @@ assert_eq(stream_total_samples(g_hr), 158760000, "3600 s * 44100 == 158760000 sa
 test_group("2.0.5 stream_new -- a NaN voice config is rejected at the snapshot (F11)");
 # The builders clamp, and f64_clamp(NaN, lo, hi) is NaN (measured), so a NaN
 # reaches the voice intact. crvoice_with_* return `self` and have no error
-# channel (roadmap 2.1.0), so the guard lands where the stream SNAPSHOTS them.
+# channel (roadmap 2.2.0), so the guard lands where the stream SNAPSHOTS them.
 var g_vn = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_NAN);
 assert_eq(prani_is_finite(crvoice_effective_f0(g_vn)), 0,
   "measured: a NaN size_scale survives every clamp into effective_f0");
