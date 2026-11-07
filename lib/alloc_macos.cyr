@@ -48,6 +48,10 @@ fn alloc(size) {
     # Pure validation OUTSIDE the v6.0.64 alloc lock (no shared state).
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
+    #ifdef CYRIUS_POISON
+    var pz_req = size;       # 6.6.18: redzone room, after the checks on the REQUEST
+    size = size + _POISON_HDR + _POISON_RZ + _POISON_RZ;
+    #endif
     # Align to 8 bytes (local).
     size = (size + 7) & (0 - 8);
     # --- critical section (shared bump pointer) ---
@@ -55,6 +59,13 @@ fn alloc(size) {
     # v5.8.37 — lazy-init the heap if alloc_init() was never called
     # (now race-safe). Mirrors lib/alloc.cyr; see its header.
     if (_heap_base == 0) { alloc_init(); }
+    #ifdef CYRIUS_POISON
+    # 6.6.18 review: the reserve-fit decision alloc_used() reports must be the NON-poison one.
+    # The redzones fill the reserve sooner, so a request that fits without poison can take the
+    # `big` path here; the shadow counter advances by the rounded request exactly when the
+    # non-poison request would have fit the reserve, whichever path the poisoned block takes.
+    var pz_cnt = _poison_shadow_take(pz_req, _heap_end - _heap_base);
+    #endif
     # v6.4.52 — large-object path. macOS does NOT honor mmap address hints
     # (no MAP_FIXED), so the single reserve can't grow contiguously; a request
     # that won't fit the remaining reserve gets its OWN unhinted mmap(0, size),
@@ -68,8 +79,17 @@ fn alloc(size) {
     # See issue 2026-07-11-macos-windows-large-single-allocation-path.md.
     if (_heap_ptr + size > _heap_end) {
         var big = syscall(9, 0, size, 3, 0x1002, 0 - 1, 0);
-        if (big < 0) { _alloc_lock_release(); return 0; }
+        if (big < 0) {
+            #ifdef CYRIUS_POISON
+            _poison_shadow_undo(pz_req, pz_cnt);
+            #endif
+            _alloc_lock_release();
+            return 0;
+        }
         _alloc_lock_release();
+        #ifdef CYRIUS_POISON
+        return _poison_arm_alloc(big, pz_req, pz_cnt);
+        #endif
         return big;
     }
     var ptr = _heap_ptr;
@@ -78,12 +98,18 @@ fn alloc(size) {
     if (new_ptr < ptr) { _alloc_lock_release(); return 0; }
     _heap_ptr = new_ptr;
     _alloc_lock_release();
+    #ifdef CYRIUS_POISON
+    return _poison_arm_alloc(ptr, pz_req, pz_cnt);   # armed + published outside the lock
+    #endif
     return ptr;
 }
 
 # Reset the heap, freeing all allocations at once. Locked so a concurrent
 # alloc() can't observe a half-updated bump pointer.
 fn alloc_reset() {
+    #ifdef CYRIUS_POISON
+    poison_forget_all();     # 6.6.18: every listed block dies here, and its address is re-issued
+    #endif
     _alloc_lock_acquire();
     # Scrub the reclaimed span before rewinding so a later alloc() can't read
     # the prior occupant's bytes (memory-reuse info-leak, CVE-2026-34988 class;
@@ -93,12 +119,19 @@ fn alloc_reset() {
     var span = _heap_ptr - _heap_base;
     if (span > 0) { _alloc_zero(_heap_base, span); }
     _heap_ptr = _heap_base;
+    #ifdef CYRIUS_POISON
+    _poison_shadow = 0;
+    _poison_hidden = 0;
+    #endif
     _alloc_lock_release();
     return 0;
 }
 
 # Return the number of heap bytes currently in use
 fn alloc_used() {
+    #ifdef CYRIUS_POISON
+    return _poison_shadow - _poison_hidden;
+    #endif
     return _heap_ptr - _heap_base;
 }
 
@@ -107,4 +140,4 @@ fn alloc_used() {
 # on macOS as-is, so the duplicate copies that lived here only produced five
 # "duplicate fn ... (last definition wins)" warnings on every macOS build.
 # Removed — same shape as lib/alloc_windows.cyr (OS allocator only). See
-# docs/development/issues/2026-06-02-macos-alloc-arena-duplicate-fns.md.
+# docs/development/issues/archived/2026-06-02-macos-alloc-arena-duplicate-fns.md.

@@ -243,7 +243,7 @@ assert_eq(f64_ge(crvoice_vocal_effort(vlb), T_0_9), 1, "finite 60 dB still raise
 # ================================================================
 test_group("stream_start -- sample_rate (0,inf) and duration [0,inf) ranges");
 # Unguarded, every one of these returned a NON-NULL handle to a stream born
-# retired: total_samples = f64_to(NaN) is i64::MIN and f64_to(0.0) is 0, so
+# retired: total_samples = f64_to(NaN) and f64_to(0.0) are both 0, so
 # samples_rendered >= total_samples on the first call. The host drained nothing
 # and no error was raised anywhere -- F11's silently-empty-buffer signature.
 # 0 (null) is already this function's documented error return.

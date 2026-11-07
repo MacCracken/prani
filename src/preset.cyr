@@ -123,7 +123,7 @@ fn preset_to_json(self, sb) {
 # WHAT IS REJECTED (2.0.5 -- the field-level half ADR-0002 left open):
 #   json == 0, or the document does not parse                        (2.0.3)
 #   `name` missing or not a JSON string. This was a LIVE SIGSEGV, not a range
-#     question: bayan_json_v_obj_get returns 0 for a missing key and
+#     question: bayan_json_v_obj_get_by_cstr returns 0 for a missing key and
 #     bayan_json_v_str returns 0 for a non-string node, and str_data(0) then
 #     dereferences address 0 (measured 2026-08-31: `{"species":0,...}` with no
 #     "name" key exits 139). An array root reaches it the same way.
@@ -152,12 +152,12 @@ fn preset_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var name = bayan_json_v_str(bayan_json_v_obj_get(root, "name"));
+    var name = bayan_json_v_str(bayan_json_v_obj_get_by_cstr(root, "name"));
     if (name == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var n_species = bayan_json_v_obj_get(root, "species");
-    var n_size = bayan_json_v_obj_get(root, "size");
-    var n_f0 = bayan_json_v_obj_get(root, "f0_offset");
-    var n_br = bayan_json_v_obj_get(root, "breathiness");
+    var n_species = bayan_json_v_obj_get_by_cstr(root, "species");
+    var n_size = bayan_json_v_obj_get_by_cstr(root, "size");
+    var n_f0 = bayan_json_v_obj_get_by_cstr(root, "f0_offset");
+    var n_br = bayan_json_v_obj_get_by_cstr(root, "breathiness");
     if (bayan_json_v_is_int(n_species) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     if (bayan_json_v_is_int(n_size) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     if (bayan_json_v_is_int(n_f0) == 0) { return PRANI_ERR_INVALID_SPECIES; }

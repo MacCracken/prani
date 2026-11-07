@@ -1,6 +1,7 @@
 # hashseed.cyr — per-process hash seed + finalizer, shared by every hashmap variant.
 # Usage: include "lib/hashseed.cyr"
-# Requires: syscalls.cyr (SYS_GETRANDOM / sys_getrandom), atomic.cyr (atomic_cas)
+# Includes its own definers: syscalls.cyr (SYS_GETRANDOM / sys_getrandom), atomic.cyr (atomic_cas),
+# chrono.cyr (clock_epoch_ns / clock_now_ns — the getrandom-failure time mix, 6.6.10).
 #
 # ⭐ WHY THIS IS ITS OWN MODULE. `lib/hashmap.cyr` and `lib/hashmap_fast.cyr` each carried a
 # VERBATIM copy of the same unseeded FNV-1a — the second one's own comment says "same as
@@ -30,9 +31,11 @@
 
 include "lib/syscalls.cyr"
 include "lib/atomic.cyr"
+include "lib/chrono.cyr"
 
 var _hm_seed = 0;        # 0 = not yet drawn; never a legal seed value
 var _hm_seed_buf[1];     # 8 bytes (a top-level `var x[N]` is N*8), so no allocator dependency
+var _hm_seed_src = 0;    # where the seed came from: 0 = not drawn, 1 = OS RNG, 2 = time fallback
 
 # splitmix64 finalizer — diffuses every input bit into every output bit.
 fn _hm_mix(h): i64 {
@@ -42,6 +45,25 @@ fn _hm_mix(h): i64 {
     h = h * 0xC4CEB9FE1A85EC53;
     h = h ^ (h >> 33);
     return h;
+}
+
+# The getrandom-failure fallback: a time mix at NANOSECOND resolution, never a constant.
+#
+# ⛔ 6.6.10 — IT WAS ONE-SECOND RESOLUTION. The 6.6.4 port from time(2) to clock_gettime kept the
+# scalar shape `syscall(228, 0, &ts) + load64(&ts)`: that catches the Darwin/PE contract (the
+# value is RETURNED) but reads only `tv_sec` from a Linux or cx timespec — the nanoseconds were
+# dropped. Measured with getrandom denied by seccomp: every process started in the same second
+# drew the SAME seed, and consecutive seconds differed by exactly one multiplier step. The agnos
+# arm was worse: it called #46 (time_unix), which is unminted on exactly the pre-1.45 kernels
+# where #45 getrandom can fail, so it read -1 and the seed was ALWAYS the constant
+# 1096857192450. Both arms now come from lib/chrono.cyr, whose clock_epoch_ns / clock_now_ns
+# already carry every target's contract (agnos: #95 with its #40 fallback, which predates the
+# 1.45 band), plus a stack address so two processes in the same clock tick still differ under
+# ASLR. Pinned by tests/tcyr/crossos/hashseed_os_rng_source.tcyr (a seccomp-denied getrandom,
+# two processes, different seeds). CHANGELOG [6.6.10]
+fn _hm_seed_time_mix(): i64 {
+    var here = 0;
+    return clock_epoch_ns() ^ (clock_now_ns() * 0x9E3779B97F4A7C15) ^ &here;
 }
 
 # Per-process seed, drawn once on first use.
@@ -55,32 +77,36 @@ fn _hm_mix(h): i64 {
 #
 # Randomness is acquired per-target, never via a hardcoded syscall number — the same policy as
 # `lib/patra.cyr`'s `_pt_rand64`: the syscall peer defines SYS_GETRANDOM (#318 x86-linux /
-# #278 aarch64 / #318 macOS / #45 agnos), and Windows has NO raw getrandom syscall — its peer
-# deliberately omits the constant, so a raw `syscall(SYS_GETRANDOM, ...)` cannot even link
-# there and randomness MUST route through the `sys_getrandom()` wrapper (ProcessPrng).
+# #278 aarch64 / #318 macOS / #45 agnos), and the draw ALWAYS goes through `sys_getrandom()`:
+# Windows has no raw getrandom syscall (ProcessPrng), and macOS getentropy returns 0, which
+# only the wrapper turns into `len`.
 fn _hm_seed_get(): i64 {
     var cur = _hm_seed;
     if (cur != 0) { return cur; }
 
-    #ifdef CYRIUS_TARGET_WIN
-    var nr = sys_getrandom(&_hm_seed_buf, 8, 0);
+    # ⚠ NEVER flags 0 ON LINUX: blocking getrandom stalls until the kernel CRNG seeds, and PID 1
+    # (kybernet) takes its first map op before that on RNG-less boards (~250 ms measured). The
+    # seed only has to be "not a published constant", so GRND_INSECURE (4, never blocks, >= 5.6)
+    # with a GRND_NONBLOCK (1) retry on the pre-5.6 -EINVAL. Every other target goes through
+    # sys_getrandom — NEVER the raw syscall — because only the wrapper normalises Darwin's
+    # getentropy 0 -> len; raw, the CSPRNG draw was discarded on macOS. CHANGELOG [6.6.7]
+    #ifdef CYRIUS_TARGET_LINUX
+    var nr = sys_getrandom(&_hm_seed_buf, 8, 4);
+    if (nr == 0 - 22) { nr = sys_getrandom(&_hm_seed_buf, 8, 1); }
     #else
-    var nr = syscall(SYS_GETRANDOM, &_hm_seed_buf, 8, 0);
+    var nr = sys_getrandom(&_hm_seed_buf, 8, 0);
     #endif
 
     var v = 0;
     if (nr == 8) {
         v = load64(&_hm_seed_buf);
+        _hm_seed_src = 1;
     } else {
+        _hm_seed_src = 2;
         # CSPRNG unavailable (ancient kernel, restricted container, seccomp). Fall back to a
         # time mix — weaker, but still not a published constant, which is the property that
         # matters here. Same fallback policy as _pt_rand64.
-        #ifdef CYRIUS_TARGET_AGNOS
-        var t = syscall(SYS_TIME_UNIX);
-        #else
-        var t = syscall(201, 0);
-        #endif
-        v = t * 2654435761 + 1099511628211;
+        v = _hm_mix(_hm_seed_time_mix());
     }
     # 0 is the "not yet drawn" sentinel, so it can never be handed back as a seed.
     if (v == 0) { v = 0x9E3779B97F4A7C15; }

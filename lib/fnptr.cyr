@@ -40,14 +40,21 @@
 # Common to all backends:
 #   - fp loaded into rax (x86) / x9 (aarch64) for the indirect call.
 #   - Result comes back in rax / x0 and is stored to the result slot.
-#   - Cyrius pads the local frame to 16 bytes (parse.cyr:1505
+#   - Cyrius pads the local frame to 16 bytes (parse_fn.cyr,
 #     `fsz = (flc*8 + 15) & ~15`), so RSP is 16-byte aligned in the
-#     body of every fncallN.
+#     body of every fncallN. ⚠ 6.6.5: that padding aligns the body
+#     BETWEEN statements only. What aligns the CALL is the emitter's
+#     pending-push parity pad (`_xdepth`, src/common/util.cyr) — before
+#     6.6.5 a `fncallN` reached from a nested expression position was
+#     entered 8 bytes off, and on PE the base itself was inverted.
+#     The old path reference (parse.cyr:1505) was two files stale.
 #
 # Extern-C prerequisite — a glibc-compatible %fs (NOT an fncallN concern):
-#   The arg-passing and 16-byte alignment above are CORRECT for extern-C
-#   SysV integer calls. The historical folklore that "fncall6 into extern-C
-#   (wgpu) is unreliable" was a MISDIAGNOSIS: any glibc-compiled C function
+#   The arg-passing above is CORRECT for extern-C SysV integer calls, and
+#   since 6.6.5 so is the alignment in EVERY expression position (it was
+#   correct only at statement level before — see the note above). The
+#   historical folklore that "fncall6 into extern-C (wgpu) is unreliable"
+#   was a MISDIAGNOSIS: any glibc-compiled C function
 #   with an array/buffer local carries -fstack-protector and reads its canary
 #   from `%fs:0x28` in its prologue — so it faults REGARDLESS of arg count if
 #   %fs isn't a glibc-compatible thread block. Two ways to satisfy it:
@@ -679,8 +686,10 @@ fn fncall6(fp, a, b, c, d, e, f): i64 {
 # mismatch will cause garbage for args 7-8: use a C shim that takes
 # a struct pointer instead (see docs/ffi/struct-packing.md).
 #
-# x86_64: cyrius pads the local frame to 16 bytes (parse.cyr:1505:
-# `fsz = (flc*8 + 15) & ~15`), so RSP ≡ 0 mod 16 in the body.
+# x86_64: cyrius pads the local frame to 16 bytes (parse_fn.cyr:
+# `fsz = (flc*8 + 15) & ~15`), so RSP ≡ 0 mod 16 in the body between
+# statements; 6.6.5's call-site parity pad is what holds it at a call
+# reached from inside an expression.
 # Reserving 16 bytes via `sub rsp, 16` keeps SysV at-call alignment
 # while providing room for the single 8-byte stack arg plus 8 bytes
 # of padding.

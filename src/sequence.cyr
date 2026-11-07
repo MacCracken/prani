@@ -49,9 +49,10 @@ var PRANI_CHORUS_PRIME = 7919;   # seed multiplier for chorus RNG (voices.len * 
 #     (lib/vec.cyr's push aborts when alloc fails; ALLOC_MAX is 2 GiB). A
 #     library cannot report a process abort, so the check must come first.
 #   * a NaN timing_spread gave max_offset_samples = i64::MIN, and i64::MIN * 2
-#     WRAPS TO 0 -- so total_len collapsed to base_samples and the chorus
-#     returned a correct-LENGTH buffer. That is a silent SUCCESS, not the silent
-#     empty F11 describes.
+#     WRAPS TO 0. f64_to(NaN) has been 0 itself since cyrius 6.6.8, so the route
+#     changed and the answer did not: total_len collapses to base_samples and
+#     the chorus returns a correct-LENGTH buffer. That is a silent SUCCESS, not
+#     the silent empty F11 describes.
 #   * every call in a bout allocates ~2.5 KB of voice/tract state even at
 #     duration 0, and the bump allocator never frees it, so `count` drives
 #     unbounded allocation entirely on its own.
@@ -286,10 +287,10 @@ fn sequence_call_phrase_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var intent = bayan_json_v_int(bayan_json_v_obj_get(root, "intent"));
+    var intent = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "intent"));
     if (intent < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (intent >= PRANI_INTENT_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var elems_val = bayan_json_v_obj_get(root, "elements");
+    var elems_val = bayan_json_v_obj_get_by_cstr(root, "elements");
     var n = bayan_json_v_arr_len(elems_val);
     if (prani_seq_count_ok(n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var elems = vec_new();
@@ -298,14 +299,14 @@ fn sequence_call_phrase_from_json_str(json) {
         # Read each element's fields DIRECTLY from the parsed array-element node
         # (duration/gap are i64 bit patterns). Avoids re-serializing the node.
         var ev = bayan_json_v_arr_get(elems_val, i);
-        var voc = bayan_json_v_int(bayan_json_v_obj_get(ev, "vocalization"));
+        var voc = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "vocalization"));
         if (voc < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
         if (voc >= PRANI_VOC_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
         # The duration/gap ranges are the constructor's, reused rather than
         # restated, so the codec and the builder can never disagree.
         var e = sequence_call_element_new(voc,
-          bayan_json_v_int(bayan_json_v_obj_get(ev, "duration")),
-          bayan_json_v_int(bayan_json_v_obj_get(ev, "gap")));
+          bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "duration")),
+          bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "gap")));
         if (prani_is_err(e) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
         vec_push(elems, e);
         i = i + 1;

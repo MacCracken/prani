@@ -1,6 +1,22 @@
 # fmt.cyr — string formatting utilities
 # Usage: include "lib/fmt.cyr"
-# Requires: include "lib/string.cyr" for strlen
+#
+# v6.6.6: SELF-SUFFICIENT. This file called `strlen`/`memcpy` (lib/string.cyr) and `vec_get`
+# (lib/vec.cyr) while including NOTHING, and the header said "Requires: include lib/string.cyr
+# for strlen" — a requirement written down for the caller instead of satisfied here, and it did
+# not even name lib/vec.cyr. `include "lib/fmt.cyr"` alone then compiled with
+# `warning: undefined function 'strlen'` / `'vec_get'` and TRAPPED at run time (an undefined fn
+# becomes a ud2/SIGILL stub). CLAUDE.md's rule — a lib file referencing another module's symbols
+# includes its definers — applies to helpers, not only to flag constants. Includes are
+# include-once (lex_pp.cyr), so a caller that already pulled these in pays nothing.
+# CHANGELOG [6.6.6]
+# ⚠ The vec half of that contract was invisible on the native backends: an uncalled
+# fmt_sprintf makes `vec_get` merely UNREACHABLE, so the dangling reference was a
+# warning nobody read. The cx backend has no DCE — it emits every fn, so the call
+# site is real and its undefined-call gate hard-errors, which is why
+# `include "lib/assert.cyr"` could not compile for cx at all.
+include "lib/string.cyr"
+include "lib/vec.cyr"
 
 # Print decimal number to stdout
 fn fmt_int(n: i64): i64 {
@@ -129,33 +145,43 @@ fn fmt_byte(b): i64 {
     return 0;
 }
 
-# Convert integer to string in buffer, return length
+# Convert integer to string in buffer, return length.
+# Writes EXACTLY len + 1 bytes at buf (the digits and a NUL) — at most 21 (sign + 19 digits
+# + NUL). ⛔ CVE-78: the digits used to be built in place from buf+23 downward and then
+# shifted, so every call wrote 24 bytes whatever the number's length, overrunning any
+# `buf + pos` caller with less room — fmt_float_buf inside fmt_float's own stack buffer,
+# and heap callers such as `alloc(32) + 10`. The scratch is a local now (the fmt_hex_buf
+# shape). CHANGELOG [6.6.18]
 fn fmt_int_buf(n, buf): i64 {
     var bi = 23;
     var neg: i64 = 0;
+    var tmp[24];
     # i64::MIN: see fmt_int above. This is the site the filing was written against —
     # `str_from_int(i64::MIN)` was the one-character string "-", and bayan then
     # serialised `{"n":-}`, which is not JSON, with no error raised at any layer.
-    # 24-byte scratch still suffices: 19 digits + sign + NUL.
+    # 24-byte scratch still suffices: 19 digits + sign.
     if (n < 0) { neg = 1; }
-    if (n == 0) { store8(buf + bi, 48); bi = bi - 1; }
+    if (n == 0) { store8(&tmp + bi, 48); bi = bi - 1; }
     while (n != 0) {
         var d = n % 10;
         if (d < 0) { d = 0 - d; }
-        store8(buf + bi, 48 + d); bi = bi - 1; n = n / 10;
+        store8(&tmp + bi, 48 + d); bi = bi - 1; n = n / 10;
     }
-    if (neg == 1) { store8(buf + bi, 45); bi = bi - 1; }
-    # Shift to start of buffer
+    if (neg == 1) { store8(&tmp + bi, 45); bi = bi - 1; }
     var len = 23 - bi;
     var src = bi + 1;
     for (var si = 0; si < len; si = si + 1) {
-        store8(buf + si, load8(buf + src + si));
+        store8(buf + si, load8(&tmp + src + si));
     }
     store8(buf + len, 0);
     return len;
 }
 
-# Convert hex number to string in buffer, return length
+# Convert hex number to string in buffer, return length.
+# Writes len + 1 <= 17 bytes at buf (up to 16 digits + NUL): a stack caller needs
+# `var b[24]`, not `[16]` — fmt_sprintf's %x scratch was 16 and its NUL landed on the
+# neighbouring slot (CVE-78's class). tests/gates/memory/fmt_buf_callers_sized.sh holds
+# every `&local` caller of this and fmt_int_buf (len + 1 <= 21) to it. CHANGELOG [6.6.20]
 fn fmt_hex_buf(n, buf): i64 {
     var bi = 15;
     if (n == 0) { store8(buf, 48); store8(buf + 1, 0); return 1; }
@@ -215,7 +241,7 @@ fn fmt_sprintf(buf, bufsz, format, args): i64 {
                 # %x — hex integer
                 var xval = vec_get(args, ai);
                 ai = ai + 1;
-                var xtmp[16];
+                var xtmp[24];             # fmt_hex_buf writes up to 17 (16 digits + NUL)
                 var xlen = fmt_hex_buf(xval, &xtmp);
                 if (bi + xlen > maxw) { xlen = maxw - bi; }
                 if (xlen > 0) { memcpy(buf + bi, &xtmp, xlen); bi = bi + xlen; }
@@ -250,8 +276,120 @@ fn fmt_printf(format, args): i64 {
     return len;
 }
 
+# Digit k (0 = most significant) of the base-1e9 limb number at `lb` (nl limbs, little-end
+# first; the top limb has td digits). Helper for _fmt_float_big.
+fn _fmt_big_digit(lb, nl, td, k): i64 {
+    var li = nl - 1;
+    var p = k;
+    var w = td;
+    if (k >= td) {
+        var r = k - td;
+        li = nl - 2 - (r / 9);
+        p = r % 9;
+        w = 9;
+    }
+    var v = load64(lb + li * 8);
+    var e = w - 1 - p;
+    while (e > 0) { v = v / 10; e = e - 1; }
+    return v % 10;
+}
+
+# fmt_float_buf for |val| >= 2^63 (biased exponent >= 1086; `bits` is |val|, finite).
+# Every such double is the whole number m * 2^s (s = exponent - 1075 >= 11), so its
+# fraction is exactly 0 — but f64_to saturates there, and the generic path printed a
+# wrapped, wrong-signed integer (1e300 -> `-9131138316486228051.07`, -1e300 -> `--…`,
+# 2^63 -> `…775807`). The integer is expanded EXACTLY here, integer arithmetic only, in
+# base-1e9 limbs (DBL_MAX is 309 digits: 35 limbs). Up to 20 digits — the integer field
+# the bound budgets, i.e. every value below 1e20 — it prints in the fixed form; past that
+# in a bounded exponent form `d.ddd…e+N` with `decimals` mantissa digits (at most 18
+# computed, the rest '0', as the fixed form does), rounded half-even on the exact tail.
+# Both stay inside fmt_float_buf's max(43, decimals + 24). CHANGELOG [6.6.20]
+fn _fmt_float_big(bits, buf, decimals, neg): i64 {
+    var lb: i64[36];
+    var m = (bits & 0x000FFFFFFFFFFFFF) | 0x0010000000000000;
+    var s = ((bits >> 52) & 0x7FF) - 1075;
+    store64(&lb, m % 1000000000);
+    store64(&lb + 8, m / 1000000000);
+    var nl = 2;
+    # Multiply by 2^s, at most 30 bits a pass: a limb is < 1e9 < 2^30, so `limb << 30`
+    # plus the incoming carry stays far below 2^63.
+    while (s > 0) {
+        var sh = s;
+        if (sh > 30) { sh = 30; }
+        var carry = 0;
+        var j = 0;
+        while (j < nl) {
+            var v = (load64(&lb + j * 8) << sh) + carry;
+            store64(&lb + j * 8, v % 1000000000);
+            carry = v / 1000000000;
+            j = j + 1;
+        }
+        while (carry != 0) {
+            store64(&lb + nl * 8, carry % 1000000000);
+            carry = carry / 1000000000;
+            nl = nl + 1;
+        }
+        s = s - sh;
+    }
+    var top = load64(&lb + (nl - 1) * 8);
+    var td = 0;
+    while (top != 0) { td = td + 1; top = top / 10; }
+    var nd = td + 9 * (nl - 1);
+    var pos = 0;
+    if (neg == 1) { store8(buf, 45); pos = 1; }
+    var k = 0;
+    if (nd <= 20) {
+        while (k < nd) { store8(buf + pos, 48 + _fmt_big_digit(&lb, nl, td, k)); pos = pos + 1; k = k + 1; }
+        store8(buf + pos, 46); pos = pos + 1;
+        var z = decimals;
+        if (z < 1) { z = 1; }     # decimals 0 prints `N.0`, as the generic path does
+        while (z > 0) { store8(buf + pos, 48); pos = pos + 1; z = z - 1; }
+        return pos;
+    }
+    var fd = decimals;
+    if (fd > 18) { fd = 18; }
+    if (fd < 0) { fd = 0; }
+    var np = fd + 1;              # significant digits kept; np <= 19 < nd, so a tail exists
+    var md[24];
+    while (k < np) { store8(&md + k, _fmt_big_digit(&lb, nl, td, k)); k = k + 1; }
+    var rd = _fmt_big_digit(&lb, nl, td, np);
+    var up = 0;
+    if (rd > 5) { up = 1; }
+    if (rd == 5) {
+        k = np + 1;
+        while (k < nd) {
+            if (_fmt_big_digit(&lb, nl, td, k) != 0) { up = 1; break; }
+            k = k + 1;
+        }
+        if (up == 0) { up = load8(&md + np - 1) & 1; }    # an exact tie: to even
+    }
+    var ex = nd - 1;
+    if (up == 1) {
+        k = np - 1;
+        while (k >= 0) {
+            var dv = load8(&md + k) + 1;
+            if (dv < 10) { store8(&md + k, dv); up = 0; break; }
+            store8(&md + k, 0);
+            k = k - 1;
+        }
+        if (up == 1) { store8(&md, 1); ex = ex + 1; }     # 9.99… rounded to 10.0…
+    }
+    store8(buf + pos, 48 + load8(&md)); pos = pos + 1;
+    store8(buf + pos, 46); pos = pos + 1;
+    k = 1;
+    while (k < np) { store8(buf + pos, 48 + load8(&md + k)); pos = pos + 1; k = k + 1; }
+    if (fd == 0) { store8(buf + pos, 48); pos = pos + 1; }
+    var zi = fd;
+    while (zi < decimals) { store8(buf + pos, 48); pos = pos + 1; zi = zi + 1; }
+    store8(buf + pos, 101); store8(buf + pos + 1, 43); pos = pos + 2;     # "e+"
+    return pos + fmt_int_buf(ex, buf + pos);
+}
+
 # Format f64 to buffer as "integer.fraction" with given decimal places.
-# Returns number of bytes written.
+# Returns number of bytes written. Touches at most max(43, decimals + 24) bytes at buf:
+# sign + 20 integer chars + '.' + the fraction field (at most 18 computed digits and the
+# NUL; past 18 decimals, '0' padding). |val| >= 1e20 prints in the shorter exponent form
+# `d.ddd…e+N` instead (see _fmt_float_big).
 fn fmt_float_buf(val, buf, decimals): i64 {
     var neg = 0;
     # Check sign bit
@@ -263,8 +401,8 @@ fn fmt_float_buf(val, buf, decimals): i64 {
     # f64_to(f64_floor(val)) below overflows i64 into garbage that fmt_int_buf
     # renders as the non-number token "-.00000-". Emit "inf"/"-inf"/"nan"
     # instead. (JSON f64 now routes through bayan_f64_to_json, which is
-    # round-trip-correct; this keeps the fixed-decimal fmt_float debug path
-    # from emitting garbage for non-finite / out-of-i64-range inputs.)
+    # round-trip-correct.) FINITE values past i64 range were NOT covered by this
+    # guard, whatever this note used to say — they take _fmt_float_big below.
     if (((val >> 52) & 0x7FF) == 0x7FF) {
         var np = 0;
         if (neg == 1) { store8(buf, 45); np = 1; }
@@ -275,6 +413,8 @@ fn fmt_float_buf(val, buf, decimals): i64 {
         store8(buf + np, 105); store8(buf + np + 1, 110); store8(buf + np + 2, 102);       # "inf"
         return np + 3;
     }
+    # |val| >= 2^63: f64_to below would saturate (and the carry wrap negative).
+    if (((val >> 52) & 0x7FF) >= 1086) { return _fmt_float_big(val, buf, decimals, neg); }
     var whole = f64_to(f64_floor(val));
     # Fractional part: multiply by 10^decimals, round, format as int.
     #
@@ -290,10 +430,16 @@ fn fmt_float_buf(val, buf, decimals): i64 {
     # case, so this is almost certainly every version that has had `fmt_float_buf`. Found by
     # ganita 1.1.3's linalg pass, where every near-integer solver result printed wrong — which
     # is exactly where near-integers cluster (an identity matrix, a residual, a unit vector).
+    # At most 18 fraction digits are COMPUTED: 10^19 overflows i64, so a wider `decimals` used
+    # to print wrong digits (`3.5` at 20 decimals) and, once 10^decimals wrapped to 0 (64
+    # decimals), divided by zero below — SIGFPE. An f64 carries ~17 significant digits, so
+    # every digit past the 18th is '0', written as padding at the end. CHANGELOG [6.6.18]
+    var fd = decimals;
+    if (fd > 18) { fd = 18; }
     var scale = f64_from(1);
     var scale_i = 1;
     var di = 0;
-    while (di < decimals) {
+    while (di < fd) {
         scale = f64_mul(scale, f64_from(10));
         scale_i = scale_i * 10;
         di = di + 1;
@@ -312,22 +458,51 @@ fn fmt_float_buf(val, buf, decimals): i64 {
     store8(buf + pos, 46); pos = pos + 1;
     # Zero-pad fractional part
     var flen = fmt_int_buf(frac, buf + pos);
-    var pad = decimals - flen;
+    var pad = fd - flen;
     if (pad > 0) {
         # Shift digits right and insert zeros
         var si = flen - 1;
         while (si >= 0) { store8(buf + pos + pad + si, load8(buf + pos + si)); si = si - 1; }
         si = 0;
         while (si < pad) { store8(buf + pos + si, 48); si = si + 1; }
-        flen = decimals;
+        flen = fd;
     }
+    # Decimals past the 18 computed: '0'.
+    var zi = fd;
+    while (zi < decimals) { store8(buf + pos + flen, 48); flen = flen + 1; zi = zi + 1; }
     return pos + flen;
 }
 
-# Print f64 to stdout with given decimal places
+# Print f64 to stdout with given decimal places.
+# CVE-78: `buf` was 32 bytes, short of fmt_float_buf's worst case (see its header) — sign,
+# a 20-char integer field, '.', and the fraction field.
+# At most 18 decimals are formatted into the buffer (43 bytes at worst); any wider field is
+# the same '0' padding fmt_float_buf would write, sent in pieces — no heap, any `decimals`.
+# In the exponent form (|val| >= 1e20) that padding belongs to the mantissa, BEFORE the
+# `e+N`: the head is written, then the zeros, then the exponent. CHANGELOG [6.6.20]
 fn fmt_float(val, decimals): i64 {
-    var buf[32];
-    var len = fmt_float_buf(val, &buf, decimals);
-    syscall(1, 1, &buf, len);
+    var buf[64];
+    var d = decimals;
+    if (d > 18) { d = 18; }
+    var len = fmt_float_buf(val, &buf, d);
+    if (((val >> 52) & 0x7FF) == 0x7FF) {                 # inf / nan: no fraction field
+        syscall(1, 1, &buf, len);
+        return 0;
+    }
+    var ep = 0;
+    while (ep < len) {
+        if (load8(&buf + ep) == 101) { break; }
+        ep = ep + 1;
+    }
+    syscall(1, 1, &buf, ep);
+    var zeros = "00000000000000000000000000000000";
+    var rest = decimals - d;
+    while (rest > 0) {
+        var n = rest;
+        if (n > 32) { n = 32; }
+        syscall(1, 1, zeros, n);
+        rest = rest - n;
+    }
+    if (ep < len) { syscall(1, 1, &buf + ep, len - ep); }
     return 0;
 }

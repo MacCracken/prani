@@ -204,8 +204,8 @@ fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
 #   duration     [0, +inf)   finite and non-negative; ZERO IS VALID
 #
 # sample_rate must be positive because `total_samples = f64_to(effective_duration
-# * sample_rate)` is only a sample COUNT when it is. Measured on the unguarded
-# code: NaN gives total_samples = i64::MIN and 0.0 gives 0, and in both cases
+# * sample_rate)` is only a sample COUNT when it is. On the unguarded code NaN
+# and 0.0 both give total_samples = 0, so
 # `stream_is_finished` (samples_rendered >= total_samples) is true on the first
 # call -- the host receives a NON-NULL handle to a stream that is born retired,
 # drains nothing, and reports no error anywhere. A silently empty buffer is
@@ -225,9 +225,9 @@ fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
 # to ask for and still returns a handle. A NEGATIVE duration is rejected, and
 # that is a DELIBERATE DIVERGENCE -- Rust's `as usize` cast saturates, so the
 # oracle folded every negative duration into 0 and handed back a stream. It could
-# not represent the state; i64 can, and `f64_to` wraps rather than saturates, so
-# the port would build a stream whose total_samples is large and negative and
-# whose finished-ness is an accident of a signed compare rather than a real zero.
+# not represent the state; i64 can, and `f64_to` keeps the sign, so the port
+# would build a stream whose total_samples is negative and whose finished-ness
+# is an accident of a signed compare rather than a real zero.
 # A host that asks for -1 seconds has a bug (ADR-0001).
 #must_use
 fn prani_ffi_stream_start(voice_handle, voc_index, intent_index, sample_rate, duration) {

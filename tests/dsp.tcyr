@@ -144,16 +144,17 @@ assert_eq(vec_get(pz, 2), 0, "and they are zero");
 test_group("push_zeros: a NEGATIVE count is reported, not silently empty (F11)");
 assert_eq(prani_vec_push_zeros(pz, (0 - 1)), PRANI_ERR_INVALID_VOCALIZATION, "n == -1 rejected");
 assert_eq(vec_len(pz), 3, "and the buffer is untouched");
-# the shape every call site actually produces: f64_to saturates NaN to i64::MIN
-var pz_nan = f64_to(f64_div(0, 0));
-assert_eq(pz_nan < 0, 1, "f64_to(NaN) is i64::MIN, i.e. negative");
-assert_eq(prani_vec_push_zeros(pz, pz_nan), PRANI_ERR_INVALID_VOCALIZATION,
-  "a NaN-derived gap count is reported");
+# the floor of what f64_to can produce: anything below -2^63 lands here
+assert_eq(prani_vec_push_zeros(pz, (0 - 9223372036854775807) - 1), PRANI_ERR_INVALID_VOCALIZATION,
+  "an i64::MIN count is reported");
 assert_eq(vec_len(pz), 3, "still untouched -- behaviour identical, only the code moved");
-# and a NaN-derived count from the real expression (seconds * sample_rate)
+# A NaN-derived count from the real expression (seconds * sample_rate) is 0 since
+# cyrius 6.6.8. Nothing here can tell that from a legal 0, which is why every call
+# site ranges the f64 before the cast (see prani_sample_count_ok).
 var pz_gap = f64_to(f64_mul(f64_div(0, 0), f64_from(44100)));
-assert_eq(prani_vec_push_zeros(pz, pz_gap), PRANI_ERR_INVALID_VOCALIZATION,
-  "f64_to(NaN gap * 44100) is reported");
+assert_eq(pz_gap, 0, "f64_to(NaN gap * 44100) is 0");
+assert_eq(prani_vec_push_zeros(pz, pz_gap), 0, "so it appends nothing and cannot be reported here");
+assert_eq(vec_len(pz), 3, "and the buffer is untouched");
 
 # F10's chorus overflow, reproduced: total_len = base + max_offset*2 wraps past
 # i64::MAX to a negative around timing_spread 1e14 s, and the old helper turned
@@ -166,6 +167,18 @@ assert_eq(f10_total < 0, 1, "base + max_offset*2 wraps NEGATIVE (F10)");
 assert_eq(prani_vec_push_zeros(pz, f10_total), PRANI_ERR_INVALID_VOCALIZATION,
   "the wrapped chorus length is reported, not silently empty");
 assert_eq(vec_len(pz), 3, "and no mix buffer was fabricated");
+
+test_group("push_zeros: past one vec's limit is reported, not a process exit");
+assert_eq(prani_vec_push_zeros(pz, VEC_CAP_MAX + 1), PRANI_ERR_INVALID_VOCALIZATION, "n past VEC_CAP_MAX");
+assert_eq(prani_vec_push_zeros(pz, 9223372036854775807), PRANI_ERR_INVALID_VOCALIZATION,
+  "i64::MAX, where f64_to lands on an overflow");
+assert_eq(vec_len(pz), 3, "and the buffer is untouched");
+# A header claiming to be full. Only its length is read before the refusal, so
+# this costs no memory; a real one would be 2 GiB of zeros.
+var pz_full = alloc(24);
+store64(pz_full + 8, VEC_CAP_MAX);
+assert_eq(prani_vec_push_zeros(pz_full, 1), PRANI_ERR_INVALID_VOCALIZATION, "a full vec takes no more");
+assert_eq(prani_vec_push_zeros(pz_full, 0), 0, "control: appending nothing is still valid");
 
 # ----------------------------------------------------------------
 # prani_vec_extend: no numeric range -- it copies bit patterns verbatim.

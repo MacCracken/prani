@@ -77,12 +77,30 @@ include "lib/syscalls_aarch64_linux.cyr"
 include "lib/syscalls_x86_64_agnos.cyr"
 #endif
 
+# cyrius-x bytecode (v6.6.6). The .cyx guest ABI is x86_64-LINUX-numbered:
+# cxvm issues the guest's own syscall number on whatever host it runs on and
+# translates the pointer args, so the x86_64 peer is the correct table here.
+# ⚠ The served set — authority: programs/cxvm.cyr's op-0x70 dispatch — is read(0) /
+# write(1) / open(2) / close(3) / lseek(8) / exit(60) with pointer translation, plus
+# getrandom(318) and clock_gettime(228) served through the HOST's stdlib (6.6.8). Anything
+# else goes to the host raw, WITHOUT pointer translation — so a wrapper outside that set
+# compiles on cx and will not work. (This read "read/write/open/close/lseek/exit" until
+# 6.6.10, two releases after 318/228 were added; docs/platform-status.md states the whole
+# guest contract.) Before this arm
+# the cx driver matched no target at all, so `sys_exit` (and every other
+# wrapper) was undefined and `lib/assert.cyr` could not compile for cx.
+#ifdef CYRIUS_TARGET_CX
+include "lib/syscalls_x86_64_linux.cyr"
+#endif
+
 # ── signal_ignore (v6.4.51) ──
 # Set a signal's disposition to SIG_IGN (ignore). Primary use: SIGPIPE — so a
-# write to a peer that closed mid-response returns EPIPE instead of TERMINATING
-# the process. Without it, any server built on `sock_send` (a flagsless
-# `sys_write`) is one disconnected client away from an unauthenticated SIGPIPE
-# DoS. See issue 2026-07-11-sandhi-signal-ignore-stdlib-gap.md.
+# write to a pipe whose reader has gone returns EPIPE instead of TERMINATING the
+# process. lib/net.cyr's socket writers no longer need it: since 6.6.16 they go
+# through _fd_write_nosigpipe below and never raise SIGPIPE (until then every
+# `sock_send` was a flagless `sys_write`, one reset peer away from an
+# unauthenticated kill). A raw write(2) to a socket, or any write to a pipe,
+# still does. See issue 2026-07-11-sandhi-signal-ignore-stdlib-gap.md.
 # Portable: Linux rt_sigaction (x86 #13 / aarch64 #134), macOS BSD sigaction
 # (the Mach-O ESYSXLAT renumbers 13/134 → BSD 46), Windows/agnos no-op (no
 # SIGPIPE there). The 32-byte {sa_handler=SIG_IGN, 0,0,0} struct is valid for
@@ -127,6 +145,12 @@ fn signal_ignore(signum): i64 {
     #endif
     #ifdef CYRIUS_TARGET_AGNOS
     return 0;   # agnos ring-3: no signal delivery yet
+    #endif
+    # cx bytecode: cxvm delivers no signals. v6.6.6 — without this arm EVERY
+    # branch of this fn is preprocessed away on cx and the body returns
+    # whatever happens to be in the return register.
+    #ifdef CYRIUS_TARGET_CX
+    return 0;
     #endif
 }
 
@@ -179,4 +203,60 @@ fn signal_default(signum): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0;   # agnos ring-3: no signal delivery yet
     #endif
+    # cx bytecode: cxvm delivers no signals. v6.6.6 — without this arm EVERY
+    # branch of this fn is preprocessed away on cx and the body returns
+    # whatever happens to be in the return register.
+    #ifdef CYRIUS_TARGET_CX
+    return 0;
+    #endif
 }
+
+# Write up to `n` bytes to `fd` WITHOUT raising SIGPIPE when `fd` is a socket whose peer has gone:
+# the count, or -errno (-EPIPE / -ECONNRESET for a reset peer). Private: the one leaf under every
+# plain-socket writer (lib/net.cyr's _net_os_send, lib/async.cyr's and lib/async_macos.cyr's send
+# and relay writers), so they cannot drift apart.
+#
+# ⛔ WHY: a flagless write(2) to a peer that has reset the connection raises SIGPIPE, whose
+# default disposition TERMINATES the process — so any peer could kill a lib/net.cyr client or
+# server it was talking to, remotely and unauthenticated (CVE-74; CVE-66 was the same class on
+# the TLS transport, lib/tls_native_conn.cyr).
+#   Linux: send(MSG_NOSIGNAL 0x4000) — sendto with no destination IS write(2) on a connected
+#     socket, with the same O_NONBLOCK and SO_SNDTIMEO behaviour. ENOTSOCK (88: a pipe, a file,
+#     a tty) falls through to write(2), which keeps its own semantics there, SIGPIPE included.
+#   macOS: SO_NOSIGPIPE (SOL_SOCKET 0xFFFF, 0x1022), set on EVERY call — sockets made by a raw
+#     sys_socket (sandhi's IPv6 paths) never pass through tcp_socket, so a set-at-creation design
+#     would leave them bare. xnu answers EINVAL only for a socket already shut down both ways, which
+#     is what an RST leaves: that is answered EPIPE, the errno the write would have given, with
+#     nothing written (failing closed, like _tn_nosigpipe). ENOTSOCK (38) writes; any other
+#     failure is returned. (Darwin does define MSG_NOSIGNAL, back to 13.7.8 at least; it is not
+#     relied on.)
+#   Every other target (PE, EFI, agnos, cx): write(2) as before — no SIGPIPE there.
+# ⚠ A seccomp filter that allows write but not sendto now kills a plain-socket writer on Linux.
+# CHANGELOG [6.6.16]
+fn _fd_write_nosigpipe(fd, buf, n): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    var s = sys_sendto(fd, buf, n, 0x4000, 0, 0);    # MSG_NOSIGNAL: EPIPE, never SIGPIPE
+    if (s != 0 - 88) { return s; }                   # anything but ENOTSOCK is the answer
+    #endif
+    #ifdef CYRIUS_TARGET_MACOS
+    var one[8];
+    store64(&one, 1);
+    var r = sys_setsockopt(fd, 0xFFFF, 0x1022, &one, 4);    # SOL_SOCKET, SO_NOSIGPIPE
+    if (r == 0 - 22) { return 0 - 32; }              # EINVAL: shut down both ways -> EPIPE, unwritten
+    if (r < 0) {
+        if (r != 0 - 38) { return r; }               # ENOTSOCK is the only failure that is not one
+    }
+    #endif
+    return sys_write(fd, buf, n);
+}
+
+# ── alloc.cyr, LAST ──
+# The Linux and agnos peers' sigset / epoll / timer helpers call `alloc()`, so a bare
+# `include "lib/syscalls.cyr"` compiled with `warning: undefined function 'alloc'` — a ud2
+# stub at the first sigset_new — on every target that has those helpers (on cx, which emits
+# every fn, it was a hard error, and only the cx arm carried this include). It sits at the
+# END, after the peers, so a program that includes syscalls.cyr and then alloc.cyr lays out
+# exactly as before; include-once makes the later include free, and on agnos, where alloc.cyr
+# includes this file, the cycle is broken by include-once marking a file before it is read.
+# CHANGELOG [6.6.9]
+include "lib/alloc.cyr"

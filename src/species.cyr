@@ -529,22 +529,22 @@ fn species_params_validate(p) {
 #must_use
 fn species_params_from_node(node) {
     var p = alloc(sizeof(SpeciesParams));
-    SpeciesParams_set_apparatus(p, bayan_json_v_int(bayan_json_v_obj_get(node, "apparatus")));
-    SpeciesParams_set_f0_min(p, bayan_json_v_int(bayan_json_v_obj_get(node, "f0_min")));
-    SpeciesParams_set_f0_max(p, bayan_json_v_int(bayan_json_v_obj_get(node, "f0_max")));
-    SpeciesParams_set_f0_default(p, bayan_json_v_int(bayan_json_v_obj_get(node, "f0_default")));
-    SpeciesParams_set_tract_scale(p, bayan_json_v_int(bayan_json_v_obj_get(node, "tract_scale")));
-    SpeciesParams_set_formant0(p, bayan_json_v_int(bayan_json_v_obj_get(node, "formant0")));
-    SpeciesParams_set_formant1(p, bayan_json_v_int(bayan_json_v_obj_get(node, "formant1")));
-    SpeciesParams_set_formant2(p, bayan_json_v_int(bayan_json_v_obj_get(node, "formant2")));
-    SpeciesParams_set_bandwidth0(p, bayan_json_v_int(bayan_json_v_obj_get(node, "bandwidth0")));
-    SpeciesParams_set_bandwidth1(p, bayan_json_v_int(bayan_json_v_obj_get(node, "bandwidth1")));
-    SpeciesParams_set_bandwidth2(p, bayan_json_v_int(bayan_json_v_obj_get(node, "bandwidth2")));
-    SpeciesParams_set_breathiness(p, bayan_json_v_int(bayan_json_v_obj_get(node, "breathiness")));
-    SpeciesParams_set_jitter(p, bayan_json_v_int(bayan_json_v_obj_get(node, "jitter")));
-    SpeciesParams_set_shimmer(p, bayan_json_v_int(bayan_json_v_obj_get(node, "shimmer")));
-    SpeciesParams_set_spectral_tilt(p, bayan_json_v_int(bayan_json_v_obj_get(node, "spectral_tilt")));
-    SpeciesParams_set_resonance_seed(p, bayan_json_v_int(bayan_json_v_obj_get(node, "resonance_seed")));
+    SpeciesParams_set_apparatus(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "apparatus")));
+    SpeciesParams_set_f0_min(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "f0_min")));
+    SpeciesParams_set_f0_max(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "f0_max")));
+    SpeciesParams_set_f0_default(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "f0_default")));
+    SpeciesParams_set_tract_scale(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "tract_scale")));
+    SpeciesParams_set_formant0(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "formant0")));
+    SpeciesParams_set_formant1(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "formant1")));
+    SpeciesParams_set_formant2(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "formant2")));
+    SpeciesParams_set_bandwidth0(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "bandwidth0")));
+    SpeciesParams_set_bandwidth1(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "bandwidth1")));
+    SpeciesParams_set_bandwidth2(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "bandwidth2")));
+    SpeciesParams_set_breathiness(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "breathiness")));
+    SpeciesParams_set_jitter(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "jitter")));
+    SpeciesParams_set_shimmer(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "shimmer")));
+    SpeciesParams_set_spectral_tilt(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "spectral_tilt")));
+    SpeciesParams_set_resonance_seed(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "resonance_seed")));
     if (species_params_in_range(p) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     return p;
 }

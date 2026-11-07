@@ -92,10 +92,10 @@ alone.
 precisely because it is this size.
 
 `alloc()` returns 0 on exhaustion and prani stores through it at **27 sites**;
-`vec_new()` can return 0 and `vec_push` returns -1 on failure, and **no call site
-in the library checks either**. An exhausted arena therefore produces a null
-dereference or a silently truncated buffer — including a synthesis result short
-of the length the caller was told to expect.
+`vec_new()` can return 0, and **no call site in the library checks it**. `vec_push`
+returns nothing to check: on a refused allocation it exits the process (`vec: alloc
+failed`), and only `vec_push_a` returns -1. An exhausted arena therefore produces a
+null dereference or a process exit, neither of which a host can handle.
 
 This is a minor bump rather than a patch because the only real fix puts a
 fallible return on every constructor in the library (`crvoice_new`,
@@ -156,6 +156,12 @@ Things deliberately left alone, with the condition that would change that.
   nyquist above 600. `tests/hardening.tcyr`'s **F12** group pins the 1200/1201
   and 7500/7501 boundaries with controls. **If those controls fail, the floor
   moved again — re-measure it, do not hardcode a new number in prani.**
+- **Six `#inline` markers that do not inline.** `src/dsp.cyr:87`, `src/rng.cyr:42`
+  and `:70`, `src/voice.cyr:804`, `src/tract.cyr:619` and `:709` are over the
+  directive's limits, so the compiler ignores them and says so on every build. They
+  are the only warnings left: 136 on 2.0.13, 6 now that naad and svara dropped
+  theirs. Removing them changes no output. **Drop them the next time those files are
+  touched, or sooner if a warning-free build becomes a gate here**, as it is in svara.
 - **Re-running the Rust comparison depends on crates.io, not on this repo.**
   The oracle at tag `2.0.3` builds against `svara 1.0.0` / `naad 1.0.0` /
   `hisab 1.2.0`, checksums pinned in its `Cargo.lock`. **The risk that mattered

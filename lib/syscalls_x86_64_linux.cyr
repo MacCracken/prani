@@ -10,7 +10,9 @@
 # `arch/x86/include/uapi/asm/stat.h` values.
 #
 # Cyrius re-implementation of agnosys syscall bindings.
-# Constants use enums to avoid gvar_toks overflow (4096 slot limit).
+# Constants are enums so they fold to compile-time literals: no data slot and no load, and a
+# syscall number spelled with one is a LITERAL to the compiler's per-target syscall routing (a
+# `var` number is not — parse_expr.cyr's non-literal-number warning). CHANGELOG [6.6.11]
 
 # ================================================================
 # Syscall numbers (x86_64)
@@ -24,6 +26,9 @@ enum SysNr {
     SYS_FSTAT = 5;
     SYS_LSEEK = 8;
     SYS_MMAP = 9;
+    # v6.6.4: was a raw 73 in lib/io.cyr, and a raw NATIVE 32 on its aarch64 arm that the
+    # raw-literal diagnostic flagged on every aarch64 build of anything including io.cyr.
+    SYS_FLOCK = 73;
     SYS_BRK = 12;
     SYS_RT_SIGPROCMASK = 14;
     SYS_IOCTL = 16;
@@ -107,6 +112,73 @@ enum SysNr {
     SYS_GETSOCKNAME = 51;
     SYS_GETPEERNAME = 52;
     SYS_ACCEPT4 = 288;
+    # v6.6.5 — the SEND side of the socket band, the truncate pair, memfd and the two
+    # scheduler primitives. Every one of these was NAMELESS in both Linux peers, so a
+    # consumer had no choice but to hardcode the x86 number — and an unnamed number is
+    # exactly what the ELF-aarch64 raw-literal diagnostic cannot see (its table is derived
+    # from names DECLARED IN BOTH peers). Measured under qemu-aarch64 before the fix:
+    # raw 319 was ENOSYS, raw 77 ran **tee**, raw 46 ran **ftruncate**, raw 44 ran fstatfs,
+    # raw 35 ran unlinkat(0,NULL,0). CHANGELOG [6.6.5]
+    SYS_SENDTO = 44;
+    SYS_SENDMSG = 46;
+    SYS_TRUNCATE = 76;
+    SYS_FTRUNCATE = 77;
+    SYS_MEMFD_CREATE = 319;
+    SYS_NANOSLEEP = 35;
+    SYS_SCHED_YIELD = 24;
+    # v6.6.6 — the statfs pair, nameless in BOTH Linux peers until now. That is why yukti
+    # hardcoded the numbers, and on aarch64 its native 43 was reissued as **accept** by the
+    # ESYSXLAT compat row (measured under qemu-aarch64: errno 14 from every
+    # `filesystem_usage` call on ARM since v6.2.10). Naming it here is half the fix; the
+    # aarch64 peer borrows THESE numbers and two new ESYSXLAT rows renumber them.
+    # CHANGELOG [6.6.6]
+    SYS_STATFS = 137;
+    SYS_FSTATFS = 138;
+    # v6.6.8 — namespaces, root, capabilities, cross-process memory and mknodat, nameless in
+    # BOTH Linux peers until now. kavach, takumi, shakti, mirshi and vani each hardcoded a
+    # number, and on aarch64 every one of those numbers ran a different call (161 sethostname,
+    # 272 kcmp, 155 getpgid, 125/126 sched_get_priority_max/min — qemu-aarch64 -strace). The
+    # aarch64 peer borrows THESE numbers and ESYSXLAT renumbers them. CHANGELOG [6.6.8]
+    SYS_UNSHARE = 272;
+    SYS_CHROOT = 161;
+    SYS_PIVOT_ROOT = 155;
+    SYS_CAPGET = 125;
+    SYS_CAPSET = 126;
+    SYS_PROCESS_VM_READV = 310;
+    SYS_PROCESS_VM_WRITEV = 311;
+    SYS_MKNODAT = 259;
+    # 6.6.12 — the xattr family, fchown, statx and getrlimit: NO NAME in either Linux peer until
+    # now, so consumers wrote numbers (kriya's aarch64 arm returned -ENOSYS by hand for the four
+    # xattr calls it needed). The aarch64 peer spells these through the private alias band —
+    # see its comment — and lib/syscalls_linux_common.cyr carries the wrappers. CHANGELOG [6.6.12]
+    SYS_SETXATTR = 188;
+    SYS_LSETXATTR = 189;
+    SYS_FSETXATTR = 190;
+    SYS_GETXATTR = 191;
+    SYS_LGETXATTR = 192;
+    SYS_FGETXATTR = 193;
+    SYS_LISTXATTR = 194;
+    SYS_LLISTXATTR = 195;
+    SYS_FLISTXATTR = 196;
+    SYS_REMOVEXATTR = 197;
+    SYS_LREMOVEXATTR = 198;
+    SYS_FREMOVEXATTR = 199;
+    SYS_FCHOWN = 93;
+    SYS_STATX = 332;
+    SYS_GETRLIMIT = 97;
+    # v6.6.5 — peer asymmetries closed. The aarch64 peer declared all four; this one used
+    # raw literals below, so the correspondence table had no row and raw 294 on aarch64
+    # (kexec_file_load) went undiagnosed.
+    SYS_DUP3 = 292;
+    SYS_INOTIFY_INIT1 = 294;
+    SYS_INOTIFY_ADD_WATCH = 254;
+    SYS_INOTIFY_RM_WATCH = 255;
+    # v6.6.5 — the aarch64 peer has declared SYS_FACCESSAT = 269 (the x86 number, which
+    # ESYSXLAT renumbers 269→48) since v6.2.x, and this peer's silence forced a named
+    # exception into tests/gates/platform/aarch64_syscall_shadow.sh's ALLOW list: the
+    # gate's "is the declared value the x86 number for this call?" discriminator had no
+    # x86 declaration to compare against. Declaring it here retires that exception.
+    SYS_FACCESSAT = 269;
     # v6.1.3 — bare-name fs syscalls + POSIX *at() family (kriya M2 surfaced).
     SYS_LSTAT = 6;
     SYS_RENAME = 82;
@@ -120,6 +192,19 @@ enum SysNr {
     SYS_LINKAT = 265;
     SYS_FCHMODAT = 268;
     SYS_UTIMENSAT = 280;
+}
+
+# ================================================================
+# Seccomp architecture tag (v6.6.8)
+# ================================================================
+# AUDIT_ARCH_* for the ABI this peer compiles for (x86_64: EM_X86_64 | __AUDIT_ARCH_64BIT |
+# __AUDIT_ARCH_LE). Every seccomp filter must
+# check `seccomp_data.arch` against it FIRST, or a syscall number from another ABI
+# (x32, i386 via int 0x80) slips past a number-based allow-list. kavach hand-wrote it
+# (security_seccomp_native_arch); the peer knows the value, so it names it.
+# CHANGELOG [6.6.8]
+enum AuditArch {
+    AUDIT_ARCH_NATIVE = 0xC000003E;
 }
 
 # ================================================================
@@ -171,6 +256,17 @@ enum OpenFlag {
     O_APPEND = 1024;
     O_NONBLOCK = 2048;
     O_CLOEXEC = 524288;
+    # v6.6.4: the four flags whose VALUES differ between x86_64 and arm64. These are the
+    # asm-generic/fcntl.h values (x86_64 and riscv use the generic set); arm64 overrides
+    # them in arch/arm64/include/uapi/asm/fcntl.h with a different permutation. The stdlib
+    # defined none of them, so consumers hardcoded the x86_64 numbers —
+    # patra's `O_NOFOLLOW = 131072` arrived on aarch64 as O_LARGEFILE and a symlinked WAL
+    # path was followed and its target truncated; its `O_DIRECTORY = 65536` arrived as
+    # O_DIRECT and the directory fsync got EINVAL. Spell the symbol; each peer owns its value.
+    O_DIRECT = 16384;       # 040000
+    O_LARGEFILE = 32768;    # 0100000
+    O_DIRECTORY = 65536;    # 0200000
+    O_NOFOLLOW = 131072;    # 0400000
 }
 
 # ================================================================
@@ -459,6 +555,7 @@ fn sys_pause(): i64 {
 # Signal operations
 fn sigset_new(): i64 {
     var set = alloc(8);
+    if (set == 0) { return 0; }
     store64(set, 0);
     return set;
 }
@@ -484,6 +581,7 @@ fn sigset_has(set, signum): i64 {
 # epoll_event: { u32 events, u64 data } = 12 bytes
 fn epoll_event_new(events, data): i64 {
     var ev = alloc(16);
+    if (ev == 0) { return 0; }
     store32(ev, events);
     store64(ev + 4, data);
     return ev;
@@ -501,6 +599,7 @@ fn sys_epoll_wait(epfd, events, maxevents, timeout): i64 {
 # itimerspec: { interval: {sec, nsec}, value: {sec, nsec} } = 32 bytes
 fn timerspec_new(interval_sec, initial_sec): i64 {
     var ts = alloc(32);
+    if (ts == 0) { return 0; }
     store64(ts, interval_sec);
     store64(ts + 8, 0);
     store64(ts + 16, initial_sec);
@@ -539,12 +638,14 @@ enum InotifyEvent {
     IN_CLOSE_WRITE = 8;
 }
 
-# SYS_INOTIFY_INIT1 = 294, SYS_INOTIFY_ADD_WATCH = 254, SYS_INOTIFY_RM_WATCH = 255
-fn sys_inotify_init(): i64 { return syscall(294, 0); }
+# Create an inotify instance (v6.6.5: the three raw literals here are SYS_* names now —
+# the numbers are declared above, so the correspondence table gains their rows and a
+# consumer writing raw 294 on aarch64 is told it means kexec_file_load there).
+fn sys_inotify_init(): i64 { return syscall(SYS_INOTIFY_INIT1, 0); }
 # Add a watch on a path for inotify events
-fn sys_inotify_add_watch(fd, path, mask): i64 { return syscall(254, fd, path, mask); }
+fn sys_inotify_add_watch(fd, path, mask): i64 { return syscall(SYS_INOTIFY_ADD_WATCH, fd, path, mask); }
 # Remove an inotify watch
-fn sys_inotify_rm_watch(fd, wd): i64 { return syscall(255, fd, wd); }
+fn sys_inotify_rm_watch(fd, wd): i64 { return syscall(SYS_INOTIFY_RM_WATCH, fd, wd); }
 
 # sys_getdents64 / sys_getrandom / sys_landlock_create_ruleset /
 # sys_landlock_add_rule / sys_landlock_restrict_self / sys_socket /

@@ -61,8 +61,8 @@ jobs:
       # a stale dist/ while the actual fix measured 114 ns. Fail on staleness
       # first, then measure.
       - name: Bundle coherence — dist/ matches src/
-        # dist/prani.cyr and dist/prani.deps are TRACKED build products,
-        # regenerated from [lib].modules. A PR that edits src/ without
+        # dist/prani.cyr is a TRACKED build product, regenerated from
+        # [lib].modules. A PR that edits src/ without
         # re-running `cyrius distlib` ships a bundle that disagrees with the
         # source — and consumers (kiran, joshua) build against the bundle,
         # not against src/. `cyrius distlib` is deterministic, so any diff

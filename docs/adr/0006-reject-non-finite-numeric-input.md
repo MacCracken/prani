@@ -26,6 +26,26 @@ general; and **all three** non-finite values convert to i64::MIN, not just NaN,
 which is why a loop bound derived from one goes negative and the symptom is a
 silently *empty* buffer rather than a crash.
 
+> **Note, 2.0.14 / cyrius 6.6.20 (2026-11-07) — the measured conversion moved; the
+> decision did not.** cyrius 6.6.8 made `f64_to` saturate: NaN is 0, anything at or
+> past 2^63 is i64::MAX, and only values below -2^63 still give i64::MIN. So the
+> paragraph above describes the toolchain of 2026-08-31. The symptoms moved with it:
+> a NaN count is a legal 0, and an overflow walks past `num_samples < 0`, the one
+> check that had been catching it by accident, into a render loop that aborts the
+> process. The rule stands, and it is stricter for the change: a count is ranged in
+> f64, **before** the cast (`prani_sample_count_ok`), because after the cast nothing
+> is left to check. `tests/error.tcyr` pins all three conversions.
+
+> **Note, 2.0.14 (2026-11-07) — one buffer is a real limit, and this is a further
+> divergence.** A vec cannot grow past `VEC_CAP_MAX`, 2^28 samples: the next push is a
+> process exit with no return value to check. 3e9 s at 44.1 kHz rendered for minutes and
+> then died that way, because `crvoice_vocalize` had no ceiling. So every path that
+> builds one buffer now refuses a count past that limit, where the oracle's `Vec` had
+> none. The limit is `lib/vec.cyr`'s own constant, not a copy, for the reason
+> [ADR-0001](0001-check-svara-tract-constructor.md) refused to restate svara's floor:
+> the duplicate is what goes stale. It refuses exactly what could never have succeeded,
+> so every render that worked still does, and `stream_new` carries longer ones.
+
 The oracle has the same holes. Rust's `f32::clamp` is documented to return NaN
 for a NaN input, so `2.0.3:rust-old/src/voice.rs`'s `offset.clamp(-range, range)`
 passes NaN through exactly as the port did. **This is an inherited defect class,

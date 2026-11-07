@@ -1,7 +1,10 @@
 # callback.cyr — closure-like patterns via function pointers
 # Usage: include "lib/callback.cyr"
-# Requires: fnptr.cyr, vec.cyr, syscalls.cyr
+# Includes its own definers: syscalls.cyr, fnptr.cyr, vec.cyr (6.6.9 added the last two — the
+# vec_* calls were undefined in a bare include). CHANGELOG [6.6.9]
 include "lib/syscalls.cyr"
+include "lib/fnptr.cyr"
+include "lib/vec.cyr"
 #
 # Cyrius doesn't have closures. This library provides callback patterns
 # that replace common closure uses: for_each, filter, map, pre_exec.
@@ -98,16 +101,17 @@ fn vec_find_by(v, fp): i64 {
 # cb_fn(cb_data) is called in the child process before exec.
 # Returns pid of child to parent, or -1 on fork error.
 #
-# v6.3.24: guarded out on agnos. The frozen agnos 0-63 syscall surface has no
-# fork/execve, so sys_fork/sys_execve are undefined there — and because a consumer
-# that lists `callback` in cyrius.cyml `stdlib` pulls the WHOLE module, an unguarded
-# fork_with_pre_exec stayed reachable-undefined and hard-failed EVERY `--agnos` build
-# (bit phylax, which uses only the pure vec_* helpers). The higher-order helpers above
-# are pure fnptr code and stay available on every target; only this fork/exec entry is
-# absent on agnos. Mirrors lib/process.cyr's `#ifndef CYRIUS_TARGET_AGNOS` fork/exec
-# guard (its agnos peer routes through sys_spawn; a pre-exec-callback slot doesn't map
-# to agnos's in-memory-ELF spawn, so a guard-out is the honest choice here — no peer).
-# See issues/2026-07-01-callback-fork-with-pre-exec-unguarded-agnos.md.
+# v6.3.24: guarded out on agnos. agnos has fork#96 (1.56.55) but NO execve: a process cannot
+# replace its own image, and a program is started from disk only by the PARENT, through
+# spawn_path#43 — so there is no "between fork and exec" moment for a pre-exec callback to run
+# in, and no peer to write. sys_execve is undefined there, and because a consumer that lists
+# `callback` in cyrius.cyml `stdlib` pulls the WHOLE module, an unguarded fork_with_pre_exec
+# stayed reachable-undefined and hard-failed EVERY `--agnos` build (bit phylax, which uses only
+# the pure vec_* helpers). The higher-order helpers above are pure fnptr code and stay available
+# on every target; only this fork/exec entry is absent on agnos. (This read "no fork/execve ...
+# agnos's in-memory-ELF spawn" until 6.6.10; fork was minted at v6.5.37 and lib/process_agnos
+# spawns from disk since 6.6.8. CHANGELOG [6.6.10])
+# See issues/archived/2026-07-01-callback-fork-with-pre-exec-unguarded-agnos.md.
 #ifndef CYRIUS_TARGET_AGNOS
 fn fork_with_pre_exec(cmd, argv, envp, cb_fn, cb_data): i64 {
     var pid = sys_fork();

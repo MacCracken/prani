@@ -459,7 +459,7 @@ assert_eq(prani_is_err(preset_from_json_str(0)), 1, "null json rejected (2.0.3)"
 assert_eq(prani_is_err(preset_from_json_str(T_D_GARBAGE)), 1, "unparseable json rejected (2.0.3)");
 assert_eq(prani_is_err(preset_from_json_str(T_D_EMPTY)), 1, "{} rejected -- no fields at all");
 # The next three were a LIVE SIGSEGV before 2.0.5, not a range question:
-# bayan_json_v_obj_get returns 0 for a missing key, bayan_json_v_str returns 0
+# bayan_json_v_obj_get_by_cstr returns 0 for a missing key, bayan_json_v_str returns 0
 # for a non-string node, and str_data(0) dereferences address 0. Measured
 # 2026-08-31 on 2.0.4: T_D_NO_NAME exits 139.
 assert_eq(prani_is_err(preset_from_json_str(T_D_NO_NAME)), 1, "missing name rejected (was SIGSEGV: exit 139)");

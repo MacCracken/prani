@@ -55,10 +55,12 @@
 #   duration       finite, >= 0       0 is VALID -- the oracle's
 #                                     test_zero_duration_synthesis asserts an
 #                                     EMPTY buffer, not an error.
-#   num_samples    >= 0               f64_to of a non-finite or overflowing
-#                                     (duration * sample_rate) is i64::MIN, and a
-#                                     negative bound renders a silently EMPTY
-#                                     buffer (audit F11).
+#   num_samples    [0, VEC_CAP_MAX]   ranged in f64 BEFORE the cast, because the
+#                                     result is ONE vec: past VEC_CAP_MAX (2^28,
+#                                     ~101 min at 44.1 kHz) a push is a process
+#                                     exit, and f64_to saturates an overflowing
+#                                     product to i64::MAX, past any floor check.
+#                                     Longer renders go through stream_new.
 #   voc            [0, PRANI_VOC_COUNT)      the Rust enum could not hold anything
 #   intent         [0, PRANI_INTENT_COUNT)   else; the int tags can.
 #   size_scale     finite, > 0        divides f0_default (effective_f0) and 27.0
@@ -245,18 +247,18 @@ fn crvoice_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var species = bayan_json_v_int(bayan_json_v_obj_get(root, "species"));
+    var species = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "species"));
     if (species < 0) { return PRANI_ERR_INVALID_SPECIES; }
     if (species >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
-    var params = species_params_from_node(bayan_json_v_obj_get(root, "params"));
+    var params = species_params_from_node(bayan_json_v_obj_get_by_cstr(root, "params"));
     if (crvoice_params_in_range(params) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     # with_f0_offset's own clamp range, read off the params just validated.
     var range = f64_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
-    var f0_offset = bayan_json_v_int(bayan_json_v_obj_get(root, "f0_offset"));
+    var f0_offset = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "f0_offset"));
     if (prani_in_range(f0_offset, f64_neg(range), range) == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var size_scale = bayan_json_v_int(bayan_json_v_obj_get(root, "size_scale"));
+    var size_scale = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "size_scale"));
     if (prani_in_range(size_scale, PR_V_0_1, f64_from(10)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var vocal_effort = bayan_json_v_int(bayan_json_v_obj_get(root, "vocal_effort"));
+    var vocal_effort = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "vocal_effort"));
     if (prani_in_range(vocal_effort, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var self = alloc(sizeof(CreatureVoice));
     CreatureVoice_set_species(self, species);
@@ -880,14 +882,14 @@ fn crvoice_apply_vocalization_envelope(samples, voc, sample_rate) {
 # 2.0.5 guards. This is a public entry point in its own right, not only the
 # PURR arm of vocalize_with_intent, so it re-checks what that path checks:
 #   sample_rate  finite, > 0   the purr envelope and crtract_new both need it.
-#   num_samples  >= 0          a count, and 0 is VALID (empty buffer); a negative
-#                              one is the f64_to-overflow sentinel, not a length.
+#   num_samples  [0, VEC_CAP_MAX]  a count, and 0 is VALID (empty buffer); past
+#                              the limit the result cannot be one vec.
 #   size_scale   finite, > 0   it DIVIDES 27.0 to get purr_f0, and
 #                              f64_clamp(NaN, 20, 35) is NaN -- NaN passes every
 #                              clamp, so the rails below do not catch it.
 fn crvoice_synthesize_cat_purr(self, sample_rate, num_samples, modifiers) {
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
-    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_is_positive(CreatureVoice_size_scale(self)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var tract = crtract_new(CreatureVoice_params(self), sample_rate);
     if (prani_is_err(tract) == 1) { return tract; }
@@ -984,13 +986,14 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     var modifiers = prani_intent_modifiers(intent);
     var f0 = f64_mul(eff_f0, IntentModifiers_pitch_scale(modifiers));
     var effective_duration = f64_mul(duration, IntentModifiers_duration_scale(modifiers));
-    # num_samples = (effective_duration * sample_rate) as usize
-    var num_samples = f64_to(f64_mul(effective_duration, sample_rate));
-    # A finite duration can still overflow the product (1e300 s at 44100 Hz), and
-    # f64_to of anything outside i64 is i64::MIN. A negative bound does not crash
-    # -- the render loop simply never runs and an EMPTY buffer comes back as a
-    # success, which is audit finding F11's whole shape. Report it instead.
-    if (num_samples < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # num_samples = (effective_duration * sample_rate) as usize -- ranged BEFORE
+    # the cast, because the result is one vec. Past VEC_CAP_MAX the render ends in
+    # a process exit, minutes in. A finite duration can also overflow the product
+    # (1e300 s at 44100 Hz), and since
+    # cyrius 6.6.8 f64_to turns that into i64::MAX, which a floor check walks past.
+    var raw_samples = f64_mul(effective_duration, sample_rate);
+    if (prani_buffer_count_ok(raw_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var num_samples = f64_to(raw_samples);
 
     # vocal effort modulations
     var effort = CreatureVoice_vocal_effort(self);

@@ -185,8 +185,9 @@ assert_eq(CreatureVoice_species(hff2), PRANI_SP_CAT, "handle still addresses the
 
 # ================================================================
 # R1/R2 -- the two extracted loop shapes, including the edge every call site
-# relies on: f64_to saturates a NaN or overflowing sample count to i64::MIN, so
-# a non-positive count must append nothing rather than loop.
+# relies on: a count can reach here as i64::MIN (where f64_to lands below -2^63)
+# or as 0 (where it lands for NaN), so a non-positive count must append nothing
+# rather than loop.
 # ================================================================
 test_group("R1/R2 extracted vec helpers, including the non-positive count edge");
 var hsrc = vec_new();
@@ -202,8 +203,10 @@ assert_eq(vec_len(hdst), 7, "push_zeros appends n zeros");
 assert_eq(vec_get(hdst, 6), 0, "and they are zero");
 prani_vec_push_zeros(hdst, 0);
 assert_eq(vec_len(hdst), 7, "a zero count appends nothing");
+prani_vec_push_zeros(hdst, f64_to(f64_neg(PRANI_POS_INF)));
+assert_eq(vec_len(hdst), 7, "f64_to(-inf) == i64::MIN appends nothing, does not loop");
 prani_vec_push_zeros(hdst, f64_to(f64_div(0, 0)));
-assert_eq(vec_len(hdst), 7, "f64_to(NaN) == i64::MIN appends nothing, does not loop");
+assert_eq(vec_len(hdst), 7, "f64_to(NaN) == 0 appends nothing");
 
 # ================================================================
 # O1/O2 -- allocation budget. Cyrius's allocator is a bump arena that never
@@ -361,9 +364,10 @@ assert_eq(vec_len(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
 # that -- already demands 4.41e10 offset samples, i.e. over 700 GB at 8 bytes
 # each. The reachable failure is arena exhaustion, not overflow, so a guard that
 # only prevented the overflow would have missed nearly the whole range.
-# Separately: a NaN spread gives i64::MIN, and i64::MIN * 2 WRAPS TO 0, so the
-# chorus quietly returned a correct-length buffer -- a silent SUCCESS path, not
-# the silent-empty the audit describes.
+# Separately: a NaN spread reaches total_len as 0 (i64::MIN * 2 wrapped to 0
+# before cyrius 6.6.8; f64_to(NaN) has been 0 itself since), so the chorus quietly
+# returned a correct-length buffer -- a silent SUCCESS path, not the silent-empty
+# the audit describes.
 # ================================================================
 test_group("F10 chorus rejects a timing_spread it cannot allocate");
 var hvoices = vec_new();
@@ -439,6 +443,84 @@ assert_eq(prani_is_err(
   "control: FANTASY (the last valid tag, 12) still synthesizes");
 assert_eq(vec_len(crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
   "control: a wolf howl is unchanged");
+
+# ================================================================
+# Cyrius 6.6.8 made f64_to saturate. An overflowing sample count went from
+# i64::MIN, which `num_samples < 0` caught by accident, to i64::MAX, which it
+# does not. On 2.0.13's source rebuilt against 6.6.20 the first assertion here is
+# not a failure: it is "vec: capacity overflow" and exit 1, from a public entry
+# point. Each boundary below was mutation-checked: a floor-only guard, a
+# finite-only guard and a 2^63 ceiling each abort inside this group.
+# ================================================================
+test_group("an overflowing sample count is refused on every synthesis path");
+var H_1E300 = 0x7e37e43c8800759c;   # 1e300 s: finite, the product overflows to +inf
+var H_1E308 = 0x7fe1ccf385ebc8a0;   # 1e308 s: finite, only Mating's x2 overflows it
+var H_1E19  = 0x43e158e460913d00;   # 1e19: finite past 2^63, and no infinity anywhere
+var H_2P54  = 0x4350000000000000;   # 2^54: inside i64, past the exact-count ceiling
+var h_wolf = crvoice_new(PRANI_SP_WOLF);
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_1E300), PRANI_ERR_INVALID_VOCALIZATION,
+  "1e300 s at 44.1 kHz");
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E300, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "the same product through the rate: 1 s at 1e300 Hz");
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E19, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "1e19 samples: a finite product past i64, so no infinity for a check to find");
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_2P54, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "2^54 samples: fits i64, past the ceiling stream_new already enforced");
+assert_eq(crvoice_vocalize_with_intent(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_MATING, H_SR, H_1E308),
+  PRANI_ERR_INVALID_VOCALIZATION, "the intent's duration_scale is what overflows");
+# One voice per apparatus, plus the purr branch that returns before the block loop.
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, H_SR, H_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "the cat purr path");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_CHIRP, H_SR, H_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "syringeal");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HISS, H_SR, H_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "noise only");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_STRIDULATE, H_SR, H_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "stridulatory");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, H_SR, H_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "vibratile");
+# The other public route to a count must agree with vocalize about the same input.
+assert_eq(stream_new(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_1E300),
+  PRANI_ERR_INVALID_VOCALIZATION, "stream_new refuses the same product");
+var h_fv = prani_ffi_voice_create(PRANI_SP_WOLF);
+assert_eq(prani_ffi_stream_start(h_fv, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_1E300), 0,
+  "and the FFI hands back null for it");
+# CONTROLS: without these, a guard that refused everything would pass the above.
+assert_eq(vec_len(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
+  "control: an ordinary howl is unchanged");
+assert_eq(vec_len(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, 0)), 0,
+  "control: duration 0 is still an empty buffer, not an error");
+
+# ================================================================
+# A vec cannot grow past VEC_CAP_MAX: the push is "vec: capacity overflow" and a
+# process exit no caller can intercept. 3e9 s at 44100 Hz rendered for minutes and
+# then died that way, on 2.0.13 and on the first 2.0.14 fix alike. The refusal has
+# to come before the render, so every assertion here returns at once. A render of
+# exactly VEC_CAP_MAX samples was run by hand and returned all of them, all finite;
+# it takes minutes and 4 GiB, so it is not an assertion here.
+# ================================================================
+test_group("a request past one vec's limit is refused before any rendering");
+var H_3E9 = 0x41e65a0bc0000000;   # 3e9 s: under 2^53 samples at 44.1 kHz, far past one vec
+var h_over = f64_from(VEC_CAP_MAX + 1);
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_3E9), PRANI_ERR_INVALID_VOCALIZATION,
+  "3e9 s at 44.1 kHz: under 2^53, past VEC_CAP_MAX");
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, h_over, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "exactly one sample too many");
+assert_eq(crvoice_vocalize_with_intent(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_MATING,
+    f64_from(134217729), F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "2^27 + 1 samples, which only Mating's x2 takes past the limit");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, H_SR, H_3E9),
+  PRANI_ERR_INVALID_VOCALIZATION, "the cat purr path");
+# A stream is NOT one buffer, so the same request is legal there. This is what a
+# caller with a very long render is pointed at, so it has to keep working.
+var h_long = stream_new(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_3E9);
+assert_eq(prani_is_err(h_long), 0, "control: stream_new still accepts it");
+assert_gt(stream_total_samples(h_long), VEC_CAP_MAX, "and its total really is past one vec's limit");
+# But one BLOCK of it is a buffer, and used to reach the same abort.
+assert_eq(stream_next_block(h_long, VEC_CAP_MAX + 1), PRANI_ERR_INVALID_VOCALIZATION,
+  "a single block past VEC_CAP_MAX is refused");
+assert_eq(stream_samples_rendered(h_long), 0, "and nothing was rendered");
+assert_eq(vec_len(stream_next_block(h_long, 64)), 64, "control: a smaller block still drains the stream");
 
 var rc = assert_summary();
 syscall(60, rc);

@@ -1,6 +1,6 @@
 # result.cyr — Result<T, E> sum type and helpers
 # Usage: include "lib/result.cyr"
-# Requires: alloc.cyr, fmt.cyr (for result_print)
+# Includes its own definers (6.6.9): fmt.cyr, for result_print's fmt_int / fmt_int_buf.
 #
 # ⭐ v6.6.0 — THE VALUE FORM. `Result` is declared `: stack`, so `Ok(v)` / `Err(e)` return a
 # REGISTER PAIR (tag in rax, payload in rdx) and allocate ZERO bytes. Before this, every
@@ -47,6 +47,11 @@
 # had their bodies rewritten from `load64(box)` to a direct register compare. On a box every one
 # of them answers wrongly, compiling clean and exiting 0 — `is_some(box)` and `is_none(box)` are
 # BOTH 0. Boxes go through `boxed_*` (lib/boxed.cyr) and nothing else.
+
+# 6.6.9: result_print calls fmt_int / fmt_int_buf, so a bare include of this file compiled with
+# two undefined functions (ud2 stubs). Include-once: a caller that already has fmt pays nothing.
+# CHANGELOG [6.6.9]
+include "lib/fmt.cyr"
 
 enum Result<T, E>: stack {
     Ok(v);

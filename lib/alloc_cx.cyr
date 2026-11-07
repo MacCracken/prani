@@ -1,0 +1,99 @@
+# alloc_cx.cyr — heap allocator for the cyrius-x (cx) bytecode target.
+# Drop-in peer of alloc.cyr's Linux arm / alloc_macos.cyr / alloc_agnos.cyr.
+# API-compatible: alloc_init(), alloc(size), alloc_reset(), alloc_used().
+#
+# WHY A STATIC BUMP HEAP AND NOT mmap/brk (v6.6.6): a .cyx guest has no
+# allocatable address space of its own. cxvm gives it ONE flat region
+# (`_cx_mem`, 1 MB — programs/cxvm.cyr) holding code, data and a downward
+# stack, and guest pointers are OFFSETS into that region which cxvm translates
+# on the pointer-taking syscalls. So a host allocation is useless here twice
+# over: cxvm's syscall dispatch captures only r2..r6, so the 6-argument mmap
+# cannot even be issued, and a host address returned through brk/mmap would be
+# meaningless as a guest offset. The heap therefore has to live INSIDE the
+# guest's own data section, which is what the static buffer below is.
+#
+# This is why `cycc_cx` could not compile `lib/assert.cyr` at all before
+# v6.6.6: alloc.cyr's arms are per-target `#ifdef`s and the cx driver
+# predefined no CYRIUS_TARGET_* macro, so NONE of them compiled and every
+# stdlib module that allocates resolved to nothing — `undefined function(s)
+# called (cx backend): alloc, vec_get, alloc_reset, sys_exit`. No .tcyr could
+# run on cxvm. CHANGELOG [6.6.6]
+#
+# Single-threaded by construction (cxvm has one interpreter loop), so there is
+# no lock — alloc.cyr's `_alloc_lock_acquire`/`_release` are no-ops without an
+# arch macro anyway.
+
+var _heap_base = 0;       # start of the static heap (0 until alloc_init)
+var _heap_ptr = 0;        # bump pointer
+var _heap_end = 0;        # one past the last usable byte
+var _heap_used = 0;       # bytes handed out since the last init/reset
+
+# Maximum single allocation — matches alloc.cyr so a size check written
+# against the Linux arm behaves the same here. The real bound is the buffer.
+var ALLOC_MAX = 0x80000000;
+
+# 16384 slots x 8 B = 131072 B (128 KB), inside cxvm's 1 MB `_cx_mem`. It shares that
+# region with the program's code, the rest of its data and a stack growing
+# down from the top, so this cannot be raised much without shrinking the
+# usable stack — raise _CX_MEM_SIZE in programs/cxvm.cyr first if it ever
+# needs to be. Exhaustion is LOUD (below): a silent 0 from alloc() inside a
+# .cyx would surface as a store to guest offset 0, which cxvm happily
+# performs, corrupting the program's own header area.
+#
+# ONE slot count sizes the buffer AND bounds the heap, so the two cannot drift. (Through 6.6.9
+# the bound was a separate byte constant, `_CX_HEAP_BYTES = 131072`, kept to dodge a cx codegen
+# defect — `global * <power of two>` appeared to corrupt the next call's first argument. The real
+# cause was cx ESETCC compiling `<=` / `>=` the wrong way round, fixed at 6.6.6 bite 21a and
+# pinned by tests/gates/codegen/cx_relational_or_equal.sh axis 3; the workaround outlived it.)
+# The name `_cx_heap_buf` is load-bearing: src/main_cx.cyr's large-static advisory exempts it
+# by name. CHANGELOG [6.6.10]
+enum CxHeap { _CX_HEAP_SLOTS = 16384; }
+var _cx_heap_buf[_CX_HEAP_SLOTS];
+
+# Initialize the heap allocator. Idempotent: once the heap is up, a re-call is
+# a no-op returning the existing base. Optional — alloc() lazy-inits.
+fn alloc_init(): i64 {
+    if (_heap_base != 0) { return _heap_base; }
+    _heap_base = &_cx_heap_buf;
+    _heap_ptr = _heap_base;
+    _heap_end = _heap_base + _CX_HEAP_SLOTS * 8;
+    _heap_used = 0;
+    return _heap_base;
+}
+
+# Allocate `size` bytes from the static heap, 8-byte aligned. Returns 0 for a
+# non-positive or absurd size; a genuine exhaustion aborts LOUDLY rather than
+# returning 0, because a null store in a .cyx guest writes to guest offset 0,
+# which cxvm performs happily.
+fn alloc(size): i64 {
+    if (size <= 0) { return 0; }
+    if (size > ALLOC_MAX) { return 0; }
+    size = (size + 7) & (0 - 8);
+    if (_heap_base == 0) { alloc_init(); }
+    if (_heap_ptr + size > _heap_end) {
+        syscall(1, 2, "alloc: cx static heap exhausted (128 KB)\n", 41);
+        syscall(60, 1);
+    }
+    var ptr = _heap_ptr;
+    _heap_ptr = ptr + size;
+    _heap_used = _heap_used + size;
+    return ptr;
+}
+
+# Batch-free: rewind the bump pointer. Scrubs the reused span first, for the
+# same memory-reuse information-leak reason alloc.cyr's Linux arm does —
+# alloc_reset is the only point this allocator hands an address to a new
+# owner. ⚠ Invalidates every pointer it has handed out.
+fn alloc_reset(): i64 {
+    if (_heap_base == 0) { return 0; }
+    var span = _heap_ptr - _heap_base;
+    if (span > 0) { _alloc_zero(_heap_base, span); }
+    _heap_ptr = _heap_base;
+    _heap_used = 0;
+    return 0;
+}
+
+# Return the number of heap bytes handed out since the last init/reset.
+fn alloc_used(): i64 {
+    return _heap_used;
+}

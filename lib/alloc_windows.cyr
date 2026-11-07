@@ -53,10 +53,19 @@ fn alloc_init() {
     # mmap(addr=0, len=_WIN_HEAP_SIZE, prot=RW(3), MAP_PRIVATE|ANON(0x22),
     # fd=-1, off=0). PE EMMAP_PE ignores prot/flags/fd/off and always
     # COMMIT|RESERVE + PAGE_READWRITE.
-    _heap_base = syscall(9, 0, _WIN_HEAP_SIZE, 3, 0x22, 0 - 1, 0);
-    _heap_end = _heap_base + _WIN_HEAP_SIZE;
-    _heap_ptr = _heap_base;
-    return _heap_base;
+    # ⚠ CHECKED, and into a LOCAL first (6.6.7). VirtualAlloc returns 0 on failure; this
+    # adopted it unchecked, so `_heap_base` stayed 0 and EVERY later alloc() re-ran this
+    # init and silently returned 0 (or a small bogus pointer) while the Linux and macOS
+    # peers abort loudly. Now it aborts like them. CHANGELOG [6.6.7]
+    var base = syscall(9, 0, _WIN_HEAP_SIZE, 3, 0x22, 0 - 1, 0);
+    if (base <= 0) {
+        syscall(1, 2, "alloc_init: mmap failed\n", 24);
+        syscall(60, 1);
+    }
+    _heap_base = base;
+    _heap_end = base + _WIN_HEAP_SIZE;
+    _heap_ptr = base;
+    return base;
 }
 
 # Maximum single allocation (256 MB — same as Linux peer, will
@@ -70,12 +79,23 @@ fn alloc(size) {
     # Pure validation OUTSIDE the v6.0.64 alloc lock (no shared state).
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
+    #ifdef CYRIUS_POISON
+    var pz_req = size;       # 6.6.18: redzone room, after the checks on the REQUEST
+    size = size + _POISON_HDR + _POISON_RZ + _POISON_RZ;
+    #endif
     size = (size + 7) & (0 - 8);
     # --- critical section (shared bump pointer) ---
     _alloc_lock_acquire();
     # v5.8.37 — lazy-init the heap if alloc_init() was never called
     # (now race-safe). See lib/alloc.cyr header for the migration note.
     if (_heap_base == 0) { alloc_init(); }
+    #ifdef CYRIUS_POISON
+    # 6.6.18 review: the reserve-fit decision alloc_used() reports must be the NON-poison one.
+    # The redzones fill the reserve sooner, so a request that fits without poison can take the
+    # `big` path here; the shadow counter advances by the rounded request exactly when the
+    # non-poison request would have fit the reserve, whichever path the poisoned block takes.
+    var pz_cnt = _poison_shadow_take(pz_req, _heap_end - _heap_base);
+    #endif
     var ptr = _heap_ptr;
     var new_ptr = ptr + size;
     # Overflow check: wrapped pointer = arithmetic overflow.
@@ -96,12 +116,21 @@ fn alloc(size) {
     # 2026-07-11-macos-windows-large-single-allocation-path.md.
     if (new_ptr > _heap_end) {
         var big = syscall(9, 0, size, 3, 0x22, 0 - 1, 0);
+        #ifdef CYRIUS_POISON
+        if (big <= 0) { _poison_shadow_undo(pz_req, pz_cnt); }
+        #endif
         _alloc_lock_release();
         if (big <= 0) { return 0; }
+        #ifdef CYRIUS_POISON
+        return _poison_arm_alloc(big, pz_req, pz_cnt);
+        #endif
         return big;
     }
     _heap_ptr = new_ptr;
     _alloc_lock_release();
+    #ifdef CYRIUS_POISON
+    return _poison_arm_alloc(ptr, pz_req, pz_cnt);   # armed + published outside the lock
+    #endif
     return ptr;
 }
 
@@ -109,6 +138,9 @@ fn alloc(size) {
 # memory is invalidated (same contract as Linux peer). Locked so a
 # concurrent alloc() can't observe a half-updated bump pointer.
 fn alloc_reset() {
+    #ifdef CYRIUS_POISON
+    poison_forget_all();     # 6.6.18: every listed block dies here, and its address is re-issued
+    #endif
     _alloc_lock_acquire();
     # Scrub the reclaimed span before rewinding so a later alloc() can't read
     # the prior occupant's bytes (memory-reuse info-leak, CVE-2026-34988 class;
@@ -118,11 +150,18 @@ fn alloc_reset() {
     var span = _heap_ptr - _heap_base;
     if (span > 0) { _alloc_zero(_heap_base, span); }
     _heap_ptr = _heap_base;
+    #ifdef CYRIUS_POISON
+    _poison_shadow = 0;
+    _poison_hidden = 0;
+    #endif
     _alloc_lock_release();
     return 0;
 }
 
 # Bytes used from the heap.
 fn alloc_used() {
+    #ifdef CYRIUS_POISON
+    return _poison_shadow - _poison_hidden;
+    #endif
     return _heap_ptr - _heap_base;
 }

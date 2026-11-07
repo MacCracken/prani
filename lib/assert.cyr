@@ -11,6 +11,15 @@ include "lib/alloc.cyr"
 # assert_fatal() below (arch-dispatched: SYS_EXIT 60/93/0, Win ExitProcess).
 # Double-include-safe; pulls only DCE-dead wrappers into test consumers.
 include "lib/syscalls.cyr"
+# v6.6.6: fmt.cyr's fmt_sprintf/fmt_printf take a Vec of args and call vec_get,
+# but fmt.cyr does not include its definer (its contract is "the consumer
+# includes my deps" — same as strlen from string.cyr above). Nothing caught the
+# gap on x86/aarch64, where an uncalled fmt_sprintf makes vec_get merely
+# UNREACHABLE and the dangling call a warning. The cx backend has no DCE, so the
+# call site is emitted and its undefined-call gate hard-errors: `include
+# "lib/assert.cyr"` alone did not compile for cx, so NO .tcyr could run on cxvm.
+# alloc.cyr is already included above, which is what vec_new/vec_push need.
+include "lib/vec.cyr"
 #
 # Now that comparisons work in function arguments, assert(x == 42, "name") works.
 
@@ -174,8 +183,58 @@ fn fail_after_n_allocs(n): i64 {
     return a;
 }
 
+# ── v6.6.6: a per-process scratch path for a test fixture. CHANGELOG [6.6.6]
+#
+# ⛔ WHY. `tests/tcyr/crossos/{atomic_write,syscalls_meta,uid_identity}.tcyr` created
+# `cyrius_atomic_test.txt`, `_vr01_mdir`, `_uid_identity_probe.bin` and friends at FIXED,
+# CWD-RELATIVE names — and the check driver's cwd is the REPO ROOT (and `~/_cyaud` on
+# ecb/ach/cass/pi). Two check.sh runs in one checkout therefore raced over the same files, and
+# a killed run left them in the tree. The paths are cwd-relative on purpose — `/tmp` does not
+# exist on Windows, where the cross-OS leg runs in `C:\cyrius-tests` — and the runner cannot
+# simply chdir the children, because other tests in the same corpus read TREE-relative paths.
+#
+# ⭐ So the fix is in the NAME, not the directory: `<base>.<pid>` is unique to the process, so
+# concurrent runs cannot collide on any target, and it stays a cwd-relative path with no `/`.
+# The test still removes it; the pid only means a killed run cannot poison the next one.
+# ⚠ Use it for EVERY fixture a test creates. tests/gates/toolchain/gates_never_write_tree.sh
+# axis 8 refuses a bare relative literal at a creating call in tests/.
+fn _assert_pid(): i64 {
+    #ifdef CYRIUS_TARGET_WIN
+    return syscall(0xF01C);          # kernel32!GetCurrentProcessId
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    return sys_getpid();
+    #endif
+}
+
+# Returns `base` with this process's pid appended ("<base>.<pid>"), as a fresh NUL-terminated
+# cstring — the name a test should give any fixture it creates. Still cwd-relative and free of
+# "/", so it works on every target including PE; see the note above for why that matters.
+# A refused allocation PANICS by name (exit 1): a test has no fixture name to fall back to,
+# and the unchecked store it replaced was a SIGSEGV natively and a silent write to guest
+# offset 0 on cx. CHANGELOG [6.6.10]
+fn test_scratch(base): i64 {
+    var bl = strlen(base);
+    var buf = alloc(bl + 32);
+    if (buf == 0) { panic("test_scratch: alloc refused the fixture name"); }
+    memcpy(buf, base, bl);
+    store8(buf + bl, 46);            # '.'
+    var digits[24];
+    fmt_int_buf(_assert_pid(), &digits);
+    var dl = strlen(&digits);
+    memcpy(buf + bl + 1, &digits, dl);
+    store8(buf + bl + 1 + dl, 0);
+    return buf;
+}
+
 # Print pass/fail summary and return number of failures
 fn assert_summary(): i64 {
+    # 6.6.18: under CYRIUS_POISON the summary sweeps every poisoned block first, so an
+    # overwrite nothing else looked at still fails the run. Counted (not a pass) only when bad.
+    #ifdef CYRIUS_POISON
+    var pz = poison_sweep();
+    if (pz > 0) { assert_eq(pz, 0, "poison_sweep(): blocks with a changed redzone"); }
+    #endif
     syscall(1, 1, "\n", 1);
     fmt_int(_assert_pass);
     syscall(1, 1, " passed, ", 9);

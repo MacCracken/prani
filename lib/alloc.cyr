@@ -36,12 +36,42 @@
 # A future BLOCKING-lock upgrade needs new primitives (macho
 # __ulock_wait/_wake, an agnos-userland-ABI futex) — filed as separate
 # follow-on issues.
-# See docs/development/issues/2026-06-04-cyrius-global-allocator-not-thread-safe.md.
+# See docs/development/issues/archived/2026-06-04-cyrius-global-allocator-not-thread-safe.md.
 #
 # cx bytecode has no threads and atomic_cas has no cx body, so the loop
 # is gated to the two real-thread arches (x86 / aarch64); on cx the lock
 # compiles to a no-op (correct — single-threaded VM).
+# v6.6.6: SELF-SUFFICIENT ON AGNOS. The agnos arm below calls `sys_mmap`, and this file included
+# only its own per-target arms, so `include "lib/alloc.cyr"` alone compiled with
+# `warning: undefined function 'sys_mmap'` under CYRIUS_TARGET_AGNOS — and an undefined fn is a
+# ud2/SIGILL stub, so the first allocation would trap. It was invisible from x86-Linux, whose arm
+# issues the raw syscall itself.
+#
+# ⛔ THE #ifdef IS LOAD-BEARING, NOT TIDINESS. `src/main.cyr` INCLUDES lib/alloc.cyr and
+# lib/vec.cyr — this file is part of the COMPILER's own source — so an unconditional
+# `include "lib/syscalls.cyr"` here is a compiler change: measured, it grew build/cycc by 14,112
+# bytes (1,310,864 -> 1,324,976) and the enlarged source then made **cybs** emit a gen1 that
+# SEGFAULTED compiling src/main.cyr, i.e. it broke the seed -> cybs -> cycc chain that the cycc
+# self-host fixpoint does not cover (tests/gates/toolchain/cybs_if_else_rbx.sh caught it).
+# Under the agnos guard the compiler's x86/aarch64/PE/Mach-O builds are byte-identical.
+# CHANGELOG [6.6.6]
+#ifdef CYRIUS_TARGET_AGNOS
+include "lib/syscalls.cyr"
+#endif
+
 include "lib/atomic.cyr"
+
+# 6.6.18 — POISON MODE reaches alloc(). Under `#define CYRIUS_POISON` (what `cyrius fuzz
+# --poison` sets) every alloc() block gets a leading and a trailing redzone and sits on the
+# poison core's live list; arenas become an accounting shell over those blocks. ⛔ EVERY
+# poison line in this file is under `#ifdef CYRIUS_POISON`, never a run-time `if`: this file
+# is COMPILER SOURCE, no compiler build defines the flag, and so cycc's bytes on all seven
+# forks are unchanged (an unconditional include here broke the seed chain at 6.6.6).
+# Invariant: poison never changes which requests succeed, alloc_used() / arena_used(), or
+# the zero-init of user bytes. agnos and cx alloc() are not instrumented. CHANGELOG [6.6.18]
+#ifdef CYRIUS_POISON
+include "lib/poison.cyr"
+#endif
 
 var _alloc_lock = 0;
 
@@ -52,7 +82,7 @@ var _alloc_lock = 0;
 # (Linux/agnos/Windows) BEFORE the child runs — a monotonic 0→1 set that happens-before
 # any concurrency (clone/CreateThread is a full barrier), so both parent and child then
 # take the locked path. While it is 0, acquire/release are no-ops → the ~10 ns bump path
-# is restored. See issues/2026-06-10-runtime-bench-suite-blind.md (PF-02).
+# is restored. See issues/archived/2026-06-10-runtime-bench-suite-blind.md (PF-02).
 #
 # v6.5.19: the DECLARATION moved to lib/atomic.cyr (included just above). It is now
 # read by two independent allocator locks — this one and lib/freelist.cyr's — and
@@ -128,6 +158,14 @@ include "lib/alloc_macos.cyr"
 include "lib/alloc_agnos.cyr"
 #endif
 
+# cyrius-x bytecode — no host heap reachable from a .cyx guest; a static bump
+# heap inside cxvm's flat data region. v6.6.6: without this arm the cx driver
+# matched NO target here (it predefined no CYRIUS_TARGET_* macro at all), so
+# `alloc` was undefined on cx and no .tcyr could compile. See lib/alloc_cx.cyr.
+#ifdef CYRIUS_TARGET_CX
+include "lib/alloc_cx.cyr"
+#endif
+
 #ifdef CYRIUS_TARGET_LINUX
 # v6.1.19: the Linux heap was brk(2)-backed (1 MB + grow via brk). brk is a
 # PROCESS-GLOBAL resource glibc malloc's main arena ALSO owns; whenever a
@@ -152,7 +190,7 @@ include "lib/alloc_agnos.cyr"
 # the chunk grain gets a chunk sized to it — so handed-out pointers are always
 # contiguous over their own length. Linux overcommits anonymous RW mmap, so the
 # chunk size is virtual: only touched pages cost RAM.
-# See docs/development/issues/2026-06-09-brk-bump-heap-vs-fdlopen-libssl-malloc.md,
+# See docs/development/issues/archived/2026-06-09-brk-bump-heap-vs-fdlopen-libssl-malloc.md,
 # CHANGELOG [6.1.19].
 var _heap_base = 0;         # current chunk base
 var _heap_ptr = 0;          # bump pointer within the current chunk
@@ -166,26 +204,72 @@ var _heap_used = 0;         # total bytes handed out since last init/reset
 # the first chunk, so alloc_reset cleanly reuses it with no chunk leak.
 var _LINUX_CHUNK = 0x10000000;
 
+# ⛔ SMALL BOARDS (v6.6.8). The 256 MB reservation is VIRTUAL, but a plain
+# anonymous mmap is still charged against the overcommit heuristic, which
+# refuses a single mapping larger than RAM + swap. On a board (or VM) with less
+# than ~256 MB the FIRST chunk was refused, alloc_init printed "mmap failed" and
+# exited — and as PID 1 that is a kernel panic ("Attempted to kill init",
+# measured in a `qemu-system-x86_64 -m 256M` VM; recipe in
+# tests/gates/memory/alloc_first_chunk_small_board.sh). Two layers:
+#   1. a GRAIN-SIZED chunk is mapped MAP_NORESERVE (0x4000, same value on
+#      x86_64 and aarch64): it is a reservation nobody promised to touch, so the
+#      heuristic has no business sizing it. A chunk sized to a LARGER request
+#      keeps normal accounting — that caller will touch it, and an impossible
+#      request should come back 0 from alloc(), not OOM-kill later.
+#   2. if the kernel still refuses (strict overcommit mode 2 ignores NORESERVE;
+#      RLIMIT_AS counts every mapping), the grain drops to 16 MB for this and
+#      every later chunk, and the heap grows 16 MB at a time from there.
+# CHANGELOG [6.6.8]
+var _LINUX_CHUNK_SMALL = 0x1000000;
+var _linux_grain = 0;       # 0 = not yet chosen (→ _LINUX_CHUNK); lowered on refusal
+var _LINUX_MAP_NORESERVE = 0x4000;
+
 # Linux mmap flags for an anonymous private mapping: MAP_PRIVATE (0x2) |
 # MAP_ANONYMOUS (0x20). (macOS uses 0x1002 — Darwin's MAP_ANON is 0x1000.)
 var _LINUX_MAP_ANON_PRIVATE = 0x22;
 
-# Maximum single allocation size (256MB)
+# Maximum single allocation size
 var ALLOC_MAX = 0x80000000;   # 2 GiB (v6.4.51: was 256 MiB; output_buf now allocs 1 GiB off-heap)
 
-# Round `n` up to the next _LINUX_CHUNK multiple.
-fn _linux_round_chunk(n): i64 {
-    return (n + (_LINUX_CHUNK - 1)) & (0 - _LINUX_CHUNK);
+# The current chunk grain: 256 MB until the kernel refuses one, 16 MB after.
+fn _linux_chunk_grain(): i64 {
+    if (_linux_grain == 0) { _linux_grain = _LINUX_CHUNK; }
+    return _linux_grain;
+}
+
+# Round `n` up to a multiple of the grain `g` (a power of two), never below `g`.
+fn _linux_round_chunk(n, g): i64 {
+    var sz = (n + (g - 1)) & (0 - g);
+    if (sz < g) { sz = g; }
+    return sz;
+}
+
+# One anonymous mapping of `sz` bytes; NORESERVE only when it is a pure grain
+# reservation (`min` fits inside one grain). Returns the base or a negative errno.
+fn _linux_map_chunk(sz, min, g): i64 {
+    var fl = _LINUX_MAP_ANON_PRIVATE;
+    if (min <= g) { fl = fl | _LINUX_MAP_NORESERVE; }
+    return syscall(9, 0, sz, 3, fl, 0 - 1, 0);
 }
 
 # mmap a fresh anonymous chunk of at least `min` bytes (rounded to the chunk
 # grain) and make it the current chunk. Returns the base, or 0 on failure
-# (raw mmap returns a small negative -errno on error).
+# (raw mmap returns a small negative -errno on error). A refused grain-sized
+# chunk is retried ONCE at the small grain, which then sticks (see above).
 fn _linux_new_chunk(min): i64 {
-    var sz = _linux_round_chunk(min);
-    if (sz < _LINUX_CHUNK) { sz = _LINUX_CHUNK; }
-    var base = syscall(9, 0, sz, 3, _LINUX_MAP_ANON_PRIVATE, 0 - 1, 0);
-    if (base < 0) { return 0; }
+    var g = _linux_chunk_grain();
+    var sz = _linux_round_chunk(min, g);
+    var base = _linux_map_chunk(sz, min, g);
+    if (base < 0) {
+        # A chunk sized to a big REQUEST being refused is the answer to that
+        # request, not evidence of a small board — keep the grain.
+        if (min > g) { return 0; }
+        if (g == _LINUX_CHUNK_SMALL) { return 0; }
+        _linux_grain = _LINUX_CHUNK_SMALL;
+        sz = _linux_round_chunk(min, _LINUX_CHUNK_SMALL);
+        base = _linux_map_chunk(sz, min, _LINUX_CHUNK_SMALL);
+        if (base < 0) { return 0; }
+    }
     _heap_base = base;
     _heap_ptr = base;
     _heap_end = base + sz;
@@ -203,9 +287,10 @@ fn alloc_init(): i64 {
     # caller (notably lib/thread.cyr's per-thread alloc_init). Callers that want to
     # free everything use alloc_reset(). The brk-era alloc_init this replaced was
     # effectively idempotent (re-brk to current break); the v6.1.19 brk→chunk switch
-    # lost that. See docs/development/issues/2026-06-09-chunked-alloc-init-not-idempotent-rechunks-on-recall.md.
+    # lost that. See docs/development/issues/archived/
+    # 2026-06-09-chunked-alloc-init-not-idempotent-rechunks-on-recall.md.
     if (_heap_base != 0) { return _heap_first_base; }
-    var base = _linux_new_chunk(_LINUX_CHUNK);
+    var base = _linux_new_chunk(8);
     if (base == 0) {
         syscall(1, 2, "alloc_init: mmap failed\n", 24);
         syscall(60, 1);
@@ -223,6 +308,10 @@ fn alloc(size): i64 {
     # validated OUTSIDE the lock so bad calls never contend.
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
+    #ifdef CYRIUS_POISON
+    var pz_req = size;
+    size = size + _POISON_HDR + _POISON_RZ + _POISON_RZ;
+    #endif
     # Align to 8 bytes (local — outside the lock).
     size = (size + 7) & (0 - 8);
     # --- critical section: chunk state + _linux_new_chunk are shared ---
@@ -237,7 +326,13 @@ fn alloc(size): i64 {
     var ptr = _heap_ptr;
     _heap_ptr = ptr + size;
     _heap_used = _heap_used + size;
+    #ifdef CYRIUS_POISON
+    _heap_used = _heap_used - size + ((pz_req + 7) & (0 - 8));   # alloc_used() counts the REQUEST
+    #endif
     _alloc_lock_release();
+    #ifdef CYRIUS_POISON
+    return _poison_arm_alloc(ptr, pz_req, 1);                    # armed + published outside the lock
+    #endif
     return ptr;
 }
 
@@ -257,6 +352,9 @@ fn alloc(size): i64 {
 #
 # Reset only when nothing from the previous epoch will be read again.
 fn alloc_reset(): i64 {
+    #ifdef CYRIUS_POISON
+    poison_forget_all();     # every listed block dies here, and its address is re-issued
+    #endif
     _alloc_lock_acquire();
     # Scrub the reused span of the FIRST chunk before rewinding, so a later
     # alloc() can't read the prior occupant's bytes (memory-reuse info-leak,
@@ -274,12 +372,18 @@ fn alloc_reset(): i64 {
     _heap_ptr = _heap_first_base;
     _heap_end = _heap_first_end;
     _heap_used = 0;
+    #ifdef CYRIUS_POISON
+    _poison_hidden = 0;
+    #endif
     _alloc_lock_release();
     return 0;
 }
 
 # Return the number of heap bytes handed out since the last init/reset
 fn alloc_used(): i64 {
+    #ifdef CYRIUS_POISON
+    return _heap_used - _poison_hidden;     # 6.6.18: arena blocks are not global heap use
+    #endif
     return _heap_used;
 }
 #endif
@@ -368,6 +472,9 @@ var ARENA_FULL_ABORT = 3;
 # Create a new arena with the given capacity (bytes). Fixed-size, returns 0 when
 # exhausted — unchanged from every prior release.
 fn arena_new(capacity): i64 {
+    #ifdef CYRIUS_POISON
+    return _poison_arena_new(capacity);     # 6.6.18: the 64-byte header (owner list at a+56)
+    #endif
     var a = alloc(56);
     if (a == 0) { return 0; }
     var ch = alloc(capacity + 16);
@@ -447,12 +554,23 @@ fn _arena_grow(a, need): i64 {
 fn arena_alloc(a, size): i64 {
     if (size <= 0) { return 0; }
     if (a == 0) { return 0; }
+    # 6.6.18 — under CYRIUS_POISON the arena is an ACCOUNTING SHELL: the bookkeeping below runs
+    # unchanged on the request, so accept/refuse, arena_used and arena_remaining are exactly the
+    # non-poison values, and each accepted request is served by a redzoned block the arena owns
+    # (quarantined at arena_reset / arena_free). Carving the redzones in place would need ~11x
+    # over-reservation to keep the decisions identical.
+    #ifdef CYRIUS_POISON
+    var pz_req = size;
+    #endif
     size = (size + 7) & (0 - 8);
     var ptr = load64(a + 8);
     var new_ptr = ptr + size;
     if (new_ptr < ptr) { return 0; }
     if (new_ptr <= load64(a + 16)) {
         store64(a + 8, new_ptr);
+        #ifdef CYRIUS_POISON
+        return _poison_arena_take(a, pz_req);
+        #endif
         return ptr;
     }
     var pol = load64(a + 24);
@@ -469,12 +587,18 @@ fn arena_alloc(a, size): i64 {
         # passed, because it only checked the pointer was non-zero.
         if (np2 > load64(a + 16)) { return 0; }
         store64(a + 8, np2);
+        #ifdef CYRIUS_POISON
+        return _poison_arena_take(a, pz_req);
+        #endif
         return p2;
     }
     if (pol == ARENA_FULL_SPILL) {
         # Served from the global bump: never reclaimed by arena_reset, which is the
         # documented cost of this policy. It restores the pre-arena behaviour rather
         # than the crash, and is strictly weaker than GROW.
+        #ifdef CYRIUS_POISON
+        return _poison_block(pz_req, 1);    # one poisoned alloc() block — never wrapped twice
+        #endif
         return alloc(size);
     }
     if (pol == ARENA_FULL_ABORT) {
@@ -492,6 +616,9 @@ fn arena_alloc(a, size): i64 {
 # a request loop converges on its high-water mark and then allocates nothing at all.
 fn arena_reset(a): i64 {
     if (a == 0) { return 0; }
+    #ifdef CYRIUS_POISON
+    _poison_arena_quarantine(a);            # 6.6.18: check, fill, mark DEAD every owned block
+    #endif
     var first = load64(a + 32);
     if (first != 0) {
         store64(a + 40, first);
@@ -539,6 +666,9 @@ fn arena_remaining(a): i64 {
 # handle fails safely instead of leaking writes into stale memory.
 fn arena_free(a): i64 {
     if (a == 0) { return 0; }
+    #ifdef CYRIUS_POISON
+    _poison_arena_quarantine(a);
+    #endif
     store64(a,      0);   # base = 0
     store64(a + 8,  0);   # ptr  = 0  (matches base; arena_used == 0)
     store64(a + 16, 0);   # end  = 0  (so arena_alloc's bounds check fails)
@@ -647,22 +777,23 @@ fn _alloc_free_noop(state, ptr): i64 {
     return 0;
 }
 
-# Default realloc shape: alloc new + memcpy old → new. The old
-# allocation is leaked (acceptable for bump/arena since reset/exit
-# reclaims). Used by both bump_allocator and arena_allocator.
-fn _alloc_realloc_via(a, old_ptr, old_size, new_size): i64 {
-    var new_ptr = alloc_via(a, new_size);
-    if (new_ptr == 0) { return 0; }
-    if (old_ptr != 0) {
-        var copy_size = old_size;
-        if (new_size < copy_size) { copy_size = new_size; }
-        var i = 0;
-        while (i < copy_size) {
-            store8(new_ptr + i, load8(old_ptr + i));
-            i = i + 1;
-        }
+# The copy every "alloc new + copy + leak old" realloc entry shares — _bump_realloc,
+# _arena_realloc, _test_realloc and lib/poison.cyr's _poison_va_realloc: min(old_size,
+# new_size) bytes from old_ptr to new_ptr, nothing when old_ptr is 0. The old block is not
+# freed (bump and arena memory comes back only at reset / exit). It replaced
+# `_alloc_realloc_via`, which claimed to be this shared shape but had no caller — it took
+# an Allocator where a vtable entry receives the STATE, so it could not be wired — while
+# each entry re-inlined the loop. CHANGELOG [6.6.20]
+fn _alloc_copy_min(new_ptr, old_ptr, old_size, new_size): i64 {
+    if (old_ptr == 0) { return 0; }
+    var copy_size = old_size;
+    if (new_size < copy_size) { copy_size = new_size; }
+    var i = 0;
+    while (i < copy_size) {
+        store8(new_ptr + i, load8(old_ptr + i));
+        i = i + 1;
     }
-    return new_ptr;
+    return 0;
 }
 
 # ================================================================
@@ -675,9 +806,9 @@ fn _alloc_realloc_via(a, old_ptr, old_size, new_size): i64 {
 # global allocation, so use carefully when other code on the same
 # heap might still hold pointers.
 #
-# realloc + free use the shared default helpers — bump can't
-# individually free, and realloc's "alloc new + leak old" is
-# the honest semantics.
+# free is the shared no-op and realloc copies through the shared
+# _alloc_copy_min — bump can't individually free, and realloc's
+# "alloc new + leak old" is the honest semantics.
 
 fn _bump_alloc(state, size): i64 {
     return alloc(size);
@@ -686,15 +817,7 @@ fn _bump_alloc(state, size): i64 {
 fn _bump_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = alloc(new_size);
     if (new_ptr == 0) { return 0; }
-    if (old_ptr != 0) {
-        var copy_size = old_size;
-        if (new_size < copy_size) { copy_size = new_size; }
-        var i = 0;
-        while (i < copy_size) {
-            store8(new_ptr + i, load8(old_ptr + i));
-            i = i + 1;
-        }
-    }
+    _alloc_copy_min(new_ptr, old_ptr, old_size, new_size);
     return new_ptr;
 }
 
@@ -725,15 +848,7 @@ fn bump_allocator(): i64 {
 fn _arena_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = arena_alloc(state, new_size);
     if (new_ptr == 0) { return 0; }
-    if (old_ptr != 0) {
-        var copy_size = old_size;
-        if (new_size < copy_size) { copy_size = new_size; }
-        var i = 0;
-        while (i < copy_size) {
-            store8(new_ptr + i, load8(old_ptr + i));
-            i = i + 1;
-        }
-    }
+    _alloc_copy_min(new_ptr, old_ptr, old_size, new_size);
     return new_ptr;
 }
 
@@ -796,15 +911,7 @@ fn _test_alloc(state, size): i64 {
 fn _test_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = _test_alloc(state, new_size);
     if (new_ptr == 0) { return 0; }
-    if (old_ptr != 0) {
-        var copy_size = old_size;
-        if (new_size < copy_size) { copy_size = new_size; }
-        var i = 0;
-        while (i < copy_size) {
-            store8(new_ptr + i, load8(old_ptr + i));
-            i = i + 1;
-        }
-    }
+    _alloc_copy_min(new_ptr, old_ptr, old_size, new_size);
     return new_ptr;
 }
 

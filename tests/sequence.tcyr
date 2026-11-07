@@ -423,6 +423,12 @@ var g_smuggled = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_
 CallBout_set_call_duration(g_smuggled, T_NAN);
 assert_eq(sequence_call_bout_synthesize(g_smuggled, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
   "NaN call_duration set after construction -> INVALID_VOCALIZATION");
+# The interval gets no such second opinion: a NaN one casts to a gap of 0, which
+# prani_vec_push_zeros has to accept, so this recheck is the ONLY report.
+var g_smuggled_gap = sequence_call_bout_new(PRANI_VOC_HOWL, 2, CALL_D, GAP_I, PRANI_INTENT_SOCIAL);
+CallBout_set_interval(g_smuggled_gap, T_NAN);
+assert_eq(sequence_call_bout_synthesize(g_smuggled_gap, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN interval set after construction -> INVALID_VOCALIZATION");
 # A negative count, by contrast, was reported by NOTHING: measured pre-guard, it
 # returned an EMPTY buffer as a success -- F11's "silent empty where an error
 # belongs", and a state the oracle's u32 count could not even hold.
@@ -462,6 +468,10 @@ CallElement_set_duration(vec_get(g_pel, 1), CALL_D);
 CallElement_set_gap(vec_get(g_pel, 0), PRANI_POS_INF);
 assert_eq(sequence_call_phrase_synthesize(g_phrase, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
   "+inf gap -> INVALID_VOCALIZATION");
+# As for the bout's interval: a NaN gap casts to 0, so only the pre-pass can see it.
+CallElement_set_gap(vec_get(g_pel, 0), T_NAN);
+assert_eq(sequence_call_phrase_synthesize(g_phrase, g_wolf, SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "NaN gap -> INVALID_VOCALIZATION");
 CallElement_set_gap(vec_get(g_pel, 0), GAP_I);
 # control: with the fields restored the phrase renders exactly as before
 assert_eq(vec_len(sequence_call_phrase_synthesize(g_phrase, crvoice_new(PRANI_SP_WOLF), SR)), 1600,
@@ -508,10 +518,11 @@ assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCI
 var g_300 = f64_from(300);
 assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR_44100, g_300, g_0s),
   PRANI_ERR_INVALID_VOCALIZATION, "300 s x 2 voices -> rejected (the mix alone would have fit)");
-# the NaN path was a SILENT SUCCESS, not a silent empty: f64_to(NaN) is i64::MIN
-# and i64::MIN * 2 WRAPS TO 0, so total_len collapsed to base_samples and the
-# chorus returned a correct-LENGTH buffer with the spread quietly dropped
-assert_eq(f64_to(T_NAN) * 2, 0, "i64::MIN * 2 wraps to 0 -- why the NaN spread looked correct");
+# the NaN path was a SILENT SUCCESS, not a silent empty: a NaN spread reaches
+# total_len as 0 (i64::MIN * 2 wrapped to 0 before cyrius 6.6.8; f64_to(NaN) has
+# been 0 itself since), so total_len collapsed to base_samples and the chorus
+# returned a correct-LENGTH buffer with the spread quietly dropped
+assert_eq(f64_to(T_NAN), 0, "f64_to(NaN) is 0 -- why the NaN spread looks correct");
 assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, CALL_D, T_NAN),
   PRANI_ERR_INVALID_VOCALIZATION, "NaN timing_spread -> INVALID_VOCALIZATION (was a 400-sample SUCCESS)");
 assert_eq(sequence_synthesize_chorus(g_voices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, SR, T_NAN, CALL_D),

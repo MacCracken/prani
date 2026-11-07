@@ -97,6 +97,12 @@ include "lib/args_win.cyr"
 #endif
 
 #ifdef CYRIUS_TARGET_AGNOS
+# 6.6.9: the agnos peer's _agnos_getenv calls strlen / alloc / memcpy, and on agnos this
+# arm was the only thing included, so `include "lib/args.cyr"` alone compiled with three
+# undefined functions there (and cleanly on Linux, whose arm below brings alloc). The one module
+# that regressed per target. CHANGELOG [6.6.9]
+include "lib/alloc.cyr"
+include "lib/string.cyr"
 include "lib/args_agnos.cyr"
 #endif
 
@@ -114,7 +120,7 @@ var _args_len = 0;
 # the prior 4096-byte read truncated 99.8% of valid argv ranges
 # silently, with `argc()` undercounting and downstream verbs falling
 # through to "usage" branches. Reported by cyim 1.0.2+
-# (`docs/development/issues/2026-05-06-cyrius-args-init-4kb-cap.md`,
+# (cyim's `docs/development/issues/archive/2026-05-06-cyrius-args-init-4kb-cap.md`; CHANGELOG [5.9.5];
 # threshold bisected 4063 / 4064 byte boundary). 2 MB matches the
 # kernel's hard cap; alloc() lazy-inits the heap via the v5.8.37
 # auto-bootstrap so calling args_init() first-thing still works.

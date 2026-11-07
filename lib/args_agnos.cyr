@@ -85,6 +85,7 @@ fn _agnos_getenv(name) {
                 var vl = 0;
                 while (load8(vs + vl) != 0) { vl = vl + 1; }
                 var res = alloc(vl + 1);
+                if (res == 0) { return 0; }            # refused: reads as unset. CHANGELOG [6.6.10]
                 memcpy(res, vs, vl);
                 store8(res + vl, 0);
                 return res;

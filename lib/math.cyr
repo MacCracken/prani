@@ -2,9 +2,14 @@
 # Usage: include "lib/math.cyr"
 # Requires: (uses f64 builtins directly, no other includes)
 #
-# Provides: sinh, cosh, tanh, pow, clamp, min, max, lerp, hypot, sign,
-#           trunc, fract, gcd, lcm, fibonacci, binomial, f64_parse
-# All functions operate on f64 bit patterns.
+# Provides: the F64_* constants; the polyfills behind the f64_exp / f64_ln /
+#           f64_log2 / f64_exp2 / f64_atan builtins on aarch64 and behind
+#           f64_sin / f64_cos on EVERY target (6.6.9);
+#           f64_clamp, f64_min, f64_max, f64_lerp, f64_sign,
+#           f64_fract, gcd, lcm, f64_parse, f64_parse_ok
+#           (correctly rounded — a port of bayan 1.5.10's parser, CHANGELOG [6.6.13]).
+#           (sinh, cosh, tanh, pow and hypot live in lib/ganita.cyr.)
+# All f64 functions operate on f64 bit patterns.
 
 # Constants (f64 bit patterns)
 #
@@ -20,7 +25,7 @@ var F64_TWO_HALF      = 0x4004_0000_0000_0000;   # 2.5
 var F64_PI            = 0x4009_21FB_5444_2D18;   # π
 var F64_PI_2          = 0x3FF9_21FB_5444_2D18;   # π/2
 var F64_PI_4          = 0x3FE9_21FB_5444_2D18;   # π/4
-var F64_PI_6          = 0x3FE0_C152_382D_7365;   # π/6 ≈ 0.5235987755982988 (atan reduction, v6.4.25)
+var F64_PI_6          = 0x3FE0_C152_382D_7365;   # π/6 ≈ 0.5235987755982988
 var F64_2_PI          = 0x3FE4_5F30_6DC9_C883;   # 2/π ≈ 0.6366197723675814
 var F64_TAU           = 0x4019_21FB_5444_2D18;   # 2π
 var F64_E             = 0x4005_BF0A_8B14_5769;   # e
@@ -30,14 +35,13 @@ var F64_LOG2E         = 0x3FF7_1547_652B_82FE;   # 1/ln(2) ≈ 1.442695040888963
 var F64_FRAC_1_SQRT2  = 0x3FE6_A09E_667F_3BCD;   # 1/√2
 var F64_SQRT2         = 0x3FF6_A09E_667F_3BCD;   # √2
 
-# Double-double (Payne-Hanek-lite) trig range-reduction constants (v6.4.25).
-# For |x| ≥ F64_TRIG_BIG the single-constant reduction (r = x − k·π/2 with one
-# π/2 literal) loses precision; a Dekker double-double product x·(2/π) keeps the
-# reduction exact to ~1e-16 through |x| ≈ 1e15. 2/π and π/2 each carry a hi word
-# plus a lo correction; the _SH/_SL pairs are the Dekker split of the hi word
-# (top-26 / bottom bits) so TwoProduct can multiply exactly without FMA.
+# Double-double constants from the v6.4.25 trig reduction, which 6.6.9 replaced with
+# fdlibm's (see the sin / cos section). Nothing in this file uses them any more; they
+# stay because they are public — prakash builds its own Dekker products on
+# F64_DD_SPLIT. The _SH/_SL pairs are the Dekker split (top 26 bits / the rest) of
+# the 2/π and π/2 hi words; _LO is each constant's second word.
 var F64_DD_SPLIT      = 0x41A0_0000_0200_0000;   # 2^27+1 (Dekker split factor)
-var F64_TRIG_BIG      = 0x40C0_0000_0000_0000;   # 8192.0 — |x| threshold for the dd path
+var F64_TRIG_BIG      = 0x40C0_0000_0000_0000;   # 8192.0 — the old dd-path threshold
 var F64_2PI_LO        = 0xBC86_B01E_C541_7056;   # 2/π low word (dd tail)
 var F64_2PI_SH        = 0x3FE4_5F30_7000_0000;   # split-hi of 2/π hi word
 var F64_2PI_SL        = 0xBE31_B1BB_E800_0000;   # split-lo of 2/π hi word
@@ -46,385 +50,695 @@ var F64_PI2_SH        = 0x3FF9_21FB_5800_0000;   # split-hi of π/2 hi word
 var F64_PI2_SL        = 0xBE4D_DE97_4000_0000;   # split-lo of π/2 hi word
 
 # ============================================================
-# v5.7.31: aarch64 polyfills for f64_exp / f64_ln.
+# The exp / ln family: f64_exp, f64_ln, f64_log2, f64_exp2.
 # ============================================================
-# x86 has native x87 instructions for these (fyl2x, f2xm1, fscale);
-# aarch64 has none. Pre-v5.7.31 the parser hard-rejected f64_exp /
-# f64_ln on aarch64; v5.7.31 redirects them to these stdlib
-# polyfills. Pure-cyrius implementations using v5.7.30's basic
-# f64 ops (FADD/FSUB/FMUL/FDIV/FRINTN/FCVTZS/SCVTF). x86 builds
-# don't use these — the parser keeps emitting native x87 bytes —
-# but the polyfills compile fine on x86 too (no arch dependency
-# in the body) and are kept here for cross-arch consistency.
+# x86 lowers these builtins to native x87 (fyl2x, f2xm1, fscale). aarch64 has no
+# such instructions, so its backend calls the `_f64_*_polyfill` fns below; they
+# compile on every target and the gates call them directly on x86 too.
 #
-# Accuracy target: ~1e-12 relative error for inputs in the range
-# phylax / chi-squared / entropy work ([-50, 50] for exp, (0, 1e6]
-# for ln). Edge cases (overflow at x > 709, underflow at x < -745)
-# are out-of-spec — same behavior as the x87 path, which also
-# saturates / wraps at extremes.
+# The contract, on EVERY target (CHANGELOG [6.6.8]):
+#   * finite results are within 1 ulp of the correctly rounded value;
+#   * IEEE-754 / C special values: ln/log2 of +0 or -0 is -inf, of any NEGATIVE
+#     number (not only -1 or -inf) is NaN, of +inf is +inf; exp/exp2 overflow to
+#     +inf and underflow through the subnormals to +0; NaN in gives NaN out;
+#   * results are NOT promised bit-identical across targets. x87 and these
+#     ports are both within 1 ulp, but not always the same ulp. A program that
+#     needs identical bits on every target calls the `_f64_*_polyfill` fns
+#     directly — they are pure f64 add/sub/mul/div and integer bit operations,
+#     so they give the same bits everywhere.
+#
+# The four are ports of fdlibm 5.3 (e_exp.c, e_log.c) and FreeBSD msun
+# (e_log2.c + k_log.h), which carry a < 1 ulp bound. They replaced Taylor-series
+# polyfills (v5.7.31 exp/ln, v5.8.4 log2, v6.4.25 exp2) that had no special-value
+# handling in ln and no range check on the 2^n exponent pack in exp/exp2, and
+# were 200-2,300 ulp off: ln of every negative number other than -2^k came back
+# a large POSITIVE finite value, and exp(1000) came back negative.
 
-# exp(x) — range-reduce x = n*ln(2) + r, |r| ≤ ln(2)/2 ≈ 0.347.
-# Then exp(x) = 2^n * exp(r). 2^n via integer exponent bit-pack.
-# exp(r) via 7th-order Horner polynomial.
+# exp: overflow / underflow thresholds and the Cody-Waite two-word ln2. ln2_hi
+# has 21 trailing zero bits, so k·ln2_hi is exact for |k| ≤ 2^21.
+var _F64_EXP_OVF   = 0x40862E42FEFA39EF;   # 709.782712893384  (exp(x) > DBL_MAX above)
+var _F64_EXP_UNF   = 0xC0874910D52D3051;   # -745.1332191019411 (exp(x) < 2^-1075 below)
+var _F64_LN2_HI    = 0x3FE62E42FEE00000;
+var _F64_LN2_LO    = 0x3DEA39EF35793C76;
+var _F64_2POW_M1000 = 0x0170000000000000;  # 2^-1000 — the second step of a subnormal scale
+
+# exp(hi - lo) · 2^k, where hi - lo is the reduced argument (|hi - lo| ≤ ln2/2) and
+# lo carries the bits hi could not. fdlibm e_exp.c's Remez rational kernel.
+# k ≥ -1021 adds k straight into the exponent field. Below that the result is
+# subnormal, so it scales by 2^(k+1000) (still normal, exact) and then 2^-1000,
+# letting the one final multiply round the subnormal instead of the bit pack
+# wrapping into the sign bit (the pre-6.6.8 exp(-740) came back NEGATIVE).
+fn _f64_exp_kernel(hi, lo, k): i64 {
+    var r = f64_sub(hi, lo);
+    var t = f64_mul(r, r);
+    var p = 0x3E66376972BEA4D0;                      # P5
+    p = f64_add(0xBEBBBD41C5D26BF1, f64_mul(t, p));  # P4
+    p = f64_add(0x3F11566AAF25DE2C, f64_mul(t, p));  # P3
+    p = f64_add(0xBF66C16C16BEBD93, f64_mul(t, p));  # P2
+    p = f64_add(0x3FC555555555553E, f64_mul(t, p));  # P1
+    var c = f64_sub(r, f64_mul(t, p));
+    var q = f64_div(f64_mul(r, c), f64_sub(F64_TWO, c));
+    var y = f64_sub(F64_ONE, f64_sub(f64_sub(lo, q), hi));
+    if (k >= 0 - 1021) { return y + (k << 52); }
+    return f64_mul(y + ((k + 1000) << 52), _F64_2POW_M1000);
+}
+
+# exp(x) — fdlibm e_exp.c. ⛔ The range checks read x ITSELF, before x·log2e is
+# formed: for |x| beyond ~6e18 that product saturates f64_to, and for x near
+# -DBL_MAX it overflows to -inf, and either one used to turn into a plausible
+# FINITE answer (exp(-1e19) was 1.0, exp(-DBL_MAX) was +inf).
 fn _f64_exp_polyfill(x): i64 {
-    # ⛔ ±inf MUST be handled BEFORE the range reduction, and there are TWO independent
-    # reasons — patching only the subtraction would still be wrong.
-    #   1. The reduction computes `x - round(x*log2e)*ln2`, i.e. inf - inf = NaN, and every
-    #      Horner term downstream inherits it.
-    #   2. The 2^n bit-pack reads `f64_to(inf)`, which SATURATES to i64::MIN, so
-    #      `(n_int + 1023) << 52` is not an exponent at all.
-    # C and IEEE-754: exp(+inf) = +inf, exp(-inf) = +0. NaN needs no guard — it propagates
-    # correctly through the reduction on its own. Filed 2026-09-08 from ganita's P(-1) audit,
-    # where sinh(+inf)/cosh(±inf) came back NaN and the consumer could not tell whose bug it
-    # was. CHANGELOG [6.6.1].
-    if ((x & 0x7FFFFFFFFFFFFFFF) == 0x7FF0000000000000) {
-        if (((x >> 63) & 1) == 1) { return 0; }        # exp(-inf) = +0
-        return 0x7FF0000000000000;                      # exp(+inf) = +inf
+    var hx = (x >> 32) & 0x7FFFFFFF;
+    var xsb = (x >> 63) & 1;
+    if (hx >= 0x40862E42) {                          # |x| ≥ 709.78, inf or NaN
+        if (hx >= 0x7FF00000) {
+            if ((x & 0x000FFFFFFFFFFFFF) != 0) { return f64_add(x, x); }  # NaN
+            if (xsb == 1) { return 0; }             # exp(-inf) = +0
+            return x;                               # exp(+inf) = +inf
+        }
+        if (f64_gt(x, _F64_EXP_OVF) == 1) { return 0x7FF0000000000000; }
+        if (f64_lt(x, _F64_EXP_UNF) == 1) { return 0; }
     }
-    var LOG2E = 0x3FF71547652B82FE;     # 1/ln(2) ≈ 1.4426950408889634
-    var LN2   = 0x3FE62E42FEFA39EF;     # ln(2)   ≈ 0.6931471805599453
-
-    # Range reduction: x = n*ln(2) + r, |r| ≤ ln(2)/2 ≈ 0.347.
-    var n_f = f64_round(f64_mul(x, LOG2E));         # nearest integer (as f64)
-    var r   = f64_sub(x, f64_mul(n_f, LN2));         # |r| ≤ ln(2)/2
-
-    # 11-term Taylor polynomial for exp(r) — at |r| ≤ 0.347, the
-    # truncation r^11/11! ≈ 1.4e-13 absolute, which gives ~few-ulp
-    # relative error post-2^n scaling. Sufficient for phylax-class
-    # statistical work (chi-squared p-values, entropy). Higher
-    # accuracy via Remez optimization or smaller range reduction is
-    # a future polish slot if a consumer demands it.
-    var c10 = 0x3E927E4FB7789F5C;       # 1/10!
-    var c9  = 0x3EC71DE3A556C734;       # 1/9!
-    var c8  = 0x3EFA01A01A01A01A;       # 1/8!
-    var c7  = 0x3F2A01A01A01A01A;       # 1/7!
-    var c6  = 0x3F56C16C16C16C17;       # 1/6! = 1/720
-    var c5  = 0x3F81111111111111;       # 1/5! = 1/120
-    var c4  = 0x3FA5555555555555;       # 1/4! = 1/24
-    var c3  = 0x3FC5555555555555;       # 1/3! = 1/6
-    var c2  = F64_HALF;                  # 1/2! = 1/2
-    var c1  = F64_ONE;                   # 1/1! = 1
-    var c0  = F64_ONE;                   # 1/0! = 1
-
-    # Horner: p = c10; p = c9 + r*p; ... ; p = c0 + r*p
-    # Result is 1 + r + r²/2 + ... + r^10/10!
-    var p = c10;
-    p = f64_add(c9, f64_mul(r, p));
-    p = f64_add(c8, f64_mul(r, p));
-    p = f64_add(c7, f64_mul(r, p));
-    p = f64_add(c6, f64_mul(r, p));
-    p = f64_add(c5, f64_mul(r, p));
-    p = f64_add(c4, f64_mul(r, p));
-    p = f64_add(c3, f64_mul(r, p));
-    p = f64_add(c2, f64_mul(r, p));
-    p = f64_add(c1, f64_mul(r, p));
-    p = f64_add(c0, f64_mul(r, p));
-
-    # 2^n via bit pattern: ((n_int + 1023) << 52) interpreted as f64.
-    # n_int + 1023 is the biased exponent; mantissa = 0 → exact 2^n.
-    var n_int = f64_to(n_f);
-    var two_n_bits = (n_int + 1023) << 52;
-
-    return f64_mul(two_n_bits, p);
-}
-
-# ln(x) — range-reduce via mantissa/exponent split.
-#   x_bits = (sign << 63) | (e_biased << 52) | mantissa
-#   e_int = e_biased - 1023; m = x / 2^e_int (in [1, 2))
-# Then ln(x) = e_int * ln(2) + ln(m).
-# For ln(m), use u = (m - 1) / (m + 1) and the inverse-tanh series:
-#   ln((1+u)/(1-u)) = 2 * (u + u³/3 + u⁵/5 + u⁷/7 + ...)
-# u is small (|u| ≤ ~0.17 since m ∈ [√(1/2), √2]), so 5 terms ≈ 1e-15.
-fn _f64_ln_polyfill(x): i64 {
-    # Extract biased exponent + reset to 0x3FF (= 1.0 exponent),
-    # giving mantissa in [1, 2).
-    var e_raw = (x >> 52) & 0x7FF;
-    var e_int = e_raw - 1023;
-    var m = (x & 0x800FFFFFFFFFFFFF) | 0x3FF0000000000000;
-
-    # Normalize m to [√(1/2), √2) for tighter polynomial range.
-    # If m ≥ √2 (bits 0x3FF6A09E667F3BCD), divide by 2 + bump e.
-    if (m >= 0x3FF6A09E667F3BCD) {
-        m = m - 0x0010000000000000;     # divide-by-2 = subtract 1<<52 from exponent field
-        e_int = e_int + 1;
+    if (hx > 0x3FD62E42) {                           # |x| > ln2/2: reduce
+        if (hx < 0x3FF0A2B2) {                       # |x| < 1.5·ln2: k = ±1
+            if (xsb == 0) {
+                return _f64_exp_kernel(f64_sub(x, _F64_LN2_HI), _F64_LN2_LO, 1);
+            }
+            return _f64_exp_kernel(f64_add(x, _F64_LN2_HI), _F64_LN2_LO | 0x8000000000000000, 0 - 1);
+        }
+        var hf = F64_HALF;
+        if (xsb == 1) { hf = F64_HALF | 0x8000000000000000; }
+        var k = f64_to(f64_add(f64_mul(F64_LOG2E, x), hf));   # truncates: rounds x/ln2
+        var kf = f64_from(k);
+        return _f64_exp_kernel(f64_sub(x, f64_mul(kf, _F64_LN2_HI)), f64_mul(kf, _F64_LN2_LO), k);
     }
-
-    # u = (m - 1) / (m + 1), |u| ≤ ~0.17
-    var u = f64_div(f64_sub(m, F64_ONE), f64_add(m, F64_ONE));
-    var u2 = f64_mul(u, u);
-
-    # ln(m) ≈ 2u * (1 + u²/3 + u⁴/5 + u⁶/7 + u⁸/9 + u^10/11 + u^12/13 + u^14/15)
-    # 8 terms — at |u| ≤ ~0.171 (m ≤ √2), u^17/17 ≈ 4e-16 absolute,
-    # well within ulp budget. 5 terms gave ~10^5 ulp at ln(e); 8
-    # terms gives < 5 ulp.
-    var c_3  = 0x3FD5555555555555;       # 1/3
-    var c_5  = 0x3FC999999999999A;       # 1/5
-    var c_7  = 0x3FC2492492492492;       # 1/7
-    var c_9  = 0x3FBC71C71C71C71C;       # 1/9
-    var c_11 = 0x3FB745D1745D1746;       # 1/11
-    var c_13 = 0x3FB3B13B13B13B14;       # 1/13
-    var c_15 = 0x3FB1111111111111;       # 1/15
-
-    var p = c_15;
-    p = f64_add(c_13, f64_mul(u2, p));
-    p = f64_add(c_11, f64_mul(u2, p));
-    p = f64_add(c_9,  f64_mul(u2, p));
-    p = f64_add(c_7,  f64_mul(u2, p));
-    p = f64_add(c_5,  f64_mul(u2, p));
-    p = f64_add(c_3,  f64_mul(u2, p));
-    p = f64_add(F64_ONE, f64_mul(u2, p));
-    var ln_m = f64_mul(F64_TWO, f64_mul(u, p));
-
-    # Combine: ln(x) = e_int * ln(2) + ln_m
-    var e_f = f64_from(e_int);
-    return f64_add(f64_mul(e_f, F64_LN2), ln_m);
+    if (hx < 0x3E300000) { return f64_add(F64_ONE, x); }   # |x| < 2^-28
+    return _f64_exp_kernel(x, 0, 0);
 }
 
-# log2(x) — change of base: log2(x) = ln(x) / ln(2) = ln(x) * (1/ln(2)).
-# v5.8.4: aarch64 polyfill (phylax #1 unblock). x86 has fyl2x for log2;
-# aarch64 doesn't, so this routes through `_f64_ln_polyfill` (parse_expr
-# auto-dispatches `f64_ln` on aarch64) and multiplies by F64_LOG2E. Same
-# accuracy as the underlying ln polyfill (~5 ulp at typical inputs).
-# Phylax's Shannon entropy + chi-squared paths use this; previously
-# blocked aarch64 cross-build via the `f64_log2 is x86-only` hard-reject.
-fn _f64_log2_polyfill(x): i64 {
-    return f64_mul(f64_ln(x), F64_LOG2E);
-}
-
-# ============================================================
-# v6.4.16: aarch64 polyfills for f64_sin / f64_cos.
-# ============================================================
-# x86 has native x87 fsin / fcos; aarch64 has no native trig (even
-# hardware sin/cos on ARM is a library affair). Pre-v6.4.16 the
-# aarch64 backend hard-rejected f64_sin / f64_cos; v6.4.16 redirects
-# them to these polyfills (the v5.7.31 exp/ln pattern applied to trig).
-# Consumer-filed by attn11 (hearing lane: Hann-window cos + synth sin +
-# hisab num_fft twiddles) — `issues/2026-07-07-aarch64-no-trig-polyfill.md`.
-#
-# Range-reduce x = k·(π/2) + r with |r| ≤ π/4 and quadrant q = k mod 4;
-# evaluate sin(r) and cos(r) via Horner Taylor (through 1/15! and 1/14!,
-# accurate to ~1e-16 on |r| ≤ π/4) and select/sign per quadrant. Single-
-# constant reduction (like _f64_exp's single ln2) — accurate for typical
-# inputs; extreme-|x| (where the single π/2 subtraction loses precision)
-# is out-of-spec, same posture as the exp/ln polyfills. A Payne-Hanek /
-# Cody-Waite two-part reduction is a future polish slot if a consumer needs it.
-# x86 builds keep emitting native fsin/fcos; these compile on x86 too but
-# are only invoked on aarch64.
-
-# sin(r)/r as a polynomial in r² (Taylor, alternating sign): the coefficients
-# are (-1)^k / (2k+1)! for k = 0..7. dev-computed IEEE-754 bit patterns.
-fn _f64_sin_core(r2): i64 {
-    var p = 0xBD6AE7F3E733B81F;                          # s7 = -1/15!
-    p = f64_add(0x3DE6124613A86D09, f64_mul(r2, p));     # s6 =  1/13!
-    p = f64_add(0xBE5AE64567F544E4, f64_mul(r2, p));     # s5 = -1/11!
-    p = f64_add(0x3EC71DE3A556C734, f64_mul(r2, p));     # s4 =  1/9!
-    p = f64_add(0xBF2A01A01A01A01A, f64_mul(r2, p));     # s3 = -1/7!
-    p = f64_add(0x3F81111111111111, f64_mul(r2, p));     # s2 =  1/5!
-    p = f64_add(0xBFC5555555555555, f64_mul(r2, p));     # s1 = -1/3!
-    p = f64_add(F64_ONE, f64_mul(r2, p));                # s0 =  1
-    return p;
-}
-
-# cos(r) as a polynomial in r² (Taylor, alternating sign): (-1)^k / (2k)!.
-fn _f64_cos_core(r2): i64 {
-    var p = 0xBDA93974A8C07C9D;                          # c7 = -1/14!
-    p = f64_add(0x3E21EED8EFF8D898, f64_mul(r2, p));     # c6 =  1/12!
-    p = f64_add(0xBE927E4FB7789F5C, f64_mul(r2, p));     # c5 = -1/10!
-    p = f64_add(0x3EFA01A01A01A01A, f64_mul(r2, p));     # c4 =  1/8!
-    p = f64_add(0xBF56C16C16C16C17, f64_mul(r2, p));     # c3 = -1/6!
-    p = f64_add(0x3FA5555555555555, f64_mul(r2, p));     # c2 =  1/4!
-    p = f64_add(0xBFE0000000000000, f64_mul(r2, p));     # c1 = -1/2!
-    p = f64_add(F64_ONE, f64_mul(r2, p));                # c0 =  1
-    return p;
-}
-
-# Double-double range reduction for |x| ≥ F64_TRIG_BIG (v6.4.25, Payne-Hanek-
-# lite). Recomputes k_f and r in extended precision so the reduction stays exact
-# to ~1e-16 through |x| ≈ 1e15 — where the single-constant `x − k·π/2` above
-# suffers catastrophic cancellation. Dekker TwoProduct (split via F64_DD_SPLIT,
-# no FMA) forms x·(2/π) and frac·(π/2) with hi+lo words. The dd k_f (not a naive
-# f64_round(x·2/π), which is off-by-one for large x) is what feeds the quadrant,
-# so this block writes k_f directly. Duplicated verbatim in sin/cos (as the
-# small-path reduction already is); factoring is blocked by no multi-return.
-fn _f64_sin_polyfill(x): i64 {
-    var k_f = f64_round(f64_mul(x, F64_2_PI));           # nearest multiple of π/2
-    var r   = f64_sub(x, f64_mul(k_f, F64_PI_2));         # r ∈ [−π/4, π/4]
-    var ax  = x & 0x7FFFFFFFFFFFFFFF;                     # |x| (clear sign bit)
-    if (f64_gt(ax, F64_TRIG_BIG) == 1) {
-        var xc  = f64_mul(x, F64_DD_SPLIT);
-        var xhi = f64_sub(xc, f64_sub(xc, x));
-        var xlo = f64_sub(x, xhi);
-        var ph  = f64_mul(x, F64_2_PI);
-        var pe  = f64_sub(f64_mul(xhi, F64_2PI_SH), ph);   # TwoProduct error term (Dekker)
-        pe = f64_add(pe, f64_mul(xhi, F64_2PI_SL));
-        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SH));
-        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SL));
-        var plo = f64_add(pe, f64_mul(x, F64_2PI_LO));
-        k_f = f64_round(f64_add(ph, plo));
-        var frac = f64_add(f64_sub(ph, k_f), plo);
-        var fc  = f64_mul(frac, F64_DD_SPLIT);
-        var fhi = f64_sub(fc, f64_sub(fc, frac));
-        var flo = f64_sub(frac, fhi);
-        var rh  = f64_mul(frac, F64_PI_2);
-        var re  = f64_sub(f64_mul(fhi, F64_PI2_SH), rh);   # TwoProduct error term (Dekker)
-        re = f64_add(re, f64_mul(fhi, F64_PI2_SL));
-        re = f64_add(re, f64_mul(flo, F64_PI2_SH));
-        re = f64_add(re, f64_mul(flo, F64_PI2_SL));
-        r = f64_add(rh, f64_add(re, f64_mul(frac, F64_PI2_LO)));
-    }
-    var q   = f64_to(k_f) & 3;                            # quadrant (two's-comp mask handles k<0)
-    var r2  = f64_mul(r, r);
-    var sinr = f64_mul(r, _f64_sin_core(r2));
-    var cosr = _f64_cos_core(r2);
-    # sin(x) = [sinr, cosr, -sinr, -cosr][q]
-    if (q == 0) { return sinr; }
-    if (q == 1) { return cosr; }
-    if (q == 2) { return f64_neg(sinr); }
-    return f64_neg(cosr);
-}
-
-fn _f64_cos_polyfill(x): i64 {
-    var k_f = f64_round(f64_mul(x, F64_2_PI));
-    var r   = f64_sub(x, f64_mul(k_f, F64_PI_2));
-    var ax  = x & 0x7FFFFFFFFFFFFFFF;
-    if (f64_gt(ax, F64_TRIG_BIG) == 1) {
-        var xc  = f64_mul(x, F64_DD_SPLIT);
-        var xhi = f64_sub(xc, f64_sub(xc, x));
-        var xlo = f64_sub(x, xhi);
-        var ph  = f64_mul(x, F64_2_PI);
-        var pe  = f64_sub(f64_mul(xhi, F64_2PI_SH), ph);   # TwoProduct error term (Dekker)
-        pe = f64_add(pe, f64_mul(xhi, F64_2PI_SL));
-        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SH));
-        pe = f64_add(pe, f64_mul(xlo, F64_2PI_SL));
-        var plo = f64_add(pe, f64_mul(x, F64_2PI_LO));
-        k_f = f64_round(f64_add(ph, plo));
-        var frac = f64_add(f64_sub(ph, k_f), plo);
-        var fc  = f64_mul(frac, F64_DD_SPLIT);
-        var fhi = f64_sub(fc, f64_sub(fc, frac));
-        var flo = f64_sub(frac, fhi);
-        var rh  = f64_mul(frac, F64_PI_2);
-        var re  = f64_sub(f64_mul(fhi, F64_PI2_SH), rh);   # TwoProduct error term (Dekker)
-        re = f64_add(re, f64_mul(fhi, F64_PI2_SL));
-        re = f64_add(re, f64_mul(flo, F64_PI2_SH));
-        re = f64_add(re, f64_mul(flo, F64_PI2_SL));
-        r = f64_add(rh, f64_add(re, f64_mul(frac, F64_PI2_LO)));
-    }
-    var q   = f64_to(k_f) & 3;
-    var r2  = f64_mul(r, r);
-    var sinr = f64_mul(r, _f64_sin_core(r2));
-    var cosr = _f64_cos_core(r2);
-    # cos(x) = [cosr, -sinr, -cosr, sinr][q]
-    if (q == 0) { return cosr; }
-    if (q == 1) { return f64_neg(sinr); }
-    if (q == 2) { return f64_neg(cosr); }
-    return sinr;
-}
-
-# ============================================================
-# v6.4.25: aarch64 polyfills for f64_exp2 / f64_atan.
-# ============================================================
-# x86 has native x87 for these (f2xm1/fscale for exp2, fpatan for atan);
-# aarch64 has none. Pre-v6.4.25 the aarch64 backend hard-rejected f64_exp2 /
-# f64_atan; v6.4.25 redirects them to these polyfills — the last two of the
-# transcendentals the v5.7.31 / v6.4.16 waves left as "separate unfiled aarch64
-# gaps" (issues/2026-07-07-aarch64-f64-exp2-atan-hard-error.md). x86 builds keep
-# emitting native x87; these compile on x86 too but are only invoked on aarch64.
-# f64_tan needs no backend op — compose sin/cos at the call site.
-
-# exp2(x) = 2^x — range-reduce x = n + f, n = round(x), |f| ≤ 0.5; then
-# 2^x = 2^n · 2^f with 2^f = exp(f·ln2). r = f·ln2, |r| ≤ ln2/2 ≈ 0.347, so
-# the same 11-term Taylor as _f64_exp_polyfill applies; 2^n via exponent
-# bit-pack. Accuracy matches the exp polyfill (~3e-13 worst-case over [-50,50]).
+# exp2(x) = 2^x. x = n + f with n = round(x) and |f| ≤ 1/2, so 2^x = 2^n · e^(f·ln2).
+# f·ln2 is formed as a double-double with Dekker's product (no FMA on the path):
+# a one-word product would put a full rounding error into the argument. The range
+# checks read x before anything else, for the same reason as exp's.
+var _F64_LN2_TAIL  = 0x3C7ABC9E3B39803F;   # ln2 - F64_LN2 (2.3e-17)
+var _F64_LN2_SH    = 0x3FE62E4300000000;   # Dekker split of F64_LN2: high 26 bits
+var _F64_LN2_SL    = 0xBE205C6110000000;   #   ... and the rest
 fn _f64_exp2_polyfill(x): i64 {
-    # ±inf, same two reasons as _f64_exp_polyfill above: `x - round(x)` is inf - inf, and the
-    # 2^n pack reads a saturated f64_to(inf). exp2 has the SAME limits as exp — exp2(+inf) is
-    # +inf, exp2(-inf) is +0. CHANGELOG [6.6.1].
-    if ((x & 0x7FFFFFFFFFFFFFFF) == 0x7FF0000000000000) {
-        if (((x >> 63) & 1) == 1) { return 0; }
-        return 0x7FF0000000000000;
+    var ax = x & 0x7FFFFFFFFFFFFFFF;
+    if (ax >= 0x7FF0000000000000) {
+        if (ax != 0x7FF0000000000000) { return f64_add(x, x); }   # NaN
+        if (((x >> 63) & 1) == 1) { return 0; }                   # exp2(-inf) = +0
+        return x;                                                 # exp2(+inf) = +inf
     }
-    var LN2 = 0x3FE62E42FEFA39EF;                 # ln(2) ≈ 0.6931471805599453
-
-    # Range reduction: n = round(x), f = x − n, r = f·ln2 (|r| ≤ ln2/2).
-    var n_f = f64_round(x);
-    var f   = f64_sub(x, n_f);
-    var r   = f64_mul(f, LN2);
-
-    # exp(r) — 11-term Taylor (coeffs shared with _f64_exp_polyfill).
-    var c10 = 0x3E927E4FB7789F5C;                 # 1/10!
-    var c9  = 0x3EC71DE3A556C734;                 # 1/9!
-    var c8  = 0x3EFA01A01A01A01A;                 # 1/8!
-    var c7  = 0x3F2A01A01A01A01A;                 # 1/7!
-    var c6  = 0x3F56C16C16C16C17;                 # 1/6!
-    var c5  = 0x3F81111111111111;                 # 1/5!
-    var c4  = 0x3FA5555555555555;                 # 1/4!
-    var c3  = 0x3FC5555555555555;                 # 1/3!
-    var c2  = F64_HALF;                            # 1/2!
-    var c1  = F64_ONE;                             # 1/1!
-    var c0  = F64_ONE;                             # 1/0!
-    var p = c10;
-    p = f64_add(c9, f64_mul(r, p));
-    p = f64_add(c8, f64_mul(r, p));
-    p = f64_add(c7, f64_mul(r, p));
-    p = f64_add(c6, f64_mul(r, p));
-    p = f64_add(c5, f64_mul(r, p));
-    p = f64_add(c4, f64_mul(r, p));
-    p = f64_add(c3, f64_mul(r, p));
-    p = f64_add(c2, f64_mul(r, p));
-    p = f64_add(c1, f64_mul(r, p));
-    p = f64_add(c0, f64_mul(r, p));
-
-    # 2^n via bit pattern: ((n + 1023) << 52) as f64 (mantissa 0 → exact 2^n).
-    var n_int = f64_to(n_f);
-    var two_n_bits = (n_int + 1023) << 52;
-    return f64_mul(two_n_bits, p);
+    if (f64_lt(x, 0x4090000000000000) == 0) { return 0x7FF0000000000000; }   # x ≥ 1024
+    if (f64_lt(x, 0xC090CC0000000000) == 1) { return 0; }                    # x < -1075
+    if (ax < 0x3C90000000000000) { return f64_add(F64_ONE, x); }             # |x| < 2^-54
+    var nf = f64_round(x);
+    var f  = f64_sub(x, nf);                         # exact
+    var p  = f64_mul(f, F64_LN2);
+    var fc = f64_mul(f, F64_DD_SPLIT);
+    var fh = f64_sub(fc, f64_sub(fc, f));
+    var fl = f64_sub(f, fh);
+    var e  = f64_sub(f64_mul(fh, _F64_LN2_SH), p);    # TwoProduct error term
+    e = f64_add(e, f64_mul(fh, _F64_LN2_SL));
+    e = f64_add(e, f64_mul(fl, _F64_LN2_SH));
+    e = f64_add(e, f64_mul(fl, _F64_LN2_SL));
+    e = f64_add(e, f64_mul(f, _F64_LN2_TAIL));
+    return _f64_exp_kernel(p, e ^ 0x8000000000000000, f64_to(nf));   # hi - lo = p + e
 }
 
-# atan(x) → (−π/2, π/2). Two-stage argument reduction keeps the Taylor
-# argument small: (1) atan(−x) = −atan(x), so work on |x|; (2) atan(ax) =
-# π/2 − atan(1/ax) folds |x| > 1 into [0, 1]; (3) atan(ax) = π/6 +
-# atan((ax − 1/√3)/(1 + ax/√3)) folds ax > 2−√3 into |t| ≤ tan(π/12) ≈ 0.268.
-# On that range an 11-term Taylor (through t^21) gives ~1e-14. Accuracy
-# ~1e-14 worst-case (validated vs reference over ±1e8).
-fn _f64_atan_polyfill(x): i64 {
-    var TAN30 = 0x3FE279A74590331C;               # tan(π/6) = 1/√3 ≈ 0.5773502691896257
-    var T2MS3 = 0x3FD126145E9ECD58;               # 2 − √3 ≈ 0.2679491924311227
+# The special values ln and log2 share. Returns the answer for a NaN, a zero, a
+# negative or +inf, and 1 (not a double any of those can produce) for a positive
+# finite x that needs the real computation. Keyed on the BIT PATTERN, before any
+# arithmetic: the pre-6.6.8 polyfill split every input as if it were a positive
+# normal, so ln(-1.5) came back +4.27e9 — every negative except -2^k and -inf.
+fn _f64_log_special(x): i64 {
+    var ax = x & 0x7FFFFFFFFFFFFFFF;
+    if (ax > 0x7FF0000000000000) { return f64_add(x, x); }   # NaN (quieted)
+    if (ax == 0) { return 0xFFF0000000000000; }              # log(±0) = -inf
+    if (((x >> 63) & 1) == 1) { return 0x7FF8000000000000; } # log(negative) = NaN
+    if (ax == 0x7FF0000000000000) { return x; }              # log(+inf) = +inf
+    return 1;
+}
 
-    # (1) sign fold: work on |x|, restore at the end.
-    var neg = 0;
-    var ax  = x;
-    if ((x & 0x8000000000000000) != 0) { neg = 1; ax = x & 0x7FFFFFFFFFFFFFFF; }
+# fdlibm's normalisation, shared by ln and log2: x = 2^k · m with m in
+# [sqrt(2)/2, sqrt(2)). Returns m (an f64). A subnormal is first scaled by 2^54,
+# so it gets no phantom implicit bit; `_f64_log_k` below applies the matching -54.
+fn _f64_log_m(x): i64 {
+    if (x < 0x0010000000000000) { x = f64_mul(x, 0x4350000000000000); }   # 2^54, exact
+    var hx = (x >> 32) & 0x000FFFFF;
+    var i = (hx + 0x95F64) & 0x100000;               # m ≥ sqrt(2): use m/2 (and k + 1)
+    return (x & 0x000FFFFFFFFFFFFF) | ((i ^ 0x3FF00000) << 32);
+}
 
-    # (2) reciprocal fold: |x| > 1 → atan = π/2 − atan(1/ax).
-    var inv = 0;
-    if (f64_gt(ax, F64_ONE) == 1) { inv = 1; ax = f64_div(F64_ONE, ax); }
-
-    # (3) π/6 fold: ax > 2−√3 → subtract π/6 offset, map to |t| ≤ tan(π/12).
-    var addpi6 = 0;
-    if (f64_gt(ax, T2MS3) == 1) {
-        addpi6 = 1;
-        ax = f64_div(f64_sub(ax, TAN30), f64_add(F64_ONE, f64_mul(ax, TAN30)));
+# The k of `_f64_log_m`: the unbiased exponent, -54 for a subnormal, +1 when m was halved.
+fn _f64_log_k(x): i64 {
+    var k = 0;
+    if (x < 0x0010000000000000) {
+        k = 0 - 54;
+        x = f64_mul(x, 0x4350000000000000);
     }
+    var hx = x >> 32;
+    k = k + ((hx >> 20) - 1023);
+    return k + ((((hx & 0x000FFFFF) + 0x95F64) & 0x100000) >> 20);
+}
 
-    # atan(t) = t·P(t²), P(u) = 1 − u/3 + u²/5 − u³/7 + … + u^10/21 (Horner).
-    var t2 = f64_mul(ax, ax);
-    var p = 0x3FA8618618618618;                    # +1/21
-    p = f64_add(0xBFAAF286BCA1AF28, f64_mul(t2, p)); # −1/19
-    p = f64_add(0x3FAE1E1E1E1E1E1E, f64_mul(t2, p)); # +1/17
-    p = f64_add(0xBFB1111111111111, f64_mul(t2, p)); # −1/15
-    p = f64_add(0x3FB3B13B13B13B14, f64_mul(t2, p)); # +1/13
-    p = f64_add(0xBFB745D1745D1746, f64_mul(t2, p)); # −1/11
-    p = f64_add(0x3FBC71C71C71C71C, f64_mul(t2, p)); # +1/9
-    p = f64_add(0xBFC2492492492492, f64_mul(t2, p)); # −1/7
-    p = f64_add(0x3FC999999999999A, f64_mul(t2, p)); # +1/5
-    p = f64_add(0xBFD5555555555555, f64_mul(t2, p)); # −1/3
-    p = f64_add(F64_ONE, f64_mul(t2, p));            # +1
-    var res = f64_mul(ax, p);
+# fdlibm's log kernel: with s = f/(2+f), log(1+f) = f - s·(f - R), where R is this
+# Remez polynomial in s² (Lg1..Lg7), split into odd and even halves (t2 + t1) the way
+# e_log.c and k_log.h evaluate it — the evaluation order is part of the < 1 ulp bound.
+fn _f64_log_R(s): i64 {
+    var z = f64_mul(s, s);
+    var w = f64_mul(z, z);
+    var t1 = f64_mul(w, 0x3FC39A09D078C69F);                     # Lg6
+    t1 = f64_mul(w, f64_add(0x3FCC71C51D8E78AF, t1));             # Lg4
+    t1 = f64_mul(w, f64_add(0x3FD999999997FA04, t1));             # Lg2
+    var t2 = f64_mul(w, 0x3FC2F112DF3E5244);                     # Lg7
+    t2 = f64_mul(w, f64_add(0x3FC7466496CB03DE, t2));             # Lg5
+    t2 = f64_mul(w, f64_add(0x3FD2492494229359, t2));             # Lg3
+    t2 = f64_mul(z, f64_add(0x3FE5555555555593, t2));             # Lg1
+    return f64_add(t2, t1);
+}
 
-    if (addpi6 == 1) { res = f64_add(res, F64_PI_6); }
-    if (inv == 1)    { res = f64_sub(F64_PI_2, res); }
-    if (neg == 1)    { res = f64_neg(res); }
-    return res;
+# ln(x) — fdlibm e_log.c.
+fn _f64_ln_polyfill(x): i64 {
+    var sp = _f64_log_special(x);
+    if (sp != 1) { return sp; }
+    var k = _f64_log_k(x);
+    var mb = _f64_log_m(x);
+    var hx = (mb >> 32) & 0x000FFFFF;                # the mantissa's top 20 bits
+    var f = f64_sub(mb, F64_ONE);
+    var dk = f64_from(k);
+    if ((0x000FFFFF & (2 + hx)) < 3) {               # |f| < 2^-20
+        if (f == 0) {
+            if (k == 0) { return 0; }
+            return f64_add(f64_mul(dk, _F64_LN2_HI), f64_mul(dk, _F64_LN2_LO));
+        }
+        var rr = f64_mul(f64_mul(f, f), f64_sub(F64_HALF, f64_mul(0x3FD5555555555555, f)));
+        if (k == 0) { return f64_sub(f, rr); }
+        var rlo = f64_sub(rr, f64_mul(dk, _F64_LN2_LO));
+        return f64_sub(f64_mul(dk, _F64_LN2_HI), f64_sub(rlo, f));
+    }
+    var s = f64_div(f, f64_add(F64_TWO, f));
+    var R = _f64_log_R(s);
+    var khi = f64_mul(dk, _F64_LN2_HI);
+    var klo = f64_mul(dk, _F64_LN2_LO);
+    var ij = (hx - 0x6147A) | (0x6B851 - hx);
+    if (ij > 0) {                                    # m far from 1: split out f²/2
+        var hfsq = f64_mul(F64_HALF, f64_mul(f, f));
+        var shr = f64_mul(s, f64_add(hfsq, R));
+        if (k == 0) { return f64_sub(f, f64_sub(hfsq, shr)); }
+        return f64_sub(khi, f64_sub(f64_sub(hfsq, f64_add(shr, klo)), f));
+    }
+    var sfr = f64_mul(s, f64_sub(f, R));
+    if (k == 0) { return f64_sub(f, sfr); }
+    return f64_sub(khi, f64_sub(f64_sub(sfr, klo), f));
+}
+
+# log2(x) — FreeBSD msun e_log2.c + k_log.h. Computed DIRECTLY as
+# k + log(m)·(1/ln2) in extra precision, never as f64_ln(x)·log2e: that product
+# rounds, so log2(8) came back 2.9999999999999996, and on x86 `f64_ln` is the
+# native x87 op, so the "polyfill" was not the same code on the two targets.
+# log2(2^k) is exactly k (f = 0 collapses everything below to k + 0).
+fn _f64_log2_polyfill(x): i64 {
+    var sp = _f64_log_special(x);
+    if (sp != 1) { return sp; }
+    var y = f64_from(_f64_log_k(x));
+    var f = f64_sub(_f64_log_m(x), F64_ONE);
+    var hfsq = f64_mul(F64_HALF, f64_mul(f, f));
+    # k_log1p(f) = s·(hfsq + R)
+    var s = f64_div(f, f64_add(F64_TWO, f));
+    var r = f64_mul(s, f64_add(hfsq, _f64_log_R(s)));
+    # f - hfsq split as hi + lo (hi keeps its top 20 mantissa bits) so the
+    # multiply by the two-word 1/ln2 below does not lose the cancellation near 1.
+    var hi = f64_sub(f, hfsq) & 0xFFFFFFFF00000000;
+    var lo = f64_add(f64_sub(f64_sub(f, hi), hfsq), r);
+    var vhi = f64_mul(hi, 0x3FF7154765200000);                       # ivln2hi
+    var vlo = f64_mul(f64_add(lo, hi), 0x3DE705FC2EEFA200);          # ivln2lo
+    vlo = f64_add(vlo, f64_mul(lo, 0x3FF7154765200000));
+    # y + vhi, with what that sum drops carried into vlo (Dekker's Fast2Sum).
+    var ws = f64_add(y, vhi);
+    vlo = f64_add(vlo, f64_add(f64_sub(y, ws), vhi));
+    return f64_add(vlo, ws);
+}
+
+# ============================================================
+# sin / cos / atan: f64_sin, f64_cos (every target) and f64_atan (aarch64).
+# ============================================================
+# Every target lowers f64_sin / f64_cos to `_f64_sin_polyfill` / `_f64_cos_polyfill`:
+# aarch64 has no trig instructions, and x86 (Linux, PE, x86 Mach-O) stopped emitting
+# the x87 fsin / fcos, which reduce with a 66-bit π — sin(π) came back 1.6e11 ulp
+# off, error grew from 2^10 up, and |x| ≥ 2^63 was returned UNCHANGED (sin(1e19)
+# = 1e19). f64_atan stays x87 fpatan on x86 (< 1 ulp) and calls
+# `_f64_atan_polyfill` on aarch64.
+#
+# The contract, on EVERY target (CHANGELOG [6.6.9]):
+#   * finite results are within 1 ulp of the correctly rounded value, for EVERY
+#     finite argument — sin(DBL_MAX) included — not just small ones;
+#   * sin(±0) = ±0, sin/atan of a tiny x is x (sign and subnormals kept),
+#     sin(±inf) = cos(±inf) = NaN, NaN in gives NaN out, atan(±inf) = ±π/2,
+#     atan(±1) = ±π/4 exactly (the double nearest π/4);
+#   * sin and cos are the SAME BITS on every target (pure f64 add/sub/mul/div and
+#     integer ops, no FMA), except the sign of a NaN. atan's builtin is not: x87 and
+#     this port are both within 1 ulp, not always the same one.
+#
+# Ports of FreeBSD msun (fdlibm 5.3): e_rem_pio2.c + k_rem_pio2.c (the argument
+# reduction), k_sin.c / k_cos.c (the kernels, which take the reduced argument as
+# a head + tail pair) and s_atan.c. They replaced Taylor-series polyfills
+# (v6.4.16 sin/cos, v6.4.25 atan) that reduced with a ONE-word π/2 below 8192
+# (millions of ulp near every kπ/2, sin(π) = -0), a two-word 2/π above it (wrong
+# past ~2^50, |sin| > 1 or inf past 2^55) and read atan(1) 26 ulp off.
+
+var _F64_INVPIO2 = 0x3FE45F306DC9C883;   # 2/π, 53 bits
+var _F64_PIO2_1  = 0x3FF921FB54400000;   # first 33 bits of π/2
+var _F64_PIO2_1T = 0x3DD0B4611A626331;   # π/2 - PIO2_1
+var _F64_PIO2_2  = 0x3DD0B4611A600000;   # second 33 bits of π/2
+var _F64_PIO2_2T = 0x3BA3198A2E037073;   # π/2 - (PIO2_1 + PIO2_2)
+var _F64_PIO2_3  = 0x3BA3198A2E000000;   # third 33 bits of π/2
+var _F64_PIO2_3T = 0x397B839A252049C1;   # π/2 - (PIO2_1 + PIO2_2 + PIO2_3)
+var _F64_TOINT   = 0x4338000000000000;   # 1.5·2^52: (t + TOINT) - TOINT rounds t to an integer
+var _F64_TWO24   = 0x4170000000000000;   # 2^24
+var _F64_TWON24  = 0x3E70000000000000;   # 2^-24
+
+# z · 2^n for a z and n whose product stays a normal double (every use below does).
+fn _f64_trig_scale(z, n): i64 {
+    return f64_mul(z, (1023 + n) << 52);
+}
+
+# Chunk i (0..65) of the binary expansion of 2/π, 24 bits each: fdlibm's ipio2[],
+# as hex text, 16 chunks per literal, read in place (no init, nothing to race).
+fn _f64_trig_ipio2(i): i64 {
+    var p = "A2F9836E4E441529FC2757D1F534DDC0DB6295993C439041FE5163ABDEBBC561B7246E3A424DD2E006492EEA09D1921C";
+    if (i >= 16) {
+        p = "FE1DEB1CB129A73EE88235F52EBB4484E99C7026B45F7E413991D639835339F49C845F8BBDF9283B1FF897FFDE05980F";
+    }
+    if (i >= 32) {
+        p = "EF2F118B5A0A6D1F6D367ECF27CB09B74F463F669E5FEA2D7527BAC7EBE5F17B3D0739F78A5292EA6BFB5FB11F8D5D08";
+    }
+    if (i >= 48) {
+        p = "56033046FC7B6BABF0CFBC209AF4361DA9E391615EE61B086599855F14A068408DFFD8804D73273106061556CA73A8C9";
+    }
+    if (i >= 64) {
+        p = "60E27BC08C6B";
+    }
+    var v = 0;
+    var k = 0;
+    var c = 0;
+    while (k < 6) {
+        c = load8(p + (i % 16) * 6 + k);
+        if (c >= 65) { c = c - 55; } else { c = c - 48; }
+        v = (v << 4) | c;
+        k = k + 1;
+    }
+    return v;
+}
+
+# π/2 in 24-bit chunks: fdlibm's PIo2[k], k = 0..7.
+fn _f64_trig_pio2(k): i64 {
+    if (k == 0) { return 0x3FF921FB40000000; }
+    if (k == 1) { return 0x3E74442D00000000; }
+    if (k == 2) { return 0x3CF8469880000000; }
+    if (k == 3) { return 0x3B78CC5160000000; }
+    if (k == 4) { return 0x39F01B8380000000; }
+    if (k == 5) { return 0x387A252040000000; }
+    if (k == 6) { return 0x36E3822280000000; }
+    return 0x3569F31D00000000;
+}
+
+# fdlibm __kernel_rem_pio2 at double precision (prec 1, jk = jp = 4). `xp` holds nx
+# 24-bit chunks of |x|·2^-e0 as doubles; writes the reduced argument's head and
+# tail to yp[0], yp[1] and returns the quadrant (n mod 8). Multiplies |x| by as
+# many bits of 2/π as the cancellation needs (the `again` loop) — this is what
+# makes the reduction exact for every double up to DBL_MAX.
+fn _f64_trig_rem_big(xp, yp, e0, nx): i64 {
+    var iq: i64[20];
+    var f: i64[20];
+    var fq: i64[20];
+    var q: i64[20];
+    var jk = 4;
+    var jx = nx - 1;
+    var jv = (e0 - 3) / 24;
+    if (jv < 0) { jv = 0; }
+    var q0 = e0 - 24 * (jv + 1);
+    var i = 0;
+    var j = jv - jx;
+    var k = 0;
+    var m = jx + jk;
+    var fw = 0;
+    var z = 0;
+    var n = 0;
+    var ih = 0;
+    var carry = 0;
+    var again = 1;
+    # f[0..jx+jk] = ipio2[jv-jx .. jv+jk] (zero below the table)
+    while (i <= m) {
+        if (j < 0) {
+            store64(&f + i * 8, 0);
+        } else {
+            store64(&f + i * 8, f64_from(_f64_trig_ipio2(j)));
+        }
+        i = i + 1;
+        j = j + 1;
+    }
+    # q[i] = sum x[j]·f[jx+i-j]
+    i = 0;
+    while (i <= jk) {
+        fw = 0;
+        j = 0;
+        while (j <= jx) {
+            fw = f64_add(fw, f64_mul(load64(xp + j * 8), load64(&f + (jx + i - j) * 8)));
+            j = j + 1;
+        }
+        store64(&q + i * 8, fw);
+        i = i + 1;
+    }
+    var jz = jk;
+    while (again == 1) {
+        again = 0;
+        # distill q[] into iq[], 24 bits at a time, highest last
+        i = 0;
+        j = jz;
+        z = load64(&q + jz * 8);
+        while (j > 0) {
+            fw = f64_from(f64_to(f64_mul(_F64_TWON24, z)));
+            store64(&iq + i * 8, f64_to(f64_sub(z, f64_mul(_F64_TWO24, fw))));
+            z = f64_add(load64(&q + (j - 1) * 8), fw);
+            i = i + 1;
+            j = j - 1;
+        }
+        # n = the integer part mod 8, z = the fraction
+        z = _f64_trig_scale(z, q0);
+        z = f64_sub(z, f64_mul(0x4020000000000000, f64_from(f64_to(f64_mul(z, 0x3FC0000000000000)))));
+        n = f64_to(z);
+        z = f64_sub(z, f64_from(n));
+        ih = 0;
+        if (q0 > 0) {
+            i = load64(&iq + (jz - 1) * 8) >> (24 - q0);
+            n = n + i;
+            store64(&iq + (jz - 1) * 8, load64(&iq + (jz - 1) * 8) - (i << (24 - q0)));
+            ih = load64(&iq + (jz - 1) * 8) >> (23 - q0);
+        } elif (q0 == 0) {
+            ih = load64(&iq + (jz - 1) * 8) >> 23;
+        } elif (f64_lt(z, F64_HALF) == 0) {
+            ih = 2;
+        }
+        if (ih > 0) {
+            # the fraction is ≥ 1/2: take 1 - q, and round n up
+            n = n + 1;
+            carry = 0;
+            i = 0;
+            while (i < jz) {
+                j = load64(&iq + i * 8);
+                if (carry == 0) {
+                    if (j != 0) {
+                        carry = 1;
+                        store64(&iq + i * 8, 0x1000000 - j);
+                    }
+                } else {
+                    store64(&iq + i * 8, 0xFFFFFF - j);
+                }
+                i = i + 1;
+            }
+            if (q0 == 1) { store64(&iq + (jz - 1) * 8, load64(&iq + (jz - 1) * 8) & 0x7FFFFF); }
+            if (q0 == 2) { store64(&iq + (jz - 1) * 8, load64(&iq + (jz - 1) * 8) & 0x3FFFFF); }
+            if (ih == 2) {
+                z = f64_sub(F64_ONE, z);
+                if (carry != 0) { z = f64_sub(z, _f64_trig_scale(F64_ONE, q0)); }
+            }
+        }
+        # a zero fraction with all-zero low chunks: take more bits of 2/π and redo
+        if (f64_eq(z, 0) == 1) {
+            j = 0;
+            i = jz - 1;
+            while (i >= jk) {
+                j = j | load64(&iq + i * 8);
+                i = i - 1;
+            }
+            if (j == 0) {
+                k = 1;
+                while (load64(&iq + (jk - k) * 8) == 0) { k = k + 1; }
+                i = jz + 1;
+                while (i <= jz + k) {
+                    store64(&f + (jx + i) * 8, f64_from(_f64_trig_ipio2(jv + i)));
+                    fw = 0;
+                    j = 0;
+                    while (j <= jx) {
+                        fw = f64_add(fw, f64_mul(load64(xp + j * 8), load64(&f + (jx + i - j) * 8)));
+                        j = j + 1;
+                    }
+                    store64(&q + i * 8, fw);
+                    i = i + 1;
+                }
+                jz = jz + k;
+                again = 1;
+            }
+        }
+    }
+    # chop off zero chunks, or split z into 24-bit chunks
+    if (f64_eq(z, 0) == 1) {
+        jz = jz - 1;
+        q0 = q0 - 24;
+        while (load64(&iq + jz * 8) == 0) {
+            jz = jz - 1;
+            q0 = q0 - 24;
+        }
+    } else {
+        z = _f64_trig_scale(z, 0 - q0);
+        if (f64_lt(z, _F64_TWO24) == 0) {
+            fw = f64_from(f64_to(f64_mul(_F64_TWON24, z)));
+            store64(&iq + jz * 8, f64_to(f64_sub(z, f64_mul(_F64_TWO24, fw))));
+            jz = jz + 1;
+            q0 = q0 + 24;
+            store64(&iq + jz * 8, f64_to(fw));
+        } else {
+            store64(&iq + jz * 8, f64_to(z));
+        }
+    }
+    # the chunks back to doubles: q[i] = iq[i]·2^(q0 - 24(jz - i))
+    fw = _f64_trig_scale(F64_ONE, q0);
+    i = jz;
+    while (i >= 0) {
+        store64(&q + i * 8, f64_mul(fw, f64_from(load64(&iq + i * 8))));
+        fw = f64_mul(fw, _F64_TWON24);
+        i = i - 1;
+    }
+    # fq[jz-i] = sum PIo2[k]·q[i+k]
+    i = jz;
+    while (i >= 0) {
+        fw = 0;
+        k = 0;
+        while (k <= 4 && k <= jz - i) {
+            fw = f64_add(fw, f64_mul(_f64_trig_pio2(k), load64(&q + (i + k) * 8)));
+            k = k + 1;
+        }
+        store64(&fq + (jz - i) * 8, fw);
+        i = i - 1;
+    }
+    # compress fq[] into head + tail
+    fw = 0;
+    i = jz;
+    while (i >= 0) {
+        fw = f64_add(fw, load64(&fq + i * 8));
+        i = i - 1;
+    }
+    if (ih == 0) { store64(yp, fw); } else { store64(yp, fw ^ 0x8000000000000000); }
+    fw = f64_sub(load64(&fq), fw);
+    i = 1;
+    while (i <= jz) {
+        fw = f64_add(fw, load64(&fq + i * 8));
+        i = i + 1;
+    }
+    if (ih == 0) { store64(yp + 8, fw); } else { store64(yp + 8, fw ^ 0x8000000000000000); }
+    return n & 7;
+}
+
+# fdlibm __ieee754_rem_pio2: x = n·(π/2) + (yp[0] + yp[1]) with |yp[0] + yp[1]| ≤ ~π/4.
+# Returns n (only n mod 4 matters to the callers). Below 2^20·(π/2), Cody-Waite with
+# π/2 in three 33-bit words, the later words applied only when the first cancels
+# enough bits to need them; above it, `_f64_trig_rem_big`. ±inf and NaN give NaN.
+fn _f64_rem_pio2(x, yp): i64 {
+    var ix = (x >> 32) & 0x7FFFFFFF;
+    if (ix < 0x413921FB) {
+        var kf = f64_sub(f64_add(f64_mul(x, _F64_INVPIO2), _F64_TOINT), _F64_TOINT);
+        var n = f64_to(kf);
+        var r = f64_sub(x, f64_mul(kf, _F64_PIO2_1));   # exact: kf < 2^21, PIO2_1 has 33 bits
+        var w = f64_mul(kf, _F64_PIO2_1T);
+        var j = ix >> 20;
+        var y0 = f64_sub(r, w);
+        var t = 0;
+        if (j - ((y0 >> 52) & 0x7FF) > 16) {            # lost > 16 bits: second word
+            t = r;
+            w = f64_mul(kf, _F64_PIO2_2);
+            r = f64_sub(t, w);
+            w = f64_sub(f64_mul(kf, _F64_PIO2_2T), f64_sub(f64_sub(t, r), w));
+            y0 = f64_sub(r, w);
+            if (j - ((y0 >> 52) & 0x7FF) > 49) {        # lost > 49 bits: third word
+                t = r;
+                w = f64_mul(kf, _F64_PIO2_3);
+                r = f64_sub(t, w);
+                w = f64_sub(f64_mul(kf, _F64_PIO2_3T), f64_sub(f64_sub(t, r), w));
+                y0 = f64_sub(r, w);
+            }
+        }
+        store64(yp, y0);
+        store64(yp + 8, f64_sub(f64_sub(r, y0), w));
+        return n;
+    }
+    if (ix >= 0x7FF00000) {                              # inf or NaN
+        var nan = f64_sub(x, x);
+        store64(yp, nan);
+        store64(yp + 8, nan);
+        return 0;
+    }
+    # |x| = z·2^e0 with z in [2^23, 2^24): three 24-bit chunks of z
+    var e0 = (ix >> 20) - 1046;
+    var z = ((ix - (e0 << 20)) << 32) | (x & 0xFFFFFFFF);
+    var tx: i64[3];
+    var ty: i64[2];
+    store64(&tx, f64_from(f64_to(z)));
+    z = f64_mul(f64_sub(z, load64(&tx)), _F64_TWO24);
+    store64(&tx + 8, f64_from(f64_to(z)));
+    z = f64_mul(f64_sub(z, load64(&tx + 8)), _F64_TWO24);
+    store64(&tx + 16, z);
+    var nx = 3;
+    while (load64(&tx + (nx - 1) * 8) == 0) { nx = nx - 1; }
+    var nb = _f64_trig_rem_big(&tx, &ty, e0, nx);
+    if (((x >> 63) & 1) == 1) {
+        store64(yp, load64(&ty) ^ 0x8000000000000000);
+        store64(yp + 8, load64(&ty + 8) ^ 0x8000000000000000);
+        return 0 - nb;
+    }
+    store64(yp, load64(&ty));
+    store64(yp + 8, load64(&ty + 8));
+    return nb;
+}
+
+# fdlibm __kernel_sin: sin(x + y) for |x| ≤ ~π/4, y the tail of x (iy = 0: no tail).
+# S1..S6 are the Remez coefficients of k_sin.c.
+fn _f64_k_sin(x, y, iy): i64 {
+    var S1 = 0xBFC5555555555549;
+    var z = f64_mul(x, x);
+    var w = f64_mul(z, z);
+    var r = f64_add(0xBF2A01A019C161D5, f64_mul(z, 0x3EC71DE357B1FE7D));        # S3 + z·S4
+    r = f64_add(0x3F8111111110F8A6, f64_mul(z, r));                           # S2 + z·(…)
+    var r2 = f64_add(0xBE5AE5E68A2B9CEB, f64_mul(z, 0x3DE5D93A5ACFD57C));     # S5 + z·S6
+    r = f64_add(r, f64_mul(f64_mul(z, w), r2));
+    var v = f64_mul(z, x);
+    if (iy == 0) { return f64_add(x, f64_mul(v, f64_add(S1, f64_mul(z, r)))); }
+    var u = f64_sub(f64_mul(z, f64_sub(f64_mul(F64_HALF, y), f64_mul(v, r))), y);
+    return f64_sub(x, f64_sub(u, f64_mul(v, S1)));
+}
+
+# fdlibm __kernel_cos (FreeBSD form): cos(x + y) for |x| ≤ ~π/4, y the tail of x.
+# C1..C6 are the Remez coefficients of k_cos.c.
+fn _f64_k_cos(x, y): i64 {
+    var z = f64_mul(x, x);
+    var w = f64_mul(z, z);
+    var r = f64_add(0xBF56C16C16C15177, f64_mul(z, 0x3EFA01A019CB1590));        # C2 + z·C3
+    r = f64_mul(z, f64_add(0x3FA555555555554C, f64_mul(z, r)));               # z·(C1 + z·(…))
+    var r2 = f64_add(0x3E21EE9EBDB4B1C4, f64_mul(z, 0xBDA8FAE9BE8838D4));     # C5 + z·C6
+    r2 = f64_mul(f64_mul(w, w), f64_add(0xBE927E4F809C52AD, f64_mul(z, r2))); # w²·(C4 + z·(…))
+    r = f64_add(r, r2);
+    var hz = f64_mul(F64_HALF, z);
+    w = f64_sub(F64_ONE, hz);
+    return f64_add(w, f64_add(f64_sub(f64_sub(F64_ONE, w), hz), f64_sub(f64_mul(z, r), f64_mul(x, y))));
+}
+
+# sin(x), x in radians — fdlibm s_sin.c. The builtin f64_sin on every target.
+fn _f64_sin_polyfill(x): i64 {
+    var ix = (x >> 32) & 0x7FFFFFFF;
+    if (ix <= 0x3FE921FB) {                              # |x| ≤ ~π/4: no reduction
+        if (ix < 0x3E500000) { return x; }               # |x| < 2^-26: sin(x) = x, -0 kept
+        return _f64_k_sin(x, 0, 0);
+    }
+    if (ix >= 0x7FF00000) { return f64_sub(x, x); }      # ±inf, NaN → NaN
+    var y: i64[2];
+    var n = _f64_rem_pio2(x, &y) & 3;
+    if (n == 0) { return _f64_k_sin(load64(&y), load64(&y + 8), 1); }
+    if (n == 1) { return _f64_k_cos(load64(&y), load64(&y + 8)); }
+    if (n == 2) { return _f64_k_sin(load64(&y), load64(&y + 8), 1) ^ 0x8000000000000000; }
+    return _f64_k_cos(load64(&y), load64(&y + 8)) ^ 0x8000000000000000;
+}
+
+# cos(x), x in radians — fdlibm s_cos.c. The builtin f64_cos on every target.
+fn _f64_cos_polyfill(x): i64 {
+    var ix = (x >> 32) & 0x7FFFFFFF;
+    if (ix <= 0x3FE921FB) {
+        if (ix < 0x3E46A09E) { return F64_ONE; }         # |x| < 2^-27·√2: cos(x) = 1
+        return _f64_k_cos(x, 0);
+    }
+    if (ix >= 0x7FF00000) { return f64_sub(x, x); }
+    var y: i64[2];
+    var n = _f64_rem_pio2(x, &y) & 3;
+    if (n == 0) { return _f64_k_cos(load64(&y), load64(&y + 8)); }
+    if (n == 1) { return _f64_k_sin(load64(&y), load64(&y + 8), 1) ^ 0x8000000000000000; }
+    if (n == 2) { return _f64_k_cos(load64(&y), load64(&y + 8)) ^ 0x8000000000000000; }
+    return _f64_k_sin(load64(&y), load64(&y + 8), 1);
+}
+
+# atan(x) → [-π/2, π/2] — fdlibm s_atan.c. The builtin f64_atan on aarch64.
+# |x| is folded onto one of four breakpoints c in {0.5, 1, 1.5, inf} as
+# atan(x) = atan(c) + atan((x - c)/(1 + x·c)), atan(c) carried as hi + lo; the
+# remainder goes through an 11-term Remez odd polynomial. atan(±1) is exactly
+# ±atanhi[1], the double nearest π/4.
+fn _f64_atan_polyfill(x): i64 {
+    var hx = (x >> 32) & 0xFFFFFFFF;
+    var ix = hx & 0x7FFFFFFF;
+    var neg = (x >> 63) & 1;
+    var id = 0 - 1;
+    var hi = 0;
+    var lo = 0;
+    if (ix >= 0x44100000) {                              # |x| ≥ 2^66, inf or NaN
+        if (ix > 0x7FF00000) { return f64_add(x, x); }   # NaN
+        if (ix == 0x7FF00000) {
+            if ((x & 0xFFFFFFFF) != 0) { return f64_add(x, x); }
+        }
+        if (neg == 1) { return 0xBFF921FB54442D18; }    # -(atanhi[3] + atanlo[3])
+        return 0x3FF921FB54442D18;
+    }
+    if (ix < 0x3FDC0000) {                               # |x| < 0.4375
+        if (ix < 0x3E400000) { return x; }               # |x| < 2^-27: atan(x) = x, -0 kept
+    } else {
+        x = x & 0x7FFFFFFFFFFFFFFF;
+        if (ix < 0x3FF30000) {                           # |x| < 1.1875
+            if (ix < 0x3FE60000) {                       # 7/16 ≤ |x| < 11/16
+                id = 0;
+                x = f64_div(f64_sub(f64_mul(F64_TWO, x), F64_ONE), f64_add(F64_TWO, x));
+            } else {                                     # 11/16 ≤ |x| < 19/16
+                id = 1;
+                x = f64_div(f64_sub(x, F64_ONE), f64_add(x, F64_ONE));
+            }
+        } else {
+            if (ix < 0x40038000) {                       # |x| < 2.4375
+                id = 2;
+                x = f64_div(f64_sub(x, F64_ONE_HALF), f64_add(F64_ONE, f64_mul(F64_ONE_HALF, x)));
+            } else {                                     # 2.4375 ≤ |x| < 2^66
+                id = 3;
+                x = f64_div(0xBFF0000000000000, x);
+            }
+        }
+    }
+    var z = f64_mul(x, x);
+    var w = f64_mul(z, z);
+    # the sum of aT[i]·z^(i+1), split into odd (s1) and even (s2) halves in w = z²
+    var s1 = 0x3F90AD3AE322DA11;                                   # aT10
+    s1 = f64_add(0x3FA97B4B24760DEB, f64_mul(w, s1));               # aT8
+    s1 = f64_add(0x3FB10D66A0D03D51, f64_mul(w, s1));               # aT6
+    s1 = f64_add(0x3FB745CDC54C206E, f64_mul(w, s1));               # aT4
+    s1 = f64_add(0x3FC24924920083FF, f64_mul(w, s1));               # aT2
+    s1 = f64_mul(z, f64_add(0x3FD555555555550D, f64_mul(w, s1)));   # aT0
+    var s2 = 0xBFA2B4442C6A6C2F;                                   # aT9
+    s2 = f64_add(0xBFADDE2D52DEFD9A, f64_mul(w, s2));               # aT7
+    s2 = f64_add(0xBFB3B0F2AF749A6D, f64_mul(w, s2));               # aT5
+    s2 = f64_add(0xBFBC71C6FE231671, f64_mul(w, s2));               # aT3
+    s2 = f64_mul(w, f64_add(0xBFC999999998EBC4, f64_mul(w, s2)));   # aT1
+    if (id < 0) { return f64_sub(x, f64_mul(x, f64_add(s1, s2))); }
+    if (id == 0) { hi = 0x3FDDAC670561BB4F; lo = 0x3C7A2B7F222F65E2; }
+    if (id == 1) { hi = 0x3FE921FB54442D18; lo = 0x3C81A62633145C07; }
+    if (id == 2) { hi = 0x3FEF730BD281F69B; lo = 0x3C7007887AF0CBBD; }
+    if (id == 3) { hi = 0x3FF921FB54442D18; lo = 0x3C91A62633145C07; }
+    z = f64_sub(hi, f64_sub(f64_sub(f64_mul(x, f64_add(s1, s2)), lo), x));
+    if (neg == 1) { return z ^ 0x8000000000000000; }
+    return z;
 }
 
 # clamp(x, lo, hi) — clamp x to [lo, hi]
@@ -445,25 +759,8 @@ fn f64_max(a, b): i64 {
     return b;
 }
 
-# Inclusive comparisons (v6.0.x — avatara proposal 2026-06-02). The
-# compiler ships f64_lt/f64_gt/f64_eq builtins but no <= / >=, so every
-# consumer doing an inclusive range/threshold check (0.0 <= x <= 1.0)
-# rolled its own. NaN-correct by construction: for any NaN operand
-# f64_lt/f64_gt/f64_eq all return 0 (IEEE-754 unordered), so these
-# return 0 too. NOTE: that invariant only became *true* at v6.2.41 — the
-# x86 backend previously read CF/ZF without the parity flag, so f64_lt /
-# f64_eq returned 1 on NaN and these helpers silently passed NaN through
-# a `<=` / `>=` bound (issue 2026-06-24-f64-le-nan-comparison). Do not
-# revert these to operator `<=` / `>=`; the builtin route is the tested one.
-fn f64_le(a, b): i64 {
-    if (f64_lt(a, b) == 1) { return 1; }
-    return f64_eq(a, b);
-}
-# f64 a >= b : 1 if true, else 0.
-fn f64_ge(a, b): i64 {
-    if (f64_gt(a, b) == 1) { return 1; }
-    return f64_eq(a, b);
-}
+# f64_le / f64_ge / f64_trunc are compiler builtins since 6.6.13 (no include needed);
+# NaN -> 0 for le/ge is the backend `<=` / `>=` lowering. CHANGELOG [6.6.13]
 
 var _F64_ZERO = 0;
 
@@ -484,13 +781,6 @@ fn f64_sign(x): i64 {
     if (f64_lt(x, zero) == 1) { return f64_neg(f64_from(1)); }
     if (f64_gt(x, zero) == 1) { return f64_from(1); }
     return zero;
-}
-
-# Truncate toward zero: trunc(3.7) = 3.0, trunc(-3.7) = -3.0
-fn f64_trunc(x): i64 {
-    var zero = f64_from(0);
-    if (f64_lt(x, zero) == 1) { return f64_ceil(x); }
-    return f64_floor(x);
 }
 
 # Fractional part: fract(3.7) = 0.7
@@ -524,102 +814,658 @@ fn lcm(a, b): i64 {
 }
 
 # ================================================================
-# f64 PARSING
+# f64 PARSING — correctly rounded (port of bayan 1.5.10's bayan_f64_parse,
+# CHANGELOG [6.6.13])
 # ================================================================
-# Parse a null-terminated string to an f64 bit pattern.
-# Returns the f64 bit pattern, or 0 on failure.
-# Handles: optional sign, integer part, optional fraction,
-# optional e/E exponent with optional sign, NaN, Inf, -Inf.
+# f64_parse returns the double NEAREST the decimal (ties to even) for every input,
+# subnormals and both range ends included. Three tiers:
+#   1. Clinger's fast path: <= 19 significant digits held exactly in an integer W
+#      with W < 2^53 and |E| <= 22 -> one IEEE f64_mul / f64_div by an exact power
+#      of ten, which rounds once.
+#   2. A DiyFp approximation over 87 cached 64-bit powers of ten (rapidjson /
+#      Grisu's table). It answers only outside a +/-16-unit window around a
+#      rounding boundary, where its error cannot flip the result.
+#   3. Go strconv's exact decimal (800 digits) for everything tier 2 declines.
+# The previous f64_parse accumulated digits in f64 and scaled by repeated *10, so
+# ~23% of two-decimal literals came back 1 ulp off, 0.0001e310 overflowed to Inf
+# and subnormals flushed to 0.
 #
-# Parse a null-terminated cstring to an f64 bit pattern (0 on failure)
+# Names carry a private _f64p_ / _F64P_ prefix because lib/bayan.cyr folds the same
+# algorithm under _d_ / _D_: cycc resolves a duplicate fn or global "last definition
+# wins" with only a warning, so shared names would silently swap one copy's bodies
+# for the other's. The tables are read in place from literals (no lazy init, so
+# nothing to race between threads — bayan's copy fills a table on first use).
+# The exact tier keeps 1,656 B of scratch on the stack (dg[800], tmp[832], st[24]),
+# so the parser is reentrant.
+
+var _F64P_MASK32 = 0xFFFFFFFF;
+var _F64P_BIT63  = 0x8000000000000000;
+
+# The k-th 64-bit word of a string of 16-hex-digit (uppercase) words.
+fn _f64p_hex16(p, k): i64 {
+    var v = 0;
+    var j = 0;
+    while (j < 16) {
+        var c = load8(p + k * 16 + j);
+        if (c >= 65) { c = c - 55; } else { c = c - 48; }
+        v = (v << 4) | c;
+        j = j + 1;
+    }
+    return v;
+}
+
+# Cached power idx (0..86) as a DiyFp significand (u64, bit 63 set):
+# sig * 2^binexp == 10^decexp correctly rounded to 64 bits, decexp = -348 + 8*idx.
+# bayan's _D_POW10_SIG values (0.5-ULP validated against double-conversion), as
+# hex text, 6 per literal, read in place.
+fn _f64p_sig(idx): i64 {
+    var g = idx / 6;
+    var p = "FA8FD5A0081C0288BAAEE17FA23EBF768B16FB203055AC76CF42894A5DCE35EA9A6BB0AA55653B2DE61ACF033D1A45DF";
+    if (g == 1) {
+        p = "AB70FE17C79AC6CAFF77B1FCBEBCDC4FBE5691EF416BD60C8DD01FAD907FFC3CD3515C2831559A839D71AC8FADA6C9B5";
+    }
+    if (g == 2) {
+        p = "EA9C227723EE8BCBAECC49914078536D823C12795DB6CE57C21094364DFB56379096EA6F3848984FD77485CB25823AC7";
+    }
+    if (g == 3) {
+        p = "A086CFCD97BF97F4EF340A98172AACE5B23867FB2A35B28E84C8D4DFD2C63F3BC5DD44271AD3CDBA936B9FCEBB25C996";
+    }
+    if (g == 4) {
+        p = "DBAC6C247D62A584A3AB66580D5FDAF6F3E2F893DEC3F126B5B5ADA8AAFF80B887625F056C7C4A8BC9BCFF6034C13053";
+    }
+    if (g == 5) {
+        p = "964E858C91BA2655DFF9772470297EBDA6DFBD9FB8E5B88FF8A95FCF88747D94B94470938FA89BCF8A08F0F8BF0F156B";
+    }
+    if (g == 6) {
+        p = "CDB02555653131B6993FE2C6D07B7FACE45C10C42A2B3B06AA242499697392D3FD87B5F28300CA0EBCE5086492111AEB";
+    }
+    if (g == 7) {
+        p = "8CBCCC096F5088CCD1B71758E219652C9C40000000000000E8D4A51000000000AD78EBC5AC620000813F3978F8940984";
+    }
+    if (g == 8) {
+        p = "C097CE7BC90715B38F7E32CE7BEA5C70D5D238A4ABE980689F4F2726179A2245ED63A231D4C4FB27B0DE65388CC8ADA8";
+    }
+    if (g == 9) {
+        p = "83C7088E1AAB65DBC45D1DF942711D9A924D692CA61BE758DA01EE641A708DEAA26DA3999AEF774AF209787BB47D6B85";
+    }
+    if (g == 10) {
+        p = "B454E4A179DD1877865B86925B9BC5C2C83553C5C8965D3D952AB45CFA97A0B3DE469FBD99A05FE3A59BC234DB398C25";
+    }
+    if (g == 11) {
+        p = "F6C69A72A3989F5CB7DCBF5354E9BECE88FCF317F22241E2CC20CE9BD35C78A598165AF37B2153DFE2A0B5DC971F303A";
+    }
+    if (g == 12) {
+        p = "A8D9D1535CE3B396FB9B7CD9A4A7443CBB764C4CA7A444108BAB8EEFB6409C1AD01FEF10A657842C9B10A4E5E9913129";
+    }
+    if (g == 13) {
+        p = "E7109BFBA19C0C9DAC2820D9623BF42980444B5E7AA7CF85BF21E44003ACDD2D8E679C2F5E44FF8FD433179D9C8CB841";
+    }
+    if (g == 14) {
+        p = "9E19DB92B4E31BA9EB96BF6EBADF77D9AF87023B9BF0EE6B";
+    }
+    return _f64p_hex16(p, idx - g * 6);
+}
+
+# 10^e (0..22) as an EXACT f64 bit pattern — the powers of ten a double holds
+# exactly, which is what makes tier 1 a single rounding. An if-chain, not a
+# decoded table: measured 198 ms vs 281 ms per 2e6 short parses.
+fn _f64p_pow10_exact(e): i64 {
+    if (e == 0) { return 0x3FF0000000000000; }
+    if (e == 1) { return 0x4024000000000000; }
+    if (e == 2) { return 0x4059000000000000; }
+    if (e == 3) { return 0x408F400000000000; }
+    if (e == 4) { return 0x40C3880000000000; }
+    if (e == 5) { return 0x40F86A0000000000; }
+    if (e == 6) { return 0x412E848000000000; }
+    if (e == 7) { return 0x416312D000000000; }
+    if (e == 8) { return 0x4197D78400000000; }
+    if (e == 9) { return 0x41CDCD6500000000; }
+    if (e == 10) { return 0x4202A05F20000000; }
+    if (e == 11) { return 0x42374876E8000000; }
+    if (e == 12) { return 0x426D1A94A2000000; }
+    if (e == 13) { return 0x42A2309CE5400000; }
+    if (e == 14) { return 0x42D6BCC41E900000; }
+    if (e == 15) { return 0x430C6BF526340000; }
+    if (e == 16) { return 0x4341C37937E08000; }
+    if (e == 17) { return 0x4376345785D8A000; }
+    if (e == 18) { return 0x43ABC16D674EC800; }
+    if (e == 19) { return 0x43E158E460913D00; }
+    if (e == 20) { return 0x4415AF1D78B58C40; }
+    if (e == 21) { return 0x444B1AE4D6E2EF50; }
+    return 0x4480F0CF064DD592;   # 22
+}
+
+# floor(a / b) for b > 0 (cyrius `/` truncates toward zero).
+fn _f64p_floordiv(a, b): i64 {
+    var q = a / b;
+    if (a < 0) { if (q * b != a) { q = q - 1; } }
+    return q;
+}
+fn _f64p_decexp(idx): i64 { return (0 - 348) + 8 * idx; }
+# binexp = floor(decexp * log2(10)) - 63, with log2(10) ~= 108853/32768 (exact
+# for every table entry, validated).
+fn _f64p_binexp(idx): i64 { return _f64p_floordiv(_f64p_decexp(idx) * 108853, 32768) - 63; }
+# integer 10^n for small nonneg n (0..18).
+fn _f64p_pow10_i(n): i64 {
+    var r = 1;
+    var i = 0;
+    while (i < n) { r = r * 10; i = i + 1; }
+    return r;
+}
+
+# ---- unsigned 64-bit helpers (i64 holds u64 bit patterns) ----
+# a < b as u64: flip both sign bits, then a signed compare yields the u64 order.
+fn _f64p_ult(a, b): i64 { return (a ^ 0x8000000000000000) < (b ^ 0x8000000000000000); }
+
+# High 64 bits of (a*b), rounded, both treated as u64 — the DiyFp significand
+# multiply (rapidjson DiyFp::Multiply). Splits into 32-bit pieces so each partial
+# product fits a register; `>>` is logical so the bit patterns are true unsigned
+# products even when the i64 sign bit is set.
+fn _f64p_mul_hi(a, b): i64 {
+    var ah = (a >> 32) & _F64P_MASK32;
+    var al = a & _F64P_MASK32;
+    var bh = (b >> 32) & _F64P_MASK32;
+    var bl = b & _F64P_MASK32;
+    var ac = ah * bh;
+    var bc = al * bh;
+    var ad = ah * bl;
+    var bd = al * bl;
+    var tmp = ((bd >> 32) & _F64P_MASK32) + (ad & _F64P_MASK32) + (bc & _F64P_MASK32);
+    tmp = tmp + 0x80000000;   # round-to-nearest of the discarded low half (1<<31)
+    return ac + ((ad >> 32) & _F64P_MASK32) + ((bc >> 32) & _F64P_MASK32) + ((tmp >> 32) & _F64P_MASK32);
+}
+
+# Tier 2's error bound, in units of the last bit of its 64-bit significand rf:
+#   * the cached power is correctly rounded (<= 0.5 for all 87 entries, checked
+#     against exact rationals) and _f64p_mul_hi rounds its product (<= 0.5 + 2^-32),
+#     so |rf - exact| < 1 after the first multiply;
+#   * the renormalizing shift can double that: < 2;
+#   * the residual 10^r is exact and its multiply rounds once more: < 2 + 0.5,
+#     doubled again by its renormalizing shift: < 5.01.
+# The measured maximum over 200,000 random (W, E) is 3.25. The window is 16, three
+# times the derived bound, so a factor-of-two slip anywhere in the derivation
+# still lands inside it. Tier 3 then runs for 33 of the 2048 low-bit patterns,
+# about 1.6% of the inputs that reach tier 2.
+var _F64P_WINDOW = 16;
+# Tier 2's "no answer". All-ones is a NaN pattern that no tier returns.
+var _F64P_UNDECIDED = 0xFFFFFFFFFFFFFFFF;
+
+# Round a normalized DiyFp (f: 64-bit, bit63 set; value ~= f*2^e, sign in `neg`)
+# to an f64 bit pattern. Returns _F64P_UNDECIDED when f is within _F64P_WINDOW of a
+# rounding boundary, where tier 2's error could flip the answer. Handles
+# subnormals and overflow (-> +/-Inf).
+fn _f64p_diyfp_round(f, e, neg): i64 {
+    var sign = 0;
+    if (neg != 0) { sign = _F64P_BIT63; }
+    # unbiased exponent of the leading (bit-63) 1 is (e + 63); biased for the
+    # 53-bit form (hidden bit at 2^52) is that + 1023.
+    var biased = e + 63 + 1023;
+    if (biased >= 2047) { return sign | 0x7FF0000000000000; }   # overflow -> Inf
+    var drop = 11;                                              # 64 -> 53 bits
+    if (biased <= 0) {
+        # subnormal: shift right an extra (1 - biased) bits, exponent field = 0.
+        drop = drop + (1 - biased);
+        biased = 0;
+        # Below 2^-1074 the halfway point 2^-1075 no longer falls inside f's 64
+        # bits. This used to return 0, which is wrong for all of [2^-1075,
+        # 2^-1074): those round UP, to bit pattern 1. Tier 3 decides it exactly.
+        if (drop >= 64) { return _F64P_UNDECIDED; }
+    }
+    var low = f & ((1 << drop) - 1);                           # dropped bits
+    var m = f >> drop;                                         # kept significand
+    var halfway = 1 << (drop - 1);
+    # Within the error bound of halfway, the true value may be on either side.
+    # This test is the fix for bayan issue 2026-09-22: `low == halfway` used to be
+    # rounded as an exact tie, and a decimal is almost never a binary midpoint.
+    var dist = low - halfway;
+    if (dist < 0) { dist = 0 - dist; }
+    if (dist <= _F64P_WINDOW) { return _F64P_UNDECIDED; }
+    if (low > halfway) { m = m + 1; }
+    # rounding carry can bump into the next binade
+    if (biased == 0) {
+        # subnormal: if m reached 2^52 it becomes the smallest normal (biased 1);
+        # the bit layout is continuous, so just OR the sign onto m.
+        return sign | m;
+    }
+    if (m >= 0x0020000000000000) {          # 2^53: mantissa overflowed
+        m = m >> 1;
+        biased = biased + 1;
+        if (biased >= 2047) { return sign | 0x7FF0000000000000; }
+    }
+    # m is in [2^52, 2^53): drop the hidden bit, splice exponent.
+    return sign | (biased << 52) | (m & 0x000FFFFFFFFFFFFF);
+}
+
+# Tiers 1 and 2. Significand W (u64, the first <= 19 significant digits as an
+# integer), decimal exponent E (value == W * 10^E), sign. Returns the correctly
+# rounded f64 bits, or _F64P_UNDECIDED.
+fn _f64p_approx(W, E, neg): i64 {
+    var sign = 0;
+    if (neg != 0) { sign = _F64P_BIT63; }
+    if (W == 0) { return sign; }
+    # gross range gates. W < 2^64 ~= 1.8e19, so E < -342 puts the value under
+    # 1.9e-324, below 2^-1075 ~= 2.47e-324 (rounds to 0); E > 309 puts it at
+    # >= 10^310 (overflows).
+    if (E > 309) { return sign | 0x7FF0000000000000; }
+    if (E < (0 - 342)) { return sign; }
+    # Clinger fast path: W and 10^|E| both exactly representable as doubles
+    # (W < 2^53, |E| <= 22) -> a single f64 mul/div is IEEE-correctly-rounded.
+    if (_f64p_ult(W, 0x0020000000000000) == 1) {
+        if (E >= (0 - 22)) {
+            if (E <= 22) {
+                var fv = f64_from(W);
+                if (E >= 0) { fv = f64_mul(fv, _f64p_pow10_exact(E)); }
+                else        { fv = f64_div(fv, _f64p_pow10_exact(0 - E)); }
+                return fv | sign;
+            }
+        }
+    }
+    # normalize W into a DiyFp {wf, we}: bit 63 set.
+    var wf = W;
+    var we = 0;
+    while ((wf & _F64P_BIT63) == 0) { wf = wf << 1; we = we - 1; }
+    # cached power of ten for decimal exponent E (nearest table entry <= E within
+    # 8), then correct the residual (E - decexp) with an exact integer 10^r factor.
+    var idx = _f64p_decexp_index(E);
+    var cf = _f64p_sig(idx);
+    var cbe = _f64p_binexp(idx);
+    var cdec = _f64p_decexp(idx);
+    # multiply the two DiyFps
+    var rf = _f64p_mul_hi(wf, cf);
+    var re = we + cbe + 64;
+    # renormalize (mul_hi may leave bit 63 clear by one)
+    if ((rf & _F64P_BIT63) == 0) { rf = rf << 1; re = re - 1; }
+    # apply the residual decimal exponent r = E - cdec (0 <= r < 8) by an exact
+    # power-of-ten DiyFp multiply so the cached-power table stays 8-spaced.
+    var r = E - cdec;
+    if (r > 0) {
+        var pf = _f64p_pow10_i(r);           # r in (0,8): exact, < 2^27
+        var pe = 0;
+        while ((pf & _F64P_BIT63) == 0) { pf = pf << 1; pe = pe - 1; }
+        rf = _f64p_mul_hi(rf, pf);
+        re = re + pe + 64;
+        if ((rf & _F64P_BIT63) == 0) { rf = rf << 1; re = re - 1; }
+    }
+    return _f64p_diyfp_round(rf, re, neg);
+}
+
+# table index whose decimal exponent is the largest multiple-of-8 entry <= E.
+fn _f64p_decexp_index(E): i64 {
+    # decexp(idx) = -348 + 8*idx ; want floor((E+348)/8), clamped to [0,86].
+    var idx = _f64p_floordiv(E + 348, 8);
+    if (idx < 0) { idx = 0; }
+    if (idx > 86) { idx = 86; }
+    return idx;
+}
+
+# ---- tier 3: an exact decimal (Go strconv's `decimal`) ----
+# A value is 0.d[0]d[1]..d[nd-1] * 10^dp, digits stored as 0..9 (not ASCII) with
+# no trailing zeros. `trunc` records that nonzero digits past the capacity were
+# dropped, so the true value is a little ABOVE the stored one. That decides the
+# one case the stored digits cannot: a final 5 that looks like an exact tie.
+# 800 digits are enough because an f64 midpoint has at most 767 significant
+# decimal digits; past them, only whether ANY nonzero digit follows matters.
+# The state lives in a caller-owned block so the parser stays reentrant:
+#   st+0 nd, st+8 dp, st+16 trunc. Buffers: digits 800 B, shift scratch 832 B.
+var _F64P_DEC_CAP = 800;
+# Largest shift per step. Every intermediate stays below 10 * 2^59 < 2^63, so the
+# signed compares and `/` on i64 are exact.
+var _F64P_DEC_MAXSH = 59;
+
+fn _f64p_dec_trim(dg, st): i64 {
+    var nd = load64(st);
+    while (nd > 0 && load8(dg + nd - 1) == 0) { nd = nd - 1; }
+    store64(st, nd);
+    return 0;
+}
+
+# Shift for one scaling step when the decimal point is n places from [0.5, 1):
+# the largest k with 2^k <= 10^n, i.e. floor(n * log2 10) (the 108853/32768
+# approximation _f64p_binexp uses, exact for n <= 18), capped at _F64P_DEC_MAXSH.
+# Never overshoots, so a left shift cannot carry the value past 1. n == 0 only
+# occurs at dp == 0 with a value below 0.5, where doubling is safe.
+fn _f64p_dec_step(n): i64 {
+    if (n == 0) { return 1; }
+    if (n >= 18) { return _F64P_DEC_MAXSH; }
+    return (n * 108853) / 32768;
+}
+
+# value /= 2^k, 1 <= k <= _F64P_DEC_MAXSH. In place: the write index never passes
+# the read index.
+fn _f64p_dec_rsh(dg, st, k): i64 {
+    var nd = load64(st);
+    var r = 0;
+    var w = 0;
+    var n = 0;
+    # pick up enough leading digits that the first quotient digit is nonzero
+    while ((n >> k) == 0) {
+        if (r >= nd) {
+            if (n == 0) { store64(st, 0); return 0; }
+            while ((n >> k) == 0) { n = n * 10; r = r + 1; }
+            break;
+        }
+        n = n * 10 + load8(dg + r);
+        r = r + 1;
+    }
+    store64(st + 8, load64(st + 8) - (r - 1));
+    var mask = (1 << k) - 1;
+    # pick up a digit, put down a digit
+    while (r < nd) {
+        var c = load8(dg + r);
+        store8(dg + w, n >> k);
+        w = w + 1;
+        n = (n & mask) * 10 + c;
+        r = r + 1;
+    }
+    # put down the quotient's remaining digits
+    while (n > 0) {
+        var dig = n >> k;
+        n = (n & mask) * 10;
+        if (w < _F64P_DEC_CAP) { store8(dg + w, dig); w = w + 1; }
+        elif (dig > 0) { store64(st + 16, 1); }
+    }
+    store64(st, w);
+    _f64p_dec_trim(dg, st);
+    return 0;
+}
+
+# value *= 2^k, 1 <= k <= _F64P_DEC_MAXSH. The product's digits come out least
+# significant first, so they are built in `tmp` (nd + 18 <= 818 digits) and
+# copied back reversed. Their count is how many leading digits the shift added;
+# Go reads that from a table instead.
+fn _f64p_dec_lsh(dg, tmp, st, k): i64 {
+    var nd = load64(st);
+    if (nd == 0) { return 0; }
+    var t = 0;
+    var n = 0;
+    var r = nd - 1;
+    while (r >= 0) {
+        n = n + (load8(dg + r) << k);
+        var q = n / 10;
+        store8(tmp + t, n - q * 10);
+        t = t + 1;
+        n = q;
+        r = r - 1;
+    }
+    while (n > 0) {
+        var q2 = n / 10;
+        store8(tmp + t, n - q2 * 10);
+        t = t + 1;
+        n = q2;
+    }
+    store64(st + 8, load64(st + 8) + (t - nd));
+    var keep = t;
+    if (keep > _F64P_DEC_CAP) { keep = _F64P_DEC_CAP; }
+    var i = 0;
+    while (i < keep) {
+        store8(dg + i, load8(tmp + t - 1 - i));
+        i = i + 1;
+    }
+    # the low digits that did not fit
+    var j = 0;
+    while (j < t - keep) {
+        if (load8(tmp + j) != 0) { store64(st + 16, 1); }
+        j = j + 1;
+    }
+    store64(st, keep);
+    _f64p_dec_trim(dg, st);
+    return 0;
+}
+
+# value *= 2^k for any k (negative divides), in steps of at most _F64P_DEC_MAXSH.
+fn _f64p_dec_shift(dg, tmp, st, k): i64 {
+    while (k > _F64P_DEC_MAXSH) {
+        _f64p_dec_lsh(dg, tmp, st, _F64P_DEC_MAXSH);
+        k = k - _F64P_DEC_MAXSH;
+    }
+    if (k > 0) { _f64p_dec_lsh(dg, tmp, st, k); }
+    while (k < (0 - _F64P_DEC_MAXSH)) {
+        _f64p_dec_rsh(dg, st, _F64P_DEC_MAXSH);
+        k = k + _F64P_DEC_MAXSH;
+    }
+    if (k < 0) { _f64p_dec_rsh(dg, st, 0 - k); }
+    return 0;
+}
+
+# The integer nearest the value, ties to even, with `trunc` breaking a tie
+# upward. Called only on a value below 2^53, so dp <= 16 and n cannot overflow.
+fn _f64p_dec_round(dg, st): i64 {
+    var nd = load64(st);
+    var dp = load64(st + 8);
+    var n = 0;
+    var i = 0;
+    while (i < dp) {
+        n = n * 10;
+        if (i < nd) { n = n + load8(dg + i); }
+        i = i + 1;
+    }
+    if (dp < 0) { return n; }
+    if (dp >= nd) { return n; }
+    var c = load8(dg + dp);
+    if (c == 5 && dp + 1 == nd) {
+        # a 5 and nothing after it: exactly halfway, unless digits were dropped
+        if (load64(st + 16) != 0) { return n + 1; }
+        if (dp > 0) {
+            if ((load8(dg + dp - 1) & 1) == 1) { return n + 1; }
+        }
+        return n;
+    }
+    if (c >= 5) { return n + 1; }
+    return n;
+}
+
+# Load the mantissa text s[0..n) (digits and at most one '.', exactly as
+# _f64_parse_n scanned it) and the explicit exponent `xe` into the decimal.
+# `nsig` counts EVERY significant digit, stored or not, so an integer part longer
+# than the capacity still puts the decimal point in the right place.
+fn _f64p_dec_set(dg, st, s, n, xe): i64 {
+    var nd = 0;
+    var nsig = 0;
+    var dp = 0;
+    var sawdot = 0;
+    var i = 0;
+    store64(st + 16, 0);
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 46) {
+            sawdot = 1;
+            dp = nsig;
+        } elif (c == 48 && nsig == 0) {
+            dp = dp - 1;           # a leading zero moves the point; not a digit
+        } else {
+            if (nd < _F64P_DEC_CAP) {
+                store8(dg + nd, c - 48);
+                nd = nd + 1;
+            } elif (c != 48) {
+                store64(st + 16, 1);
+            }
+            nsig = nsig + 1;
+        }
+        i = i + 1;
+    }
+    if (sawdot == 0) { dp = nsig; }
+    store64(st, nd);
+    store64(st + 8, dp + xe);
+    _f64p_dec_trim(dg, st);
+    return 0;
+}
+
+# Tier 3: `s`/`n` is the mantissa text, `xe` the clamped explicit exponent.
+# Scales the decimal into [0.5, 1) by exact binary shifts, counting them, then
+# reads off the top 53 bits with one correct rounding (Go: decimal.floatBits).
+fn _f64p_exact(s, n, xe, neg): i64 {
+    var dg[800];
+    var tmp[832];
+    var st[24];
+    var sign = 0;
+    if (neg != 0) { sign = _F64P_BIT63; }
+    _f64p_dec_set(&dg, &st, s, n, xe);
+    if (load64(&st) == 0) { return sign; }
+    # gross range: at 10^310 it overflows; under 10^-330 it is below half the
+    # smallest subnormal (~4.94e-324) and rounds to 0.
+    if (load64(&st + 8) > 310) { return sign | 0x7FF0000000000000; }
+    if (load64(&st + 8) < (0 - 330)) { return sign; }
+    var exp = 0;
+    while (load64(&st + 8) > 0) {
+        var kr = _f64p_dec_step(load64(&st + 8));
+        _f64p_dec_shift(&dg, &tmp, &st, 0 - kr);
+        exp = exp + kr;
+    }
+    # dp < 0, or dp == 0 below 0.5: double until the value is in [0.5, 1)
+    while (1 == 1) {
+        var dp = load64(&st + 8);
+        if (dp > 0) { break; }
+        if (dp == 0) {
+            if (load8(&dg) >= 5) { break; }
+        }
+        var kl = _f64p_dec_step(0 - dp);
+        _f64p_dec_shift(&dg, &tmp, &st, kl);
+        exp = exp - kl;
+    }
+    # [0.5, 1) * 2^exp == [1, 2) * 2^(exp - 1)
+    exp = exp - 1;
+    # under the smallest normal exponent: denormalize
+    if (exp < (0 - 1022)) {
+        var kd = (0 - 1022) - exp;
+        _f64p_dec_shift(&dg, &tmp, &st, 0 - kd);
+        exp = exp + kd;
+    }
+    if (exp + 1023 >= 2047) { return sign | 0x7FF0000000000000; }
+    # the top 53 bits, rounded once
+    _f64p_dec_shift(&dg, &tmp, &st, 53);
+    var mant = _f64p_dec_round(&dg, &st);
+    if (mant == 0x0020000000000000) {       # rounding carried out to 2^53
+        mant = mant >> 1;
+        exp = exp + 1;
+        if (exp + 1023 >= 2047) { return sign | 0x7FF0000000000000; }
+    }
+    # no hidden bit: subnormal (or 0), exponent field 0
+    if ((mant & 0x0010000000000000) == 0) { return sign | mant; }
+    return sign | ((exp + 1023) << 52) | (mant & 0x000FFFFFFFFFFFFF);
+}
+
+# Parse a decimal number to an f64 bit pattern, reading at most `n` bytes from `s`
+# and stopping at the first non-number byte. Handles sign, integer/fraction, e/E
+# exponent, Inf/NaN. The exponent accumulator SATURATES (no O(exp) loop -> no DoS).
+# Any n/N start reads as NaN and any i/I start as +/-Inf (bayan's JSON leniency);
+# f64_parse screens those first. The length-bounded core is the delegation point
+# for bayan (one algorithm in the ecosystem) — internal until bayan calls it.
+fn _f64_parse_n(s, n): i64 {
+    var i = 0;
+    var neg = 0;
+    while (i < n && (load8(s + i) == 32 || load8(s + i) == 9)) { i = i + 1; }
+    if (i < n && load8(s + i) == 45) { neg = 1; i = i + 1; }
+    elif (i < n && load8(s + i) == 43) { i = i + 1; }
+    # NaN / Inf (JSON emits null for these, but accept literals defensively)
+    var c0 = 0;
+    if (i < n) { c0 = load8(s + i); }
+    if (c0 == 110 || c0 == 78) { return 0x7FF8000000000000; }              # n/N -> NaN (also 'null')
+    if (c0 == 105 || c0 == 73) {                                           # i/I -> Inf
+        if (neg == 1) { return 0xFFF0000000000000; }
+        return 0x7FF0000000000000;
+    }
+    var ms = i;            # the mantissa text starts here; tier 3 re-reads it
+    var W = 0;
+    var ndig = 0;          # SIGNIFICANT digits accumulated into W (leading zeros excluded)
+    var dexp = 0;          # decimal exponent adjustment from position
+    var seen = 0;
+    var trunc = 0;         # a NONZERO significant digit past the 19th was dropped
+    # integer part — skip leading zeros (they aren't significant digits)
+    while (i < n && load8(s + i) >= 48 && load8(s + i) <= 57) {
+        var d = load8(s + i) - 48;
+        if (d != 0 || W != 0) {
+            if (ndig < 19) { W = W * 10 + d; ndig = ndig + 1; }
+            else {
+                dexp = dexp + 1;         # 20th+ digit: place value bumps the exponent
+                if (d != 0) { trunc = 1; }
+            }
+        }
+        seen = 1;
+        i = i + 1;
+    }
+    # fraction
+    if (i < n && load8(s + i) == 46) {
+        i = i + 1;
+        while (i < n && load8(s + i) >= 48 && load8(s + i) <= 57) {
+            var d2 = load8(s + i) - 48;
+            if (d2 != 0 || W != 0) {
+                # significant fraction digit
+                if (ndig < 19) { W = W * 10 + d2; ndig = ndig + 1; dexp = dexp - 1; }
+                elif (d2 != 0) { trunc = 1; }
+            } else {
+                dexp = dexp - 1;         # leading fraction zero: shifts magnitude, not significant
+            }
+            seen = 1;
+            i = i + 1;
+        }
+    }
+    var me = i;
+    if (seen == 0) { return 0; }
+    # exponent
+    var xe = 0;
+    if (i < n && (load8(s + i) == 101 || load8(s + i) == 69)) {
+        i = i + 1;
+        var esign = 1;
+        if (i < n && load8(s + i) == 45) { esign = 0 - 1; i = i + 1; }
+        elif (i < n && load8(s + i) == 43) { i = i + 1; }
+        var ev = 0;
+        while (i < n && load8(s + i) >= 48 && load8(s + i) <= 57) {
+            if (ev < 100000) { ev = ev * 10 + (load8(s + i) - 48); }   # SATURATE -> no DoS
+            i = i + 1;
+        }
+        xe = esign * ev;
+    }
+    dexp = dexp + xe;
+    var r = _F64P_UNDECIDED;
+    if (trunc == 0) { r = _f64p_approx(W, dexp, neg); }
+    else {
+        # Digits were dropped, so the true significand lies in (W, W + 1). If
+        # both ends round to the same double, everything between them does too.
+        # This used to parse W alone, which read an input just ABOVE a midpoint
+        # as the midpoint itself.
+        var lo = _f64p_approx(W, dexp, neg);
+        if (lo != _F64P_UNDECIDED) {
+            if (_f64p_approx(W + 1, dexp, neg) == lo) { r = lo; }
+        }
+    }
+    if (r != _F64P_UNDECIDED) { return r; }
+    return _f64p_exact(s + ms, me - ms, xe, neg);
+}
+
+# Parse a NUL-terminated cstring to the correctly rounded f64 bit pattern.
+# Leading spaces/tabs, then an optional sign; a strict `nan` (any case, sign
+# ignored) -> quiet NaN, a strict `inf` -> +/-Inf, any other n/N/i/I start -> 0.
+# Otherwise digits, an optional fraction and an optional e/E exponent; the scan
+# stops at the NUL or the first non-number byte. No digits -> 0; "-0" -> -0.0.
+# The exponent accumulator saturates at 100000 (CHANGELOG [6.4.69]: "1e100000000"
+# used to burn ~237 ms in an O(exp) loop), so the cost is O(len) and tier 3's
+# scaling is bounded by the gross range gates (|dp| <= 330).
 fn f64_parse(s): i64 {
     var i = 0;
     var neg = 0;
-
-    # Skip leading whitespace
     while (load8(s + i) == 32 || load8(s + i) == 9) { i = i + 1; }
-
-    # Sign
     if (load8(s + i) == 45) { neg = 1; i = i + 1; }
     elif (load8(s + i) == 43) { i = i + 1; }
-
-    # NaN
-    if (load8(s + i) == 78 || load8(s + i) == 110) {
+    var c = load8(s + i);
+    if (c == 78 || c == 110) {
         if ((load8(s+i+1) == 97 || load8(s+i+1) == 65) && (load8(s+i+2) == 78 || load8(s+i+2) == 110)) {
             return 0x7FF8000000000000;
         }
+        return 0;
     }
-    # Inf
-    if (load8(s + i) == 73 || load8(s + i) == 105) {
+    if (c == 73 || c == 105) {
         if ((load8(s+i+1) == 110 || load8(s+i+1) == 78) && (load8(s+i+2) == 102 || load8(s+i+2) == 70)) {
             if (neg == 1) { return 0xFFF0000000000000; }
             return 0x7FF0000000000000;
         }
+        return 0;
     }
-
-    # Integer part
-    var has_digits = 0;
-    var result = f64_from(0);
-    var ten = f64_from(10);
-    while (load8(s + i) >= 48 && load8(s + i) <= 57) {
-        result = f64_add(f64_mul(result, ten), f64_from(load8(s + i) - 48));
-        has_digits = 1;
-        i = i + 1;
-    }
-
-    # Fractional part
-    if (load8(s + i) == 46) {
-        i = i + 1;
-        var frac_scale = f64_from(1);
-        while (load8(s + i) >= 48 && load8(s + i) <= 57) {
-            frac_scale = f64_div(frac_scale, ten);
-            result = f64_add(result, f64_mul(f64_from(load8(s + i) - 48), frac_scale));
-            has_digits = 1;
-            i = i + 1;
-        }
-    }
-
-    if (has_digits == 0) { return 0; }
-
-    # Exponent
-    if (load8(s + i) == 101 || load8(s + i) == 69) {
-        i = i + 1;
-        var exp_neg = 0;
-        if (load8(s + i) == 45) { exp_neg = 1; i = i + 1; }
-        elif (load8(s + i) == 43) { i = i + 1; }
-        var exp_val = 0;
-        while (load8(s + i) >= 48 && load8(s + i) <= 57) {
-            # SATURATE the accumulator (CHANGELOG [6.4.69]): unbounded growth +
-            # the O(exp_val) apply loop below made "1e100000000" (17 bytes) burn
-            # ~237 ms — an algorithmic-complexity DoS. |exp| > 340 already
-            # overflows f64 to +/-Inf (or underflows to 0), so bounding it is
-            # behaviour-preserving for every representable value.
-            if (exp_val < 100000) { exp_val = exp_val * 10 + (load8(s + i) - 48); }
-            i = i + 1;
-        }
-        # Clamp the apply loop: 10^340 is already +Inf, so scaling past it can't
-        # change the (saturated) result — O(1) instead of O(exp_val).
-        if (exp_val > 340) { exp_val = 340; }
-        # Apply exponent: result * 10^exp
-        var exp_scale = f64_from(1);
-        var ei = 0;
-        while (ei < exp_val) {
-            exp_scale = f64_mul(exp_scale, ten);
-            ei = ei + 1;
-        }
-        if (exp_neg == 1) {
-            result = f64_div(result, exp_scale);
-        } else {
-            result = f64_mul(result, exp_scale);
-        }
-    }
-
-    if (neg == 1) { result = f64_neg(result); }
-    return result;
+    return _f64_parse_n(s, 2147483647);
 }
 
 # Parse with success flag. Writes f64 result to *out, returns 1 on
-# success, 0 on failure (out unchanged on failure).
+# success, 0 on failure (out unchanged on failure). Shares f64_parse's correctly
+# rounded parser: on success *out == f64_parse(s), bit for bit.
 fn f64_parse_ok(s, out): i64 {
     var i = 0;
     while (load8(s + i) == 32 || load8(s + i) == 9) { i = i + 1; }

@@ -116,7 +116,7 @@ tolerance. stdlib (assert/vec/math/alloc) auto-resolves — do not include it.
 
 ## Toolchain & commands
 
-- cycc pin: **6.5.36** (`cyrius.cyml [package].cyrius`).
+- cycc pin: **6.6.20** (`cyrius.cyml [package].cyrius`).
 - Deps: svara/naad/hisab/goonj/sakshi as `dist/*.cyr` git+tag bundles, vendored in
   `lib/`. Do not modify `lib/`.
 - **Concurrency**: `cyrius test`/`build`/`deps` re-resolve deps and race on

@@ -369,11 +369,11 @@ fn main() {
     # =========================================================================
     println("f64_clamp(NaN, lo, hi) is NaN: every comparison against NaN is");
     println("false, so NaN walks through every clamp in the tree untouched. And");
-    println("f64_to of any non-finite value is i64::MIN, so a sample count");
-    println("derived from one goes NEGATIVE and the render loop simply never");
-    println("runs. Measured before 2.0.5: one of those returned a full-length");
-    println("all-NaN buffer as a success, the other an empty one. Both are now");
-    println("refused at the entry point, before any audio is allocated.");
+    println("f64_to(NaN) is 0, so a sample count derived from one looks legal");
+    println("and the render loop simply never runs. Measured before 2.0.5: one");
+    println("of those returned a full-length all-NaN buffer as a success, the");
+    println("other an empty one. Both are now refused at the entry point,");
+    println("before any audio is allocated.");
     println("");
     println("The code says WHICH parameter was wrong -- there is no generic");
     println("\"bad argument\": a rejected duration is INVALID_VOCALIZATION, a");

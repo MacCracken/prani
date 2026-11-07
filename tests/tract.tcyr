@@ -437,16 +437,34 @@ assert_eq(vec_len(g_noise), 24, "noise: NaN f0 still produced 24 samples");
 assert_eq(t_all_finite(g_noise), 1, "noise: NaN f0 output is finite (f0 is unused)");
 
 # ================================================================
+test_group("2.0.14 num_samples -- past one vec's limit is refused, not a process exit");
+# Each of these used to render for minutes and then die in the vec.
+var n_over = VEC_CAP_MAX + 1;
+assert_eq(crtract_synthesize(crtract_new(wolf, T_SR), T_220, n_over, opts), PRANI_ERR_INVALID_VOCALIZATION,
+  "laryngeal");
+assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), n_over, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "syringeal");
+assert_eq(crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), n_over, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "noise");
+assert_eq(crtract_synthesize(crtract_new(cricket, T_SR), f64_from(4500), n_over, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "stridulatory");
+assert_eq(crtract_synthesize(crtract_new(bee, T_SR), f64_from(300), n_over, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "vibratile");
+assert_eq(crtract_synthesize_purr(crtract_new(wolf, T_SR), n_over, f64_from(27)),
+  PRANI_ERR_INVALID_VOCALIZATION, "purr");
+
 test_group("2.0.5 num_samples -- negative rejected, zero still VALID");
-# Before: a negative count (which is what f64_to(NaN * rate) saturates to --
-# i64::MIN) simply skipped the loop and returned an EMPTY buffer as success.
-# Zero, by contrast, is VALID: the oracle's test_zero_duration_synthesis asserts
-# an empty buffer, NOT an error, so the bound is >= 0 rather than > 0.
+# Before: a negative count (i64::MIN is where f64_to lands below -2^63) simply
+# skipped the loop and returned an EMPTY buffer as success. Zero, by contrast, is
+# VALID: the oracle's test_zero_duration_synthesis asserts an empty buffer, NOT an
+# error, so the bound is >= 0 rather than > 0. That means this layer cannot see a
+# NaN-derived count, which is 0: callers range the f64 first.
 var n_wolf = crtract_new(wolf, T_SR);
 assert_eq(crtract_synthesize(n_wolf, T_220, 0 - 1, opts), PRANI_ERR_INVALID_VOCALIZATION,
   "laryngeal: negative num_samples -> INVALID_VOCALIZATION");
-assert_eq(crtract_synthesize(n_wolf, T_220, f64_to(t_nan()), opts), PRANI_ERR_INVALID_VOCALIZATION,
-  "laryngeal: f64_to(NaN) count (i64::MIN) -> INVALID_VOCALIZATION (was: empty buffer)");
+assert_eq(crtract_synthesize(n_wolf, T_220, (0 - 9223372036854775807) - 1, opts),
+  PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: i64::MIN count -> INVALID_VOCALIZATION (was: empty buffer)");
+assert_eq(f64_to(t_nan()), 0, "a NaN-derived count is 0 at this layer -- why callers range the f64 first");
 assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), 0 - 1, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "syringeal: negative num_samples -> INVALID_VOCALIZATION");
 assert_eq(crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), 0 - 1, opts),

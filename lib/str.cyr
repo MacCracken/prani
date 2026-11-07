@@ -1,7 +1,6 @@
 # str.cyr — string type (fat pointer: data + length)
 # Usage: include "lib/str.cyr"
-# Requires: include "lib/alloc.cyr" for dynamic strings
-# Requires: include "lib/string.cyr" for strlen/memcpy
+# Includes its own definers (6.6.9): alloc.cyr, string.cyr, fmt.cyr (str_from_int_a), vec.cyr (str_split_a).
 #
 # v5.8.11 §3: Str's runtime layout is byte-identical to the
 # stack-slice<u8> convention in lib/slice.cyr — heap-allocated
@@ -13,6 +12,14 @@
 # are fn-frame-scoped. Pick whichever shape fits the use case.
 # `slice_from_cstr` / `slice_from_buf` (lib/slice.cyr) are
 # stack-slice analogs of str_from / str_new.
+
+# 6.6.9: this file wrote its requirements down for the caller ("Requires: include lib/alloc.cyr")
+# instead of including them, so a bare include compiled with eleven undefined functions — each a
+# ud2 stub. Include-once: a caller that already has them pays nothing. CHANGELOG [6.6.9]
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/vec.cyr"
 
 struct Str { data; len; }
 
@@ -331,7 +338,7 @@ fn str_trim(s: Str): Str {
 #
 # Runtime separator dispatch (v5.10.43 — fixes the long-standing
 # str_split sep-treated-as-pointer bug filed at
-# `docs/development/issues/2026-05-03-str-split-sep-treated-as-pointer.md`):
+# `docs/development/issues/archived/2026-05-03-str-split-sep-treated-as-pointer.md`):
 #
 # - `sep < 256` → BYTE path. `sep` is a single byte value (e.g. `44`
 #   for `,`, `10` for `\n`, `32` for ` `). Compares each input byte
@@ -608,6 +615,7 @@ fn str_join(parts, sep: Str): Str {
 # Create Str from raw buffer (copies data, adds null terminator)
 fn str_from_buf(ptr, len): Str {
     var buf = alloc(len + 1);
+    if (buf == 0) { return 0; }
     memcpy(buf, ptr, len);
     store8(buf + len, 0);
     return str_new(buf, len);
@@ -625,6 +633,7 @@ fn str_eq_cstr(s, cstr): i64 {
 fn str_cstr(s): i64 {
     var slen = str_len(s);
     var buf = alloc(slen + 1);
+    if (buf == 0) { return 0; }
     memcpy(buf, str_data(s), slen);
     store8(buf + slen, 0);
     return buf;

@@ -56,8 +56,42 @@ assert_eq(prani_is_finite(f64_clamp(e_nan, f64_from(1), f64_from(2))), 0,
 assert_eq(f64_clamp(e_pinf, f64_from(1), f64_from(2)), f64_from(2),
   "f64_clamp DOES bound +inf -- infinities are not the clamp-site hazard");
 assert_eq(f64_clamp(e_ninf, f64_from(1), f64_from(2)), f64_from(1), "f64_clamp bounds -inf");
-assert_eq(f64_to(e_nan), f64_to(e_pinf), "f64_to(NaN) == f64_to(+inf) (both i64::MIN)");
-assert_eq(f64_to(e_pinf) < 0, 1, "f64_to(+inf) is NEGATIVE, not i64::MAX -- so loop bounds go negative");
+# cyrius 6.6.8 moved these three from a common i64::MIN. They are pinned so the
+# next move fails here rather than in a host process.
+assert_eq(f64_to(e_nan), 0, "f64_to(NaN) is 0 -- a legal count a floor check cannot see");
+assert_eq(f64_to(e_pinf), 9223372036854775807, "f64_to(+inf) is i64::MAX -- it walks past a floor check");
+assert_eq(f64_to(e_ninf), (0 - 9223372036854775807) - 1, "f64_to(-inf) is i64::MIN");
+
+test_group("prani_sample_count_ok -- a count is ranged BEFORE the cast");
+var e_2p53 = 0x4340000000000000;   # 2^53, the ceiling
+assert_eq(prani_sample_count_ok(0), 1, "0 is a legal count");
+assert_eq(prani_sample_count_ok(f64_from(44100)), 1, "an ordinary count");
+assert_eq(prani_sample_count_ok(e_2p53), 1, "2^53 itself is accepted");
+assert_eq(f64_to(e_2p53), 9007199254740992, "and casts exactly");
+assert_eq(prani_sample_count_ok(0x4340000000000001), 0, "the next f64 above 2^53 is refused");
+assert_eq(prani_sample_count_ok(0x43e158e460913d00), 0, "1e19: finite, past 2^63");
+assert_eq(prani_sample_count_ok(e_nan), 0, "NaN is refused (f64_to would call it 0)");
+assert_eq(prani_sample_count_ok(e_pinf), 0, "+inf is refused (f64_to would call it i64::MAX)");
+assert_eq(prani_sample_count_ok(e_ninf), 0, "-inf is refused");
+assert_eq(prani_sample_count_ok(f64_neg(F64_ONE)), 0, "a negative count is refused");
+
+test_group("prani_buffer_count_ok / _len_ok -- one vec's limit, before any push");
+# The limit is lib/vec.cyr's constant, deliberately not a copy. Pinned because
+# every refusal below moves with it, and a move should be noticed here.
+assert_eq(VEC_CAP_MAX, 268435456, "measured: VEC_CAP_MAX is 2^28");
+var e_cap = f64_from(VEC_CAP_MAX);
+assert_eq(prani_buffer_count_ok(0), 1, "0 is one (empty) buffer");
+assert_eq(prani_buffer_count_ok(e_cap), 1, "exactly VEC_CAP_MAX fits");
+assert_eq(prani_buffer_count_ok(f64_from(VEC_CAP_MAX + 1)), 0, "one past it does not");
+assert_eq(prani_buffer_count_ok(e_2p53), 0, "2^53 is a legal count but not one buffer");
+assert_eq(prani_buffer_count_ok(e_nan), 0, "NaN is refused");
+assert_eq(prani_buffer_count_ok(e_pinf), 0, "+inf is refused");
+assert_eq(prani_buffer_count_ok(f64_neg(F64_ONE)), 0, "a negative count is refused");
+assert_eq(prani_buffer_len_ok(0), 1, "integer: 0 fits");
+assert_eq(prani_buffer_len_ok(VEC_CAP_MAX), 1, "integer: exactly VEC_CAP_MAX fits");
+assert_eq(prani_buffer_len_ok(VEC_CAP_MAX + 1), 0, "integer: one past it does not");
+assert_eq(prani_buffer_len_ok(0 - 1), 0, "integer: negative is refused");
+assert_eq(prani_buffer_len_ok(9223372036854775807), 0, "integer: i64::MAX is refused");
 
 assert_eq(prani_finite2(F64_ONE, F64_ONE), 1, "finite2 accepts two finite");
 assert_eq(prani_finite2(F64_ONE, e_nan), 0, "finite2 rejects a NaN second");

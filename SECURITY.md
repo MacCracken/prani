@@ -15,8 +15,8 @@ Only the current release is supported. Fixes land forward; nothing is backported
 
 | Version | Supported | |
 |---------|-----------|---|
-| 2.0.11 | Yes | current release |
-| 2.0.6 – 2.0.10 | No | superseded; no known unrepaired defect |
+| 2.0.14 | Yes | current release |
+| 2.0.6 – 2.0.13 | No | superseded; `crvoice_vocalize` aborts the process past 2^28 samples on any toolchain, and on an overflowing sample count when built with cyrius 6.6.8 or later, or for aarch64 |
 | 2.0.0 – 2.0.5 | No | ships defects repaired in 2.0.3, 2.0.5 and 2.0.6 |
 | 1.x | No | the pre-port Rust crate, frozen in git history and unmaintained |
 
@@ -25,5 +25,5 @@ in shipped versions — two CRITICALs (a `crvoice_vocalize` segfault on any samp
 rate svara rejects; a process abort for *every* rate in (1000, 7500]), an
 all-NaN buffer returned as success, three further process aborts and two null
 dereferences. Each is written up under its release in
-[`CHANGELOG.md`](CHANGELOG.md). If you are pinned below 2.0.11, upgrade rather
+[`CHANGELOG.md`](CHANGELOG.md). If you are pinned below 2.0.14, upgrade rather
 than asking for a patch.

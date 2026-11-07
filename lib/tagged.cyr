@@ -1,6 +1,6 @@
 # tagged.cyr — tagged unions (Option / Either + base infrastructure)
 # Usage: include "lib/tagged.cyr"
-# Requires: alloc.cyr, fmt.cyr (for option_print/result_print)
+# Includes its own definers: result.cyr, boxed.cyr (alloc), fmt.cyr (option_print's fmt_int).
 #
 # ⭐ v6.6.0 — THE VALUE FORM. `Option` and `Either` are declared `: stack` alongside `Result`
 # (lib/result.cyr, included below). A payload variant returns a REGISTER PAIR — tag in rax,
@@ -48,6 +48,7 @@
 
 include "lib/result.cyr"
 include "lib/boxed.cyr"
+include "lib/fmt.cyr"    # option_print's fmt_int (6.6.9)
 
 # ================================================================
 # Core tagged union operations

@@ -44,13 +44,13 @@
 #                               and returned a silent empty stream).
 #                                                            -> INVALID_VOCALIZATION
 #   stream_new total samples    duration * duration_scale * sample_rate must land
-#                               in [0, 2^53]. 2^53 is the largest count an f64
-#                               holds exactly; past i64's range f64_to saturates
-#                               to i64::MIN (measured), so an unguarded huge or
-#                               non-finite product yielded a NEGATIVE
-#                               total_samples and a stream that reported
-#                               is_finished == 1 with no error. At 44.1 kHz the
-#                               bound is ~6470 years of audio.
+#                               in [0, 2^53], the largest count an f64 holds
+#                               exactly. Ranged in f64 before the cast, because
+#                               f64_to saturates (see error.cyr): an unguarded
+#                               overflow is i64::MAX samples, and NaN is 0, a
+#                               stream that reports is_finished == 1 with no
+#                               error. At 44.1 kHz the bound is ~6470 years of
+#                               audio.
 #                                                            -> INVALID_VOCALIZATION
 #   stream_new voice snapshot   f0, effort_amp and spectral_tilt must be finite.
 #                               f64_clamp passes NaN through (measured), so
@@ -124,9 +124,6 @@ var PR_ST_1_5   = 0x3ff8000000000000;   # 1.5
 var PR_ST_0_25  = 0x3fd0000000000000;   # 0.25
 var PR_ST_1_1   = 0x3ff199999999999a;   # 1.1
 var PR_ST_0_75  = 0x3fe8000000000000;   # 0.75
-# 2^53 == 9007199254740992: the largest sample count an f64 represents exactly,
-# and the ceiling stream_new accepts for duration * duration_scale * sample_rate.
-var PR_ST_MAX_SAMPLES = 0x4340000000000000;   # 9007199254740992.0 == 2^53
 
 # ================================================================
 # SynthStream -- a pull-based streaming synthesizer. Produces audio block-by-
@@ -196,13 +193,12 @@ fn stream_new(voice, voc, intent, sample_rate, duration) {
     var modifiers = prani_intent_modifiers(intent);
     var f0 = f64_mul(crvoice_effective_f0(voice), IntentModifiers_pitch_scale(modifiers));
     var effective_duration = f64_mul(duration, IntentModifiers_duration_scale(modifiers));
-    # total_samples = (effective_duration * sample_rate) as usize -- but f64_to
-    # saturates to i64::MIN for every value outside i64's range, non-finite or
-    # merely huge (measured 2026-08-31), so the product is ranged BEFORE the
-    # conversion. The intent's duration_scale is inside the check because it is
-    # what can push an accepted duration over the edge (Mating doubles it).
+    # total_samples = (effective_duration * sample_rate) as usize -- ranged BEFORE
+    # the conversion (prani_sample_count_ok says why). The intent's duration_scale
+    # is inside the check because it is what can push an accepted duration over
+    # the edge (Mating doubles it).
     var raw_samples = f64_mul(effective_duration, sample_rate);
-    if (prani_in_range(raw_samples, 0, PR_ST_MAX_SAMPLES) == 0) {
+    if (prani_sample_count_ok(raw_samples) == 0) {
         return PRANI_ERR_INVALID_VOCALIZATION;
     }
     var total_samples = f64_to(raw_samples);
@@ -456,9 +452,10 @@ fn stream_fill_buffer(self, buffer) {
 
 # next_block(self, block_size) -- produce the next block of audio as an owned
 # vec. block_size is clamped to the remaining samples; returns an empty vec when
-# nothing remains, or a NEGATIVE PRANI_ERR_INVALID_VOCALIZATION on a bad handle
-# or a negative block_size (the "vec handle or negative code" convention
-# crvoice_vocalize already uses). Check with prani_is_err before vec_len.
+# nothing remains, or a NEGATIVE PRANI_ERR_INVALID_VOCALIZATION on a bad handle,
+# a negative block_size or a block too long for one vec (the "vec handle or
+# negative code" convention crvoice_vocalize already uses). Check with
+# prani_is_err before vec_len.
 fn stream_next_block(self, block_size) {
     # Same handle class as stream_fill_buffer, but this one CAN report it: a
     # negative return is distinguishable from the empty vec that means "done".
@@ -467,8 +464,9 @@ fn stream_next_block(self, block_size) {
     # (remaining is never negative), skip the `actual == 0` early return, push
     # zero samples, and hand fill_buffer an empty vec -- so it returned an EMPTY
     # VEC, indistinguishable from a finished stream. That silent-empty result is
-    # exactly what 2.0.5 exists to replace. No upper bound: block_size is
-    # clamped to `remaining`, which stream_new already bounded at 2^53.
+    # exactly what 2.0.5 exists to replace. The upper bound is one vec's, enforced
+    # by prani_vec_push_zeros below: `remaining` can be 2^53, far more than a block
+    # can hold. A refused block renders nothing, so a smaller one still drains it.
     if (block_size < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var total = SynthStream_total_samples(self);
     var rendered = SynthStream_samples_rendered(self);
@@ -479,7 +477,8 @@ fn stream_next_block(self, block_size) {
     if (remaining < actual) { actual = remaining; }
     if (actual == 0) { return vec_new(); }
     var buf = vec_new();
-    prani_vec_push_zeros(buf, actual);
+    var rc = prani_vec_push_zeros(buf, actual);
+    if (prani_is_err(rc) == 1) { return rc; }
     stream_fill_buffer(self, buf);
     return buf;
 }

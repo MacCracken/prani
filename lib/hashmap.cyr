@@ -1,6 +1,6 @@
 # hashmap.cyr — hash table, choose-your-key-type at construction
 # Usage: include "lib/hashmap.cyr"
-# Requires: alloc.cyr, string.cyr, str.cyr, fnptr.cyr (for map_iter)
+# Includes its own definers: alloc.cyr, string.cyr, str.cyr, vec.cyr, fmt.cyr, fnptr.cyr, hashseed.cyr.
 #
 # Open addressing with linear probing. Three key-type surfaces
 # coexist — pick at construction time:
@@ -34,6 +34,10 @@
 #             1 = Str  (hash via hash_str_v, compare via str_eq)
 #             2 = u64  (hash via hash_u64, equality via ==, v5.5.20)
 #
+# Entries array: `capacity` slots, then ONE trailing word — the tombstone count (6.6.20).
+#   It lives after the slots, not in the header, so the 32-byte header and every slot offset
+#   stay exactly what consumers already read (map_entries/map_cap walks never reach it).
+#
 # The cstr/Str helpers (map_keys / map_values / map_iter / map_print)
 # assume the 24-byte slot layout and do NOT work on u64 maps. The
 # u64 surface stays minimal (new/set/get/has/delete/size/clear)
@@ -54,6 +58,13 @@
 
 include "lib/fnptr.cyr"
 include "lib/hashseed.cyr"   # v6.5.39: per-process seed + finalizer (hash-flooding DoS)
+# 6.6.9: the Str-keyed surface (str_*), memset/streq/strlen, map_keys (vec_*) and map_print
+# (fmt_int) were all called, none included. CHANGELOG [6.6.9]
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/fmt.cyr"
 
 # v5.8.26 — key_type symbolic constants. Replaces raw 0/1/2
 # integer literals at the 6 read/write sites in this file.
@@ -117,9 +128,9 @@ fn map_new_a(a): i64 {
     var m = alloc_via(a, 32);
     if (m == 0) { return 0; }
     var cap = 16;
-    var entries = alloc_via(a, cap * 24);
+    var entries = alloc_via(a, cap * 24 + 8);   # + the tombstone-count word
     if (entries == 0) { return 0; }
-    memset(entries, 0, cap * 24);
+    memset(entries, 0, cap * 24 + 8);
     store64(m, entries);
     store64(m + 8, cap);
     store64(m + 16, 0);
@@ -148,9 +159,9 @@ fn map_new_str_a(a): i64 {
     var m = alloc_via(a, 32);
     if (m == 0) { return 0; }
     var cap = 16;
-    var entries = alloc_via(a, cap * 24);
+    var entries = alloc_via(a, cap * 24 + 8);   # + the tombstone-count word
     if (entries == 0) { return 0; }
-    memset(entries, 0, cap * 24);
+    memset(entries, 0, cap * 24 + 8);
     store64(m, entries);
     store64(m + 8, cap);
     store64(m + 16, 0);
@@ -173,6 +184,118 @@ fn map_entries(m): i64 { return load64(m); }
 fn map_cap(m): i64 { return load64(m + 8); }
 # Return the number of occupied entries
 fn map_count(m): i64 { return load64(m + 16); }
+
+# ⛔ TOMBSTONES COUNT TOWARD THE REBUILD (6.6.20). map_delete / map_u64_delete leave a tombstone
+# and the trigger counted only LIVE entries, while _map_find / _map_u64_find stop only at an
+# EMPTY slot. A map held at a steady size by delete+insert churn ran out of EMPTY slots after
+# ~3x turnover of its live size, and from then on every miss and every new-key insert walked the
+# whole table (measured: 2000 misses 76 us -> 58,544 us at 5000 live). Now each delete counts its
+# tombstone in the word after the slots, and a NEW-key insert rebuilds when live + tombstones
+# reach 70%: doubling only when live alone is past 35%, otherwise at the same capacity — which
+# drops every tombstone without growing. What does NOT change, because consumers walk
+# map_entries/map_cap and depend on it: a delete never moves an entry, and neither does an
+# overwrite of a key already present (the rebuild check runs only once the key is known new).
+# lib/hashmap_fast.cyr had the same tombstone defect and fixed it at 6.6.8.
+# ⚠ THE SAME-CAPACITY REBUILD IS IN PLACE AND ALLOCATES NOTHING (_map_rebuild_in_place). The
+# default allocator is a bump whose free is a no-op, so a rebuild into a fresh array leaked the
+# old one on every rebuild — ~27 B per churned key, without bound (27.5 MB over 1M rounds at
+# 5000 live) — and made a steady-size insert fallible where it had needed no memory at all.
+# Only doubling allocates, and a map that has reached its steady size never doubles again
+# (the one exception is a table with no EMPTY slot at all — see _map_rebuild_in_place).
+# ⛔ hashmap_fast still has THIS defect: its same-capacity _fhm_rehash allocates three fresh
+# arrays and never releases the old ones, so steady-size fhm churn still leaks (filed:
+# docs/development/issues/stdlib-hashmap-fast-same-capacity-rehash-leak.md). CHANGELOG [6.6.20]
+fn _map_tombp(m): i64 { return load64(m) + load64(m + 8) * 24; }
+fn _map_u64_tombp(m): i64 { return load64(m) + load64(m + 8) * 16; }
+
+# The tombstone count, for either slot layout.
+fn _map_tomb_count(m): i64 {
+    if (load64(m + 24) == KeyTypeU64) { return load64(_map_u64_tombp(m)); }
+    return load64(_map_tombp(m));
+}
+
+# One tombstone was reused. ⚠ CLAMPED at 0: a consumer may tombstone a slot by hand without
+# counting it (majra relay.cyr writes state 2 + live-1 directly); reusing that slot must not
+# drive the count negative, or the trigger undercounts and the live load can reach the table.
+fn _map_tomb_dec(tp): i64 {
+    var t = load64(tp);
+    if (t > 0) { store64(tp, t - 1); }
+    return 0;
+}
+
+# 0 when the table has room for a new key; otherwise the capacity to rebuild it at.
+# With no tombstones this is exactly the old trigger: double at 70% live.
+fn _map_rebuild_cap(m, tombs): i64 {
+    var live = load64(m + 16);
+    var cap = load64(m + 8);
+    if ((live + tombs) * 10 < cap * 7) { return 0; }
+    if (live * 20 >= cap * 7) { return cap * 2; }
+    return cap;
+}
+
+# Rebuilds done by any map in this process, in place or into a fresh array. Diagnostic only, not
+# API: tests/tcyr/stdlib/hashmap_tombstones.tcyr reads it to bound the rebuild work churn costs
+# (an in-place rebuild changes neither map_entries nor alloc_used). Unsynchronised: maps used on
+# different threads can lose a count, never anything else.
+var _map_rebuilds = 0;
+
+# Same-capacity rebuild of a 24-byte-slot table, IN PLACE, allocating nothing. Returns 0 when
+# done, 1 when there is no EMPTY slot to anchor the walk (the caller then rebuilds into a fresh
+# array; only reachable when tombstones were written outside this API — majra relay.cyr).
+#   1. s = a slot that was EMPTY before the rebuild. A probe chain never crosses an EMPTY slot,
+#      so no live entry's chain crosses s.
+#   2. Every tombstone becomes EMPTY.
+#   3. Walk once from s+1 round to s-1. Each live entry moves to the first EMPTY slot on its
+#      probe path from its home bucket, when that slot lies before it. Its home lies after s in
+#      walk order (step 1), so that path covers only slots already walked, and a walked slot is
+#      only ever filled afterwards, never emptied — so every entry stays reachable.
+# Entries move only here, on the NEW-key insert path; deletes and overwrites never move one.
+fn _map_rebuild_in_place(m): i64 {
+    var entries = load64(m);
+    var cap = load64(m + 8);
+    var mask = cap - 1;
+    var s = 0;
+    while (s < cap) {
+        if (load64(entries + s * 24 + 16) == 0) { break; }
+        s = s + 1;
+    }
+    if (s == cap) { return 1; }
+    var i = 0;
+    while (i < cap) {
+        var tp = entries + i * 24;
+        if (load64(tp + 16) == 2) {
+            store64(tp, 0);
+            store64(tp + 8, 0);
+            store64(tp + 16, 0);
+        }
+        i = i + 1;
+    }
+    var n = 1;
+    while (n < cap) {
+        var j = (s + n) & mask;
+        var jp = entries + j * 24;
+        if (load64(jp + 16) == 1) {
+            var t = _map_hash(m, load64(jp)) & mask;
+            while (t != j) {
+                var dp = entries + t * 24;
+                if (load64(dp + 16) == 0) {
+                    store64(dp, load64(jp));
+                    store64(dp + 8, load64(jp + 8));
+                    store64(dp + 16, 1);
+                    store64(jp, 0);
+                    store64(jp + 8, 0);
+                    store64(jp + 16, 0);
+                    break;
+                }
+                t = (t + 1) & mask;
+            }
+        }
+        n = n + 1;
+    }
+    store64(entries + cap * 24, 0);
+    _map_rebuilds = _map_rebuilds + 1;
+    return 0;
+}
 
 # Find slot for key. Returns entry pointer or 0.
 # Hash + equality are dispatched through _map_hash / _map_key_eq so
@@ -232,19 +355,27 @@ fn _hm_die(): i64 {
 }
 
 fn _map_grow_a(a, m): i64 {
+    return _map_rehash_a(a, m, load64(m + 8) * 2);
+}
+
+# Rebuild the table into a fresh `new_cap`-slot array from its live entries only, which drops
+# every tombstone (the fresh array's count word is zero). Allocates before touching the map, so a
+# refused allocation returns -1 with the map unchanged. Used to double, and at the same capacity
+# only when _map_rebuild_in_place finds no EMPTY slot. 6.6.20: split out of _map_grow_a.
+fn _map_rehash_a(a, m, new_cap): i64 {
     var old_entries = load64(m);
     var old_cap = load64(m + 8);
-    var new_cap = old_cap * 2;
     if (new_cap > MAP_CAP_MAX) {
         syscall(1, 2, "map: capacity overflow\n", 23);
         _hm_die();
     }
-    var new_entries = alloc_via(a, new_cap * 24);
+    var new_entries = alloc_via(a, new_cap * 24 + 8);
     if (new_entries == 0) { return 0 - 1; }
-    memset(new_entries, 0, new_cap * 24);
+    memset(new_entries, 0, new_cap * 24 + 8);
     store64(m, new_entries);
     store64(m + 8, new_cap);
     store64(m + 16, 0);
+    _map_rebuilds = _map_rebuilds + 1;
     var gi = 0;
     while (gi < old_cap) {
         var oep = old_entries + gi * 24;
@@ -268,20 +399,35 @@ fn _map_grow(m): i64 {
 }
 
 # v5.8.35 — Allocator-as-first-arg variant of map_set. Routes any
-# grow through `a`. Returns 0 on success, -1 on grow OOM (caller
-# must check; back-compat map_set aborts instead).
+# grow through `a`. Returns 0 on success, -1 when a doubling's allocation
+# is refused (caller must check; back-compat map_set aborts instead). A
+# same-capacity rebuild allocates nothing, so it cannot fail (unless
+# hand-written tombstones left no EMPTY slot — _map_rebuild_in_place).
 fn map_set_a(a, m, key, value): i64 {
-    if (load64(m + 16) * 10 >= load64(m + 8) * 7) {
-        var rc = _map_grow_a(a, m);
-        if (rc < 0) { return 0 - 1; }
-    }
     var ep = _map_find(m, key);
+    if (ep != 0) {
+        if (load64(ep + 16) == 1) {
+            # an overwrite: never rebuilds, so a walk that overwrites as it goes stays valid
+            store64(ep, key);
+            store64(ep + 8, value);
+            return 0;
+        }
+    }
+    var nc = _map_rebuild_cap(m, load64(_map_tombp(m)));
+    if (nc != 0) {
+        var rc = 1;
+        if (nc == load64(m + 8)) { rc = _map_rebuild_in_place(m); }
+        if (rc != 0) {
+            if (_map_rehash_a(a, m, nc) < 0) { return 0 - 1; }
+        }
+        ep = _map_find(m, key);
+    }
     if (ep == 0) { return 0 - 1; }
-    var was_new = load64(ep + 16) != 1;
+    if (load64(ep + 16) == 2) { _map_tomb_dec(_map_tombp(m)); }
     store64(ep, key);
     store64(ep + 8, value);
     store64(ep + 16, 1);
-    if (was_new == 1) { store64(m + 16, load64(m + 16) + 1); }
+    store64(m + 16, load64(m + 16) + 1);
     return 0;
 }
 
@@ -326,6 +472,8 @@ fn map_delete(m, key): i64 {
     if (ep == 0) { return 0; }
     store64(ep + 16, 2);
     store64(m + 16, load64(m + 16) - 1);
+    var tp = _map_tombp(m);
+    store64(tp, load64(tp) + 1);
     return 1;
 }
 
@@ -359,7 +507,7 @@ fn map_values(m): i64 {
 
 # Clear all entries (reset to empty, keep capacity)
 fn map_clear(m): i64 {
-    memset(load64(m), 0, load64(m + 8) * 24);
+    memset(load64(m), 0, load64(m + 8) * 24 + 8);   # slots + the tombstone count
     store64(m + 16, 0);
     return 0;
 }
@@ -458,9 +606,9 @@ fn map_u64_new_a(a): i64 {
     var m = alloc_via(a, 32);
     if (m == 0) { return 0; }
     var cap = 16;
-    var entries = alloc_via(a, cap * 16);
+    var entries = alloc_via(a, cap * 16 + 8);   # + the tombstone-count word
     if (entries == 0) { return 0; }
-    memset(entries, 0, cap * 16);
+    memset(entries, 0, cap * 16 + 8);
     store64(m, entries);
     store64(m + 8, cap);
     store64(m + 16, 0);
@@ -505,19 +653,74 @@ fn _map_u64_find(m, key): i64 {
 # success, -1 on grow OOM (vs back-compat _map_u64_grow which
 # aborts).
 fn _map_u64_grow_a(a, m): i64 {
+    return _map_u64_rehash_a(a, m, load64(m + 8) * 2);
+}
+
+# Same-capacity rebuild of a u64 table, IN PLACE, allocating nothing — the 16-byte-slot twin of
+# _map_rebuild_in_place (read its steps there). Returns 1 when there is no EMPTY slot.
+fn _map_u64_rebuild_in_place(m): i64 {
+    var entries = load64(m);
+    var cap = load64(m + 8);
+    var mask = cap - 1;
+    var s = 0;
+    while (s < cap) {
+        if (load64(entries + s * 16) == MAP_U64_EMPTY) { break; }
+        s = s + 1;
+    }
+    if (s == cap) { return 1; }
+    var i = 0;
+    while (i < cap) {
+        var tp = entries + i * 16;
+        if (load64(tp) == MAP_U64_TOMB) {
+            store64(tp, MAP_U64_EMPTY);
+            store64(tp + 8, 0);
+        }
+        i = i + 1;
+    }
+    var n = 1;
+    while (n < cap) {
+        var j = (s + n) & mask;
+        var jp = entries + j * 16;
+        var k = load64(jp);
+        if (k != MAP_U64_EMPTY) {
+            var t = hash_u64(k) & mask;
+            while (t != j) {
+                var dp = entries + t * 16;
+                if (load64(dp) == MAP_U64_EMPTY) {
+                    store64(dp, k);
+                    store64(dp + 8, load64(jp + 8));
+                    store64(jp, MAP_U64_EMPTY);
+                    store64(jp + 8, 0);
+                    break;
+                }
+                t = (t + 1) & mask;
+            }
+        }
+        n = n + 1;
+    }
+    store64(entries + cap * 16, 0);
+    _map_rebuilds = _map_rebuilds + 1;
+    return 0;
+}
+
+# Rebuild into a fresh `new_cap`-slot array from the live entries only (drops every tombstone).
+# Allocates first: a refused allocation returns -1 with the map unchanged. Used to double, and at
+# the same capacity only when _map_u64_rebuild_in_place finds no EMPTY slot. 6.6.20 — see the
+# tombstone note above _map_tombp.
+fn _map_u64_rehash_a(a, m, new_cap): i64 {
     var old_entries = load64(m);
     var old_cap = load64(m + 8);
-    var new_cap = old_cap * 2;
     if (new_cap > MAP_CAP_MAX) {
         syscall(1, 2, "map_u64: capacity overflow\n", 27);
         _hm_die();
     }
-    var new_entries = alloc_via(a, new_cap * 16);
+    var new_entries = alloc_via(a, new_cap * 16 + 8);
     if (new_entries == 0) { return 0 - 1; }
-    memset(new_entries, 0, new_cap * 16);
+    memset(new_entries, 0, new_cap * 16 + 8);
     store64(m, new_entries);
     store64(m + 8, new_cap);
     store64(m + 16, 0);
+    _map_rebuilds = _map_rebuilds + 1;
     var gi = 0;
     while (gi < old_cap) {
         var oep = old_entries + gi * 16;
@@ -544,8 +747,10 @@ fn _map_u64_grow(m): i64 {
 }
 
 # v5.8.43 — Allocator-as-first-arg variant of map_u64_set. Routes
-# any grow through `a`. Returns 0 on success, -1 on grow OOM
-# (caller must check; back-compat map_u64_set aborts instead).
+# any grow through `a`. Returns 0 on success, -1 when a doubling's
+# allocation is refused (caller must check). A same-capacity rebuild
+# allocates nothing, so it cannot fail (unless hand-written tombstones
+# left no EMPTY slot — _map_rebuild_in_place).
 fn map_u64_set_a(a, m, key, value): i64 {
     # ⛔ REFUSE rather than pretend. Measured before the fix: 2000 writes of key 0 to a one-entry
     # map reported a size of 574 and kept growing — each write stored a key the encoding reads
@@ -555,19 +760,29 @@ fn map_u64_set_a(a, m, key, value): i64 {
     # KEY 0 — returning -1 here would make that existing test pass on its first iteration for
     # entirely the wrong reason. Callers testing `rc < 0` still see an error, as they should.
     if (_map_u64_key_reserved(key) == 1) { return 0 - 2; }
-    if (load64(m + 16) * 10 >= load64(m + 8) * 7) {
-        var rc = _map_u64_grow_a(a, m);
-        if (rc < 0) { return 0 - 1; }
-    }
     var ep = _map_u64_find(m, key);
+    if (ep != 0) {
+        # the key is not a sentinel (refused above), so a match here is the live entry:
+        # an overwrite, which never rebuilds
+        if (load64(ep) == key) {
+            store64(ep + 8, value);
+            return 0;
+        }
+    }
+    var nc = _map_rebuild_cap(m, load64(_map_u64_tombp(m)));
+    if (nc != 0) {
+        var rc = 1;
+        if (nc == load64(m + 8)) { rc = _map_u64_rebuild_in_place(m); }
+        if (rc != 0) {
+            if (_map_u64_rehash_a(a, m, nc) < 0) { return 0 - 1; }
+        }
+        ep = _map_u64_find(m, key);
+    }
     if (ep == 0) { return 0 - 1; }
-    var existing = load64(ep);
-    var was_new = 0;
-    if (existing == MAP_U64_EMPTY) { was_new = 1; }
-    elif (existing == MAP_U64_TOMB) { was_new = 1; }
+    if (load64(ep) == MAP_U64_TOMB) { _map_tomb_dec(_map_u64_tombp(m)); }
     store64(ep, key);
     store64(ep + 8, value);
-    if (was_new == 1) { store64(m + 16, load64(m + 16) + 1); }
+    store64(m + 16, load64(m + 16) + 1);
     return 0;
 }
 
@@ -627,6 +842,8 @@ fn map_u64_delete(m, key): i64 {
     if (load64(ep) != key) { return 0; }
     store64(ep, MAP_U64_TOMB);
     store64(m + 16, load64(m + 16) - 1);
+    var tp = _map_u64_tombp(m);
+    store64(tp, load64(tp) + 1);
     return 1;
 }
 
@@ -635,7 +852,7 @@ fn map_u64_size(m): i64 { return load64(m + 16); }
 
 # Reset to empty; keep capacity.
 fn map_u64_clear(m): i64 {
-    memset(load64(m), 0, load64(m + 8) * 16);
+    memset(load64(m), 0, load64(m + 8) * 16 + 8);   # slots + the tombstone count
     store64(m + 16, 0);
     return 0;
 }

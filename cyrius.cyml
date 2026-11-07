@@ -5,7 +5,7 @@ description = "prani — creature & animal vocal synthesis (species vocal tracts
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/prani"
 language = "cyrius"
-cyrius = "6.6.3"
+cyrius = "6.6.20"
 
 [build]
 entry = "src/main.cyr"
@@ -77,47 +77,48 @@ stdlib = [
     "bench",
 ]
 
+# The dep tags below are the matched set for cyrius 6.6.20, and they move
+# TOGETHER: each of svara 3.5.6, naad 2.2.5, hisab 3.3.7 and goonj 2.0.6 pins
+# cyrius 6.6.20 exactly, sakshi 2.5.7 is the copy that snapshot bundles, and the
+# next tag of each of the first four needs cyrius 6.7.x. naad 2.2.5 needs
+# hisab 3.x, so no older pin can sit beside it.
+
 # svara — human/formant vocal synthesis primitives. prani consumes svara's
 # GlottalSource / FormantFilter / VocalTract surface (tract.cyr, voice.cyr)
 # from the single monolithic dist bundle. The bundle references naad + hisab +
 # goonj + sakshi symbols, resolved from THIS manifest below.
 [deps.svara]
 git = "https://github.com/MacCracken/svara.git"
-tag = "3.5.4"
+tag = "3.5.6"
 modules = ["dist/svara.cyr"]
 
 # naad — audio synthesis primitives (noise / biquad / LFO). Referenced by
 # svara's bundle and called directly by tract.cyr (filter_biquad_new /
-# _process_sample + NAAD_FILTER_BANDPASS, the NoiseOnly path). ONE step past
-# the 2.2.1 svara 3.5.4 consumes: 2.2.2 is a pure bugfix (overlap-save
-# streaming in naad_convolution_process_block — a path prani never touches)
-# with identical hisab/goonj pins, so the bundle stays coherent.
+# _process_sample + NAAD_FILTER_BANDPASS, the NoiseOnly path).
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.2.2"
+tag = "2.2.5"
 modules = ["dist/naad.cyr"]
 
 # hisab — math/geometry (HVec3/HComplex/FFT/ganita least-squares). Referenced
 # by svara + naad bundles. Pinned to the tag they consume.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "2.11.2"
+tag = "3.3.7"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Referenced by naad's acoustics/* modules (present
 # in the monolithic bundle). Pulls sakshi + hisab transitively.
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.0.4"
+tag = "2.0.6"
 modules = ["dist/goonj.cyr"]
 
 # sakshi — structured logging. Arrives transitively via hisab/goonj/naad AND is
 # called directly by src/logging.cyr (prani_log_* -> sakshi_debug/info/warn/
-# error/fatal); declared explicitly so both resolve. ONE step past the 2.4.11
-# hisab 2.11.2 consumes, for the sakshi_span_enter lower-bound guard. This is
-# also why every build prints `./lib/ shadows version-pinned …` — the toolchain
-# snapshot bundles 2.4.11. Expected, not a fault.
+# error/fatal); declared explicitly so both resolve. 2.5.7 is the copy the
+# 6.6.20 snapshot bundles and the tag hisab 3.3.7 pins.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.4.12"
+tag = "2.5.7"
 modules = ["dist/sakshi.cyr"]

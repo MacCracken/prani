@@ -238,9 +238,9 @@ assert_eq(prani_is_finite(f64_max(F64_ONE, SP_NAN)), 0, "f64_max(a, NaN) == NaN 
 assert_eq(prani_is_finite(f64_div(F64_ONE, 0x0000000000000001)), 0, "1/5e-324 overflows to inf (the dt guard)");
 assert_eq(prani_is_finite(f64_div(F64_ONE, 0x01a56e1fc2f8f359)), 1,
   "1/1e-300 is finite (accepted, not an invented floor)");
-# The Doppler empty-buffer symptom: a NaN ratio truncates to i64::MIN, so the
-# loop bound is NEGATIVE -- an empty result, never a runaway allocation.
-assert_lt(f64_to(f64_div(f64_from(100), SP_NAN)), 0, "f64_to(len/NaN) is negative (empty, not runaway)");
+# The Doppler empty-buffer symptom: a NaN ratio truncates to 0, so the loop
+# never runs -- an empty result, never a runaway allocation.
+assert_eq(f64_to(f64_div(f64_from(100), SP_NAN)), 0, "f64_to(len/NaN) is 0 (empty, not runaway)");
 # +/-inf ARE bounded by f64_clamp -- the reason inf is rejected is that it
 # renders as 308.7 m/s, NOT that it would overflow.
 assert_eq(f64_eq(f64_clamp(PRANI_POS_INF, f64_neg(SP_BOUND), SP_BOUND), SP_BOUND), 1,
@@ -320,10 +320,17 @@ while (sp_i < 100) { vec_push(s100, F64_ONE); sp_i = sp_i + 1; }
 assert_eq(spatial_apply_doppler_shift(0, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION, "null samples handle rejected");
 assert_eq(spatial_apply_doppler_shift(PRANI_ERR_SVARA, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION,
   "a chained-in error code is rejected, not dereferenced");
-# -- velocity: any FINITE value. NaN was the live defect (out_len = i64::MIN
+# -- velocity: any FINITE value. NaN was the live defect (out_len = 0
 # -> empty buffer); +/-inf are clamped to +/-308.7, a fabricated answer.
 assert_eq(spatial_apply_doppler_shift(s100, SP_NAN, sr48), PRANI_ERR_INVALID_VOCALIZATION,
   "NaN velocity rejected (was a silently EMPTY buffer)");
+# Moving away stretches by up to 1.9x, so a long enough buffer outgrows one vec.
+# A header claiming that length: only its length is read before the refusal, so
+# this costs no memory. Ordinary lengths are the controls throughout this file.
+var sp_long = alloc(24);
+store64(sp_long + 8, 200000000);
+assert_eq(spatial_apply_doppler_shift(sp_long, f64_from(300), sr48), PRANI_ERR_INVALID_VOCALIZATION,
+  "a 2e8-sample buffer stretched past VEC_CAP_MAX is refused, not a process exit");
 assert_eq(spatial_apply_doppler_shift(s100, PRANI_POS_INF, sr48), PRANI_ERR_INVALID_VOCALIZATION,
   "+inf velocity rejected (was rendered as +308.7)");
 assert_eq(spatial_apply_doppler_shift(s100, PRANI_NEG_INF, sr48), PRANI_ERR_INVALID_VOCALIZATION,

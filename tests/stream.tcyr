@@ -386,12 +386,12 @@ assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, f64_neg(T_1
 # ================================================================
 test_group("2.0.5 stream_new -- total_samples must be exactly representable");
 # RANGE: duration * duration_scale * sample_rate in [0, 2^53]. The bound is
-# f64's exact-integer ceiling, not a taste call: past i64's range f64_to
-# saturates to i64::MIN for finite AND non-finite inputs alike (measured
-# 2026-08-31 and pinned here), which is what made an unguarded huge duration a
-# NEGATIVE total_samples and a stream that claimed to be finished.
-assert_lt(f64_to(T_1E300), 0, "measured: f64_to(1e300) saturates NEGATIVE (i64::MIN)");
-assert_eq(f64_to(T_NAN), f64_to(PRANI_POS_INF), "measured: NaN and +inf both saturate to the same i64::MIN");
+# f64's exact-integer ceiling, not a taste call. The check runs in f64 because a
+# count cannot be checked after the cast (cyrius 6.6.8+, pinned here): an
+# overflow is i64::MAX, which passes a floor check, and NaN is 0, a legal count.
+assert_eq(f64_to(T_1E300), 9223372036854775807, "measured: f64_to(1e300) saturates to i64::MAX");
+assert_eq(f64_to(PRANI_POS_INF), 9223372036854775807, "measured: +inf saturates to the same i64::MAX");
+assert_eq(f64_to(T_NAN), 0, "measured: f64_to(NaN) is 0");
 assert_eq(f64_to(T_2P53), 9007199254740992, "measured: 2^53 converts exactly");
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_1E300),
   PRANI_ERR_INVALID_VOCALIZATION, "1e300 s at 44.1 kHz -> rejected (product overflows to +inf)");

@@ -22,8 +22,9 @@
 #   dcblocker_process_buffer(b, s) same. Not guarded; detects the latch instead.
 #   prani_vec_extend(dst, src)     no numeric range -- copies opaque f64 bit
 #                                  patterns without interpreting them.
-#   prani_vec_push_zeros(v, n)     n: [0, i64::MAX]. 0 is VALID (nothing to
-#                                  append); NEGATIVE is rejected -- guarded.
+#   prani_vec_push_zeros(v, n)     n: [0, VEC_CAP_MAX], and len + n no more
+#                                  than that. 0 is VALID (nothing to append);
+#                                  the rest is rejected -- guarded.
 #   prani_map_naad_error(code)     any i64 -- it is a foreign code, not a range.
 # ================================================================
 
@@ -157,8 +158,8 @@ fn prani_vec_extend(dst, src) {
 }
 
 # prani_vec_push_zeros(v, n) -- append `n` zero samples (inter-call silence, or a
-# zeroed mix/render buffer). Range: n in [0, i64::MAX]; returns 0, or
-# PRANI_ERR_INVALID_VOCALIZATION for a negative `n`.
+# zeroed mix/render buffer). Range: n in [0, VEC_CAP_MAX], with len + n within the
+# same limit; returns 0, or PRANI_ERR_INVALID_VOCALIZATION with `v` untouched.
 # Was open-coded in the bout gap, the phrase gap, the chorus mix init and
 # stream_next_block.
 #
@@ -171,20 +172,26 @@ fn prani_vec_extend(dst, src) {
 #           an exhausted stream block. Nothing to append is an answer, not a
 #           failure, so this still appends nothing and still returns 0.
 #   n < 0   is IMPOSSIBLE as a request and is now REPORTED. A negative count
-#           cannot be asked for; it can only be arithmetic that already failed.
-#           Both ways it fails are audit findings: f64_to saturates a NaN or
-#           out-of-range product to i64::MIN (F11), and `base + max_off * 2` in
-#           synthesize_chorus wraps past i64::MAX to a negative (F10, reproduced
-#           in tests/dsp.tcyr at timing_spread 1e14). Appending nothing in that
-#           case is F11's exact complaint -- "a silent empty result where an
-#           error would be better."
+#           cannot be asked for; it can only be arithmetic that already failed:
+#           `base + max_off * 2` in synthesize_chorus wraps past i64::MAX to a
+#           negative (F10, reproduced in tests/dsp.tcyr at timing_spread 1e14),
+#           and f64_to saturates anything below -2^63 to i64::MIN. Appending
+#           nothing in that case is F11's exact complaint -- "a silent empty
+#           result where an error would be better."
+#   n past one vec's limit is REPORTED too, because the push it would reach is a
+#   process exit: "vec: capacity overflow", and no return value to check.
+#   Not catchable here, because the count no longer carries it: f64_to(NaN) is 0
+#   and an overflow is i64::MAX. Call sites range the f64 BEFORE the cast
+#   (prani_sample_count_ok, prani_seq_samples_ok).
 #
 # The buffer is untouched either way, so no valid input changes behaviour and no
 # caller's output changes for ANY input: only the returned code moves, from 0 to
 # a negative, on counts that were already broken. The four call sites discard
 # the return today; this is the channel that lets them stop.
 fn prani_vec_push_zeros(v, n) {
-    if (n < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_buffer_len_ok(n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # Both terms are within VEC_CAP_MAX here, so this sum cannot wrap.
+    if (prani_buffer_len_ok(vec_len(v) + n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var i = 0;
     while (i < n) {
         vec_push(v, 0);

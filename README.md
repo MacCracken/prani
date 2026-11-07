@@ -71,13 +71,13 @@ include "lib/goonj.cyr"
 include "lib/sakshi.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
-include "dist/prani.cyr"
+include "lib/prani.cyr"
 ```
 
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.0.11"
+tag = "2.0.14"
 modules = ["dist/prani.cyr"]
 ```
 

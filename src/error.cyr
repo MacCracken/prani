@@ -72,17 +72,24 @@ fn prani_is_finite(x) {
 }
 
 # ================================================================
-# Input-range guards (2.0.5). Why these exist, measured 2026-08-31:
+# Input-range guards (2.0.5). Why these exist, measured 2026-08-31 and
+# re-measured 2026-11-07 on cyrius 6.6.20:
 #
 #   f64_clamp(NaN, lo, hi) -> NaN          NaN passes every clamp in the tree
 #   f64_clamp(+inf, lo, hi) -> hi          infinities ARE bounded by clamp
 #   f64_clamp(-inf, lo, hi) -> lo
-#   f64_to(NaN) == f64_to(+inf) == f64_to(-inf) == i64::MIN
+#   f64_to(NaN)     -> 0                   a legal count
+#   f64_to(>= 2^63) -> i64::MAX            +inf included
+#   f64_to(< -2^63) -> i64::MIN            -inf included
 #
 # So the hazard at a clamp site is NaN specifically, not non-finiteness in
-# general -- and any loop bound derived from f64_to(non-finite) goes NEGATIVE,
-# which is why the observable symptom is a silently EMPTY buffer rather than a
-# crash or a runaway allocation. Audit finding F11.
+# general. A count has two hazards and neither is negative: NaN lands on 0 and
+# renders a silently EMPTY buffer (audit finding F11), and an overflow lands on
+# i64::MAX and pushes samples until the vec aborts the process. Before cyrius
+# 6.6.8 all of them gave i64::MIN, so a floor check caught them by accident. It
+# catches neither now: a count is ranged in f64, BEFORE the cast, with
+# prani_sample_count_ok or, where the count becomes one buffer,
+# prani_buffer_count_ok.
 #
 # These return 1 for "acceptable" and 0 for "reject", so a call site reads
 #   if (prani_is_finite(x) == 0) { return PRANI_ERR_INVALID_TRACT; }
@@ -129,4 +136,42 @@ fn prani_is_positive(x) {
 fn prani_is_non_negative(x) {
     if (prani_is_finite(x) == 0) { return 0; }
     return f64_ge(x, 0);
+}
+
+# 2^53 == 9007199254740992: the largest sample count an f64 represents exactly.
+# At 44.1 kHz that is ~6470 years of audio.
+var PRANI_MAX_SAMPLE_COUNT = 0x4340000000000000;
+
+# 1 iff `raw`, a sample count still in f64, may be cast with f64_to: finite and
+# within [0, PRANI_MAX_SAMPLE_COUNT]. Call it BEFORE the cast -- after it, NaN is
+# a legal 0 and an overflow is i64::MAX (see the block above). This is a limit
+# on what a count can MEAN, not on what fits in memory; sequence.cyr's
+# prani_seq_samples_ok is the allocation ceiling for its multi-call entry points.
+#must_use
+fn prani_sample_count_ok(raw) {
+    return prani_in_range(raw, 0, PRANI_MAX_SAMPLE_COUNT);
+}
+
+# 1 iff `raw`, a sample count still in f64, can be ONE buffer: finite and within
+# [0, VEC_CAP_MAX]. Any path that hands back a whole buffer uses this rather than
+# prani_sample_count_ok, because growing a vec past VEC_CAP_MAX is "vec: capacity
+# overflow" and a process exit no caller can catch, so the refusal has to come
+# before the first push. A stream needs only the wider check: it renders block by
+# block, so its total is not a buffer.
+#
+# The limit is lib/vec.cyr's own constant, not a copy of it, so this refuses
+# exactly what could never have succeeded. It is not a memory estimate: a buffer
+# at the limit costs ~4 GiB of bump arena, and an allocation refused below it is
+# still a process exit (roadmap 2.1.0 Lane B).
+#must_use
+fn prani_buffer_count_ok(raw) {
+    return prani_in_range(raw, 0, f64_from(VEC_CAP_MAX));
+}
+
+# prani_buffer_count_ok for a count that is already an integer.
+#must_use
+fn prani_buffer_len_ok(n) {
+    if (n < 0) { return 0; }
+    if (n > VEC_CAP_MAX) { return 0; }
+    return 1;
 }

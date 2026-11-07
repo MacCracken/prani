@@ -28,14 +28,29 @@ them and the port does not diverge from the oracle's enum:
 f64_clamp(NaN,  lo, hi) -> NaN     NaN passes every clamp in the tree
 f64_clamp(+inf, lo, hi) -> hi      infinities ARE bounded by clamp
 f64_clamp(-inf, lo, hi) -> lo
-f64_to(NaN) == f64_to(+inf) == f64_to(-inf) == i64::MIN
+f64_to(NaN)     -> 0               a legal count
+f64_to(>= 2^63) -> i64::MAX        +inf included
+f64_to(< -2^63) -> i64::MIN        -inf included
 ```
 
 Two corrections to the 2.0.3 audit's notes, both pinned as assertions in
-`tests/error.tcyr`: the hazard at a clamp site is **NaN specifically**, not
-non-finiteness in general; and **all three** non-finite values convert to i64::MIN, not
-just NaN — which is why a loop bound derived from one goes negative and the symptom is a
-silently **empty** buffer rather than a crash or a runaway allocation.
+`tests/error.tcyr`. The hazard at a clamp site is **NaN specifically**, not
+non-finiteness in general. And a sample count cannot be checked after the cast: NaN
+lands on 0, a legal count, so the symptom is a silently **empty** buffer; an overflow
+lands on i64::MAX, which a floor check walks past and a render loop aborts on.
+
+The `f64_to` rows are cyrius 6.6.8's. Until then all three gave i64::MIN on x86, so a
+negative check caught them by accident. Since 2.0.14 every count derived from a request
+is ranged in f64, **before** the cast: by `prani_sample_count_ok` for a stream's total,
+`prani_buffer_count_ok` for anything that becomes one buffer, and the tighter
+`prani_seq_samples_ok` on the multi-call paths.
+
+One buffer has a hard limit of its own. A vec cannot grow past `VEC_CAP_MAX` (2^28
+samples, ~101 minutes at 44.1 kHz): the next push is `vec: capacity overflow` and a
+process exit with no return value to check, so a count that cannot fit is refused before
+the first push. The limit is `lib/vec.cyr`'s constant, not a copy, so it refuses exactly
+what could never have succeeded. It is not a memory estimate: an allocation refused below
+it is also a process exit, which is roadmap 2.1.0 Lane B's.
 
 ## Guards
 
@@ -43,7 +58,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 
 | Function | Parameter | Accepted range | Rejects with |
 |---|---|---|---|
-| `prani_vec_push_zeros` | `n` | [0, i64::MAX] — n == 0 is VALID and unchanged; n < 0 is rejected | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `prani_vec_push_zeros` | `n` | [0, VEC_CAP_MAX], with len + n within the same limit — n == 0 is VALID and unchanged; the rest is rejected | `PRANI_ERR_INVALID_VOCALIZATION` |
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
@@ -189,6 +204,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 | `spatial_apply_distance_attenuation` | `sample_rate (derived: dt = 1/sample_rate)` | 1/sample_rate must be finite, i.e. sample_rate >~ 5.6e-309 | `PRANI_ERR_INVALID_TRACT` |
 | `spatial_apply_doppler_shift` | `samples` | a live vec handle (> 0) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `spatial_apply_doppler_shift` | `velocity` | ANY finite value -- explicitly not [-308.7, +308.7] | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `spatial_apply_doppler_shift` | `out_len (derived: len / ratio)` | [0, VEC_CAP_MAX] | `PRANI_ERR_INVALID_VOCALIZATION` |
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
@@ -243,7 +259,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 | `stream_fill_buffer` | `self, buffer (handles)` | both > 0 | `0 written, stream NOT retired` |
 | `stream_fill_buffer` | `contour (point-of-use, derived from f0)` | finite | `0 written + stream retired (ADR-0003's arm verbatim)` |
 | `stream_next_block` | `self (handle)` | > 0 | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `stream_next_block` | `block_size` | >= 0; no upper bound | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `stream_next_block` | `block_size` | >= 0, and at most VEC_CAP_MAX after clamping to the remaining samples; a refused block renders nothing | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `stream_pitch_contour_at` | `t` | any finite value (clamped to [0,1] as before); NaN propagates as NaN | `none - NaN is propagated, NOT an error code` |
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
@@ -263,18 +279,18 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 | Function | Parameter | Accepted range | Rejects with |
 |---|---|---|---|
 | `crtract_synthesize_laryngeal` | `f0` | finite (any finite value; the existing clamp to [max(f0_min,20), min(f0_max,2000)] bounds it) | `PRANI_ERR_INVALID_TRACT` |
-| `crtract_synthesize_laryngeal` | `num_samples` | >= 0 (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crtract_synthesize_laryngeal` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_laryngeal` | `subharmonic_amp, perturbation_scale (SynthesisOptions)` | finite | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_syringeal` | `f0` | finite | `PRANI_ERR_INVALID_TRACT` |
-| `crtract_synthesize_syringeal` | `num_samples` | >= 0 (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crtract_synthesize_syringeal` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_syringeal` | `subharmonic_amp, perturbation_scale (SynthesisOptions)` | finite | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `crtract_synthesize_noise` | `num_samples` | >= 0 (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crtract_synthesize_noise` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_stridulatory` | `f0` | finite | `PRANI_ERR_INVALID_TRACT` |
-| `crtract_synthesize_stridulatory` | `num_samples` | >= 0 (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crtract_synthesize_stridulatory` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_vibratile` | `f0` | finite | `PRANI_ERR_INVALID_TRACT` |
-| `crtract_synthesize_vibratile` | `num_samples` | >= 0 (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crtract_synthesize_vibratile` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_purr` | `purr_f0` | finite | `PRANI_ERR_INVALID_TRACT` |
-| `crtract_synthesize_purr` | `num_samples` | >= 0 (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crtract_synthesize_purr` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_apply_spectral_tilt` | `tilt_db` | finite | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_from_json_str` | `phase` | [0, 1] inclusive | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_from_json_str` | `dcb_x_prev, dcb_y_prev` | finite | `PRANI_ERR_INVALID_TRACT` |
@@ -309,11 +325,11 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 | `crvoice_vocalize_with_intent` | `self's species tag (ADDED 2.0.6)` | integer in [0, PRANI_SP_COUNT) | `PRANI_ERR_INVALID_SPECIES` |
 | `crvoice_vocalize_with_intent` | `sample_rate` | finite and > 0 (NO upper or lower threshold) | `PRANI_ERR_INVALID_TRACT` |
 | `crvoice_vocalize_with_intent` | `duration` | finite and >= 0 (zero is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `crvoice_vocalize_with_intent` | `num_samples (derived: effective_duration * sample_rate)` | >= 0 | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crvoice_vocalize_with_intent` | `num_samples (derived: effective_duration * sample_rate)` | [0, VEC_CAP_MAX] == [0, 268435456] | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_vocalize_with_intent` | `self's params (all 16 SpeciesParams fields, via crvoice_params_in_range)` | apparatus [0,4]; f0_min/f0_max finite >= 0 with f0_min <= f0_max; f0_default in [f0_min, f0_max]; tract_scale finite > 0; formant0..2 and bandwidth0..2 finite > 0; breathiness [0,1]; jitter [0,0.05]; shimmer [0,0.1]; spectral_tilt finite | `PRANI_ERR_INVALID_SPECIES` |
 | `crvoice_vocalize_with_intent` | `crvoice_effective_f0(self) and crvoice_effective_tract_scale(self)` | both finite | `PRANI_ERR_INVALID_TRACT` |
 | `crvoice_synthesize_cat_purr` | `sample_rate` | finite and > 0 | `PRANI_ERR_INVALID_TRACT` |
-| `crvoice_synthesize_cat_purr` | `num_samples` | >= 0 (zero is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
+| `crvoice_synthesize_cat_purr` | `num_samples` | [0, VEC_CAP_MAX] (zero is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_synthesize_cat_purr` | `self's size_scale` | finite and > 0 | `PRANI_ERR_INVALID_SPECIES` |
 | `crvoice_apply_nasal_antiformant` | `iteration bound nasal_len (LIVE CRASH)` | min(nasal_len, len), clamped in f64 before the f64_to | `n/a -- parity repair, not a rejection` |
 | `crvoice_apply_nasal_antiformant` | `sample_rate` | finite and > 0 | `PRANI_ERR_INVALID_TRACT` |
@@ -330,7 +346,7 @@ silently **empty** buffer rather than a crash or a runaway allocation.
 - **`crvoice_vocalize_with_intent` / `voc`** — DELIBERATE. The oracle's Vocalization was an enum -- 99 was unrepresentable, so it never had to decide. The port carries the tag as i64. Rejecting is forced by the enum->int erasure.
 - **`crvoice_vocalize_with_intent` / `intent`** — DELIBERATE, same enum->int erasure as voc.
 - **`crvoice_vocalize_with_intent` / `duration`** — DELIBERATE. Rust's saturating `as usize` turned NaN and negatives into 0, so the oracle also returned an empty buffer as a success. We report instead of fabricating a plausible empty answer (ADR-0001's philosophy). For +inf the oracle saturated to usize::MAX and would have tried to render it; both behaviours are bugs.
-- **`crvoice_vocalize_with_intent` / `num_samples (derived: effective_duration * sample_rate)`** — DELIBERATE, same class as the duration guard.
+- **`crvoice_vocalize_with_intent` / `num_samples (derived: effective_duration * sample_rate)`** — DELIBERATE, same class as the duration guard. The ceiling is a further divergence: the oracle's `Vec` had no 2^28 limit. Nothing that worked is lost, because past it the port could only exit the process; `stream_new` carries longer renders.
 - **`crvoice_apply_nasal_antiformant` / `nasal_fraction`** — DELIBERATE but inert. Rust's saturating cast made NaN and negatives 0, so the oracle also no-opped. We report.
 
 </details>
@@ -433,7 +449,6 @@ function that consumes it checks the voice's own derived values.
 - options on the stridulatory path -- never read there (the oracle writes `let _ = options;`), so there is nothing with a range. Pinned: NaN options with a cricket still succeed.
 - f0 on the noise path -- crtract_synthesize_noise takes no f0, so a snake's synthesis never looks at it. This is why the guards live in the five apparatus paths rather than in the crtract_synthesize dispatcher: a dispatcher-level guard would reject a NaN f0 for a snake, a failure that cannot happen. Pinned, so moving the guard up fails the suite and says why.
 - from_json_str rng_state / rng_inc -- every 64-bit pattern is a reachable PCG32 state; neither is a number with a range. An EVEN `inc` is the one arguable case (PCG32 wants it odd, and prani_rng_new always emits odd), but that is generator quality, not a numeric range, and it produces no NaN, no empty buffer and no crash.
-- An upper bound on num_samples -- no measured overflow exists (nothing does arithmetic on it here; the port pushes into a growable vec), so any ceiling would be invented rather than derived. Allocation failure stays the allocator's contract.
 - Null/short-vec checks on apply_spectral_tilt's `samples` and set_formant_blend's 3-slot vecs -- pointer and length validity, not numeric range. Out of this milestone's scope; flagged rather than silently skipped.
 - Missing-field detection in from_json_str -- bayan returns 0 for an absent key, so a document omitting `phase` or `dcb_r` reads as 0.0 and passes the ranges. That is field PRESENCE, which ADR-0002 scoped to parse-level and 2.0.5 scopes to ranges; it belongs with the constructor-contract work, not here.
 
@@ -447,5 +462,5 @@ function that consumes it checks the voice's own derived values.
 - ~~The species tag stored on a CreatureVoice, at vocalize time.~~ **Reversed in 2.0.6, and the reasoning below was wrong.** 2.0.5 argued that species_params' DOCUMENTED fallthrough to the Fantasy row ('preserves totality since the Rust enum is #[non_exhaustive]') made an unknown species species.cyr's choice rather than voice.cyr's defect. `error_handling.cyr` then showed what that cost: `crvoice_new(99)` returned a voice and `crvoice_vocalize` rendered 2205 samples for it **as a success**. Totality in the table is not the same as accepting a tag the caller cannot have meant. The guard now sits at the point of use — `src/voice.cyr` and `src/stream.cyr` in the tables above — exactly where ADR-0006 puts a builder's range check, since crvoice_new returns a pointer with no error channel. Pinned as F13 in `tests/hardening.tcyr`. The tag is still separately range-checked in crvoice_from_json_str, where the deserializer contract (decision 1) applies.
 - SpeciesParams.resonance_seed -- an RNG seed. Every i64 bit pattern is a legal one, and pinned as accepted (a -1 seed round-trips) so a future tightening cannot creep in unnoticed.
 - Nyquist upper bounds on formant0..2 / bandwidth0..2 in the deserializer. The sample rate is not known at deserialize time, so any bound would be a guess; they are checked finite and > 0 only.
-- An upper bound on duration itself. A long call is a legitimate request; the only real failure mode is the num_samples overflow, which is guarded directly on the derived product rather than by inventing a maximum call length.
+- An upper bound on duration itself. A long call is a legitimate request, so the limit is on the derived sample count, one vec's worth, rather than an invented maximum call length. A longer render goes through `stream_new`.
 

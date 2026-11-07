@@ -1,6 +1,13 @@
 # vec.cyr — dynamic array (vector)
-# Usage: include "lib/alloc.cyr" then include "lib/vec.cyr"
+# Usage: include "lib/vec.cyr"
 # Requires alloc_init() called first.
+#
+# v6.6.6: SELF-SUFFICIENT. The usage line said "include lib/alloc.cyr THEN include lib/vec.cyr"
+# — a requirement written down for the caller instead of satisfied here, so `include
+# "lib/vec.cyr"` alone compiled with `warning: undefined function 'alloc'` (and 'alloc_via',
+# 'default_alloc') and TRAPPED at run time, an undefined fn being a ud2/SIGILL stub. Includes
+# are include-once, so a caller that already pulled alloc in pays nothing. CHANGELOG [6.6.6]
+include "lib/alloc.cyr"
 #
 # A Vec is a heap-allocated struct: { data_ptr, len, cap }
 # Elements are 8 bytes each (i64).
@@ -190,12 +197,11 @@ fn vec_remove(v, idx): i64 {
 #
 # `cmp(a, b)` returns <0 if a orders before b, 0 if equivalent, >0 if after —
 # the sign is all that is read, so a plain `a - b` works for i64 keys. It is
-# invoked through fncall2 (lib/fnptr.cyr, pulled in by lib/alloc.cyr:380), NOT
-# through the `callptr` builtin: callptr is a hard compile error on the cx
-# backend (src/backend/cx/emit.cyr ECALLIND), and because lib/vec.cyr is
-# auto-prepended into every build a callptr here would break every cx program
-# — even one that never sorts, since the error fires when the *uncalled* body
-# is emitted. fncall2 is what lib/alloc.cyr and lib/hashmap.cyr already use.
+# invoked through fncall2 (lib/fnptr.cyr, pulled in by lib/alloc.cyr), the same
+# indirect-call helper lib/alloc.cyr and lib/hashmap.cyr use. (This said callptr
+# was "a hard compile error on the cx backend" — true when written at v6.5.4,
+# false since v6.5.13, when cx's ECALLIND began emitting `callind` (0x69);
+# fncall2 stays for consistency, not necessity. CHANGELOG [6.6.10])
 #
 # All helpers below take the raw data pointer with lo/hi INCLUSIVE, and index
 # `data + i * 8` directly rather than going through vec_get/vec_set — those pay

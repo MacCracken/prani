@@ -55,7 +55,7 @@ var AT_EMPTY_PATH = 4096;          # 0x1000
 # warning, no fault. Consequence, measured on real ecb: `xrmdir` has never worked on
 # macOS-arm64 since it shipped at v6.5.2, and `sys_fchownat` returned -22 the first time
 # it was ever RUN there. The host suite cannot see any of this; only
-# vr01_syscall_wrappers.tcyr on hardware can.
+# tests/tcyr/crossos/syscall_wrappers.tcyr on hardware can.
 #ifdef CYRIUS_TARGET_MACOS
 var AT_REMOVEDIR = 128;            # 0x0080
 var AT_SYMLINK_NOFOLLOW = 32;      # 0x0020
@@ -110,7 +110,7 @@ fn sys_fchmodat(dirfd, path, mode, flags): i64 {
 # until a consumer needs it. The two-#ifdef form keeps syscall(280) out of the
 # Mach-O emit entirely (no "syscall not routed" warning). The arch-Linux ESYSXLAT
 # maps 280→88 (utimensat); only the Darwin syscall table lacks it.
-# See issues/2026-06-08-macho-arm-at-family-darwin-syscall-mappings.md, CHANGELOG [6.1.20].
+# See issues/archived/2026-06-08-macho-arm-at-family-darwin-syscall-mappings.md, CHANGELOG [6.1.20].
 fn sys_utimensat(dirfd, path, times, flags): i64 {
     #ifdef CYRIUS_TARGET_MACOS
     return 0 - 78;
@@ -118,6 +118,20 @@ fn sys_utimensat(dirfd, path, times, flags): i64 {
     #ifdef CYRIUS_TARGET_LINUX
     return syscall(SYS_UTIMENSAT, dirfd, path, times, flags);
     #endif
+    # DEFAULT ARM — no #else in this preprocessor, so a per-target chain that
+    # names only some targets falls off the end on every other one and the fn
+    # returns WHATEVER IS IN THE RETURN REGISTER. v6.6.6 gave the cx driver a
+    # CYRIUS_TARGET_CX predefine, which pulled this file into the cx build for
+    # the first time; both arms above then matched nothing and
+    # `sys_utimensat(AT_FDCWD, "/missing", 0, 0)` answered 0 — a FAILED file-time
+    # set reading as SUCCESS. -ENOSYS is the honest answer on any target this
+    # chain does not name (cx: cxvm translates only read/write/open/close/lseek/exit and
+    # host-serves getrandom/clock_gettime — programs/cxvm.cyr's op-0x70 dispatch is the
+    # authority; docs/platform-status.md states the guest contract. CHANGELOG [6.6.10]).
+    # Deliberately a trailing default rather than one more named arm, so an
+    # eighth target inherits the error instead of the garbage.
+    # CHANGELOG [6.6.6]
+    return 0 - 38;
 }
 
 # ================================================================
@@ -227,9 +241,23 @@ fn sys_getppid(): i64 {
     return syscall(SYS_GETPPID);
 }
 
-# Send a signal to a process by PID.
+# Send a signal to a process by PID (pid > 0), to a process group (pid < -1 is -pgid, pid 0
+# is the caller's own group), or to every process the caller may signal (pid -1).
+#
+# macOS: Darwin's kill is kill(pid, signum, posix) — one parameter more than Linux — and the
+# 2-arg form left `posix` to whatever the third argument register (rdx / x2) held from earlier
+# code. posix only matters for pid <= 0: it decides whether a broadcast skips the caller and
+# whether an empty group answers EPERM or ESRCH, so a stale value made kill(-pgid) — the tree
+# kill a deadline ends with — answer differently run to run. Pass 0 explicitly (the historic
+# BSD behaviour). Not memory-unsafe (posix is a value, not a pointer); it was non-determinism.
+# CHANGELOG [6.6.10]
 fn sys_kill(pid, sig): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return syscall(SYS_KILL, pid, sig, 0);
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_KILL, pid, sig);
+    #endif
 }
 
 # Create a new session and become its leader. Detaches from the
@@ -244,11 +272,27 @@ fn sys_waitpid(pid, status_ptr, options): i64 {
     return syscall(SYS_WAIT4, pid, status_ptr, options, 0);
 }
 
+# ⚠ v6.6.5 — the LINUX-ONLY wrappers below (pidfd, seccomp, execveat, landlock, mount,
+# umount2, reboot, rt_sigprocmask, signalfd, epoll, timerfd, setresuid/gid) all grew an
+# in-body `#ifdef CYRIUS_TARGET_MACOS` decline, the shape sys_utimensat has used since
+# v6.1.20. WHY: each of them is allow-listed in tests/gates/platform/macho_route_parity.sh
+# as "no Darwin peer exists", yet every one still EMITTED its unrouted number on a macOS
+# build — so a plain `include "lib/syscalls.cyr"` printed **18 "syscall N not routed"**
+# warnings, which is the wolf-cry that gets a REAL one scrolled past (the exact v6.5.43
+# lesson: a Mach-O routing warning fired 470 times and was ignored). It was also a live
+# fail-mode, not just noise: an unrouted number reaches Darwin unclassed and SIGSYS-kills
+# the process, so `if (r < 0)` never ran. Declining returns -78 (Darwin ENOSYS) instead.
+# CHANGELOG [6.6.5]
 # pidfd_open(pid, flags) — a file descriptor for `pid` that becomes readable when
-# the process exits. Lets the async runtime await a child on the epoll reactor
-# without blocking (Linux 5.3+). v6.4.36 (P2 — async subprocess).
+# the process exits. Lets the async runtime await a child on the epoll reactor without
+# blocking (Linux 5.3+; v6.4.36). Darwin has no pidfd, so the macOS arm declines.
 fn sys_pidfd_open(pid, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_PIDFD_OPEN, pid, flags);
+    #endif
 }
 
 # Wait-status decoding macros — same shape across both arches
@@ -300,10 +344,24 @@ fn sys_setgroups(size, list): i64 { return syscall(SYS_SETGROUPS, size, list); }
 # Drop real / effective / saved UID atomically. Firecracker
 # jailer pattern: pre-execve, per-VM UID drop. Pairs with
 # sys_setresgid (gid first per Linux order-of-ops). Async-signal-safe.
-fn sys_setresuid(ruid, euid, suid): i64 { return syscall(SYS_SETRESUID, ruid, euid, suid); }
+fn sys_setresuid(ruid, euid, suid): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_SETRESUID, ruid, euid, suid);
+    #endif
+}
 # Drop real / effective / saved GID atomically. Pairs with
 # sys_setresuid. Async-signal-safe.
-fn sys_setresgid(rgid, egid, sgid): i64 { return syscall(SYS_SETRESGID, rgid, egid, sgid); }
+fn sys_setresgid(rgid, egid, sgid): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_SETRESGID, rgid, egid, sgid);
+    #endif
+}
 
 # ================================================================
 # Sandbox / privilege controls (kavach v5.11.0 surface)
@@ -333,7 +391,12 @@ fn sys_prctl(option, arg2, arg3, arg4, arg5): i64 {
 # or SECCOMP_SET_MODE_STRICT (0). `args_ptr` points at the filter
 # program (struct sock_fprog).
 fn sys_seccomp(op, flags, args_ptr): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_SECCOMP, op, flags, args_ptr);
+    #endif
 }
 
 # execve via dirfd + pathname. Used post-clone to AT_SYMLINK_NOFOLLOW
@@ -341,7 +404,12 @@ fn sys_seccomp(op, flags, args_ptr): i64 {
 # AT_EMPTY_PATH (0x1000) for fd-as-path semantics + AT_SYMLINK_NOFOLLOW
 # (0x100). CLOEXEC must be cleared in child.
 fn sys_execveat(dirfd, pathname, argv_ptr, envp_ptr, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_EXECVEAT, dirfd, pathname, argv_ptr, envp_ptr, flags);
+    #endif
 }
 
 # Landlock — kernel-enforced unprivileged sandbox (Linux 5.13+).
@@ -349,21 +417,36 @@ fn sys_execveat(dirfd, pathname, argv_ptr, envp_ptr, flags): i64 {
 # lib/security.cyr for the struct layout + access-FS flag
 # constants. Returns ruleset fd or -errno.
 fn sys_landlock_create_ruleset(attr_ptr, size, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_LANDLOCK_CREATE_RULESET, attr_ptr, size, flags);
+    #endif
 }
 
 # Add a rule to a ruleset created by sys_landlock_create_ruleset.
 # `rule_type` is LANDLOCK_RULE_PATH_BENEATH (1) or
 # LANDLOCK_RULE_NET_PORT (2). Returns 0 or -errno.
 fn sys_landlock_add_rule(ruleset_fd, rule_type, rule_attr, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, rule_type, rule_attr, flags);
+    #endif
 }
 
 # Apply a ruleset to the calling thread (and children, via
 # clone(2) inheritance). Once called, restrictions cannot be
 # relaxed by the same thread. Returns 0 or -errno.
 fn sys_landlock_restrict_self(ruleset_fd, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, flags);
+    #endif
 }
 
 # ================================================================
@@ -374,13 +457,303 @@ fn sys_landlock_restrict_self(ruleset_fd, flags): i64 {
 # (mount path), `fstype` (e.g. "ext4", "tmpfs", "proc"), `flags`
 # (MS_*), `data` (fs-specific options string or 0).
 fn sys_mount(source, target, fstype, flags, data): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_MOUNT, source, target, fstype, flags, data);
+    #endif
 }
 
 # Unmount a filesystem. `flags` accepts MNT_FORCE (1), MNT_DETACH (2),
 # MNT_EXPIRE (4), UMOUNT_NOFOLLOW (8).
 fn sys_umount2(target, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_UMOUNT2, target, flags);
+    #endif
+}
+
+# ================================================================
+# Namespaces, root, capabilities, cross-process memory (v6.6.8)
+# ================================================================
+# ⛔ WHY THESE EXIST. None of these calls had a name in either Linux peer, so kavach, takumi,
+# shakti and mirshi each wrote a number — and on aarch64 every number they could write ran a
+# DIFFERENT call, silently: x86 161 (chroot) was sethostname, 272 (unshare) kcmp, 155
+# (pivot_root) getpgid, 125/126 (capget/capset) sched_get_priority_max/min; the native 51/41
+# were unreachable behind the socket compat rows. Both peers now spell the x86 numbers and
+# ESYSXLAT renumbers them (src/backend/aarch64/emit.cyr).
+# ⚠ Darwin has none of these (its chroot is not offered: no consumer needs it on macOS), so
+# each declines with -78 (Darwin ENOSYS) and the number never reaches the Mach-O emit — the
+# sys_memfd_create shape. The PE and agnos peers carry -38 stubs. CHANGELOG [6.6.8]
+
+# Move this process into new namespaces. `flags` is CLONE_NEW* (CLONE_NEWNS 0x20000,
+# CLONE_NEWUSER 0x10000000, CLONE_NEWPID 0x20000000, CLONE_NEWNET 0x40000000, ...).
+# `sys_unshare(0)` is a valid no-op that returns 0.
+fn sys_unshare(flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_UNSHARE, flags);
+    #endif
+}
+
+# Change the root directory to `path` (a NUL-terminated cstr). Needs CAP_SYS_CHROOT; the
+# path is resolved first, so a missing path is -ENOENT for every caller.
+fn sys_chroot(path): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_CHROOT, path);
+    #endif
+}
+
+# Make `new_root` the root mount and move the old root to `put_old`. Needs CAP_SYS_ADMIN in
+# the mount namespace's user namespace (unprivileged: -EPERM before any path is read).
+fn sys_pivot_root(new_root, put_old): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_PIVOT_ROOT, new_root, put_old);
+    #endif
+}
+
+# Read a thread's capability sets. `hdr` is struct __user_cap_header_struct {u32 version;
+# i32 pid} (version 0x20080522 = _LINUX_CAPABILITY_VERSION_3, pid 0 = self); `data` is two
+# struct __user_cap_data_struct {u32 effective, permitted, inheritable} (24 bytes), or 0 to
+# PROBE: a bad version with data 0 returns 0 and writes the kernel's preferred version into
+# hdr.version.
+fn sys_capget(hdr, data): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_CAPGET, hdr, data);
+    #endif
+}
+
+# Set the calling thread's capability sets (same `hdr` / `data` layout as sys_capget).
+fn sys_capset(hdr, data): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_CAPSET, hdr, data);
+    #endif
+}
+
+# Copy from another process's memory: `local_iov`/`remote_iov` are arrays of struct iovec
+# {void *base; u64 len}. Returns the byte count copied or -errno. `flags` must be 0.
+fn sys_process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_PROCESS_VM_READV, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    #endif
+}
+
+# Copy into another process's memory (same shape as sys_process_vm_readv).
+fn sys_process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_PROCESS_VM_WRITEV, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+    #endif
+}
+
+# Create a filesystem node relative to `dirfd` (AT_FDCWD for the cwd). `mode` carries the
+# type bits: S_IFIFO 0o010000 (4096) makes a FIFO — `sys_mknodat(AT_FDCWD, p, 4096 | 0600,
+# 0)` is mkfifo(3); S_IFREG/S_IFCHR/S_IFBLK the rest (devices need CAP_MKNOD). `dev` is the
+# device number, 0 otherwise.
+# ⚠ Darwin declines (-78): no Mach-O row exists for it, and a composed arm (over mknod or
+# mkfifo) waits for a consumer that needs one there.
+fn sys_mknodat(dirfd, path, mode, dev): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_MKNODAT, dirfd, path, mode, dev);
+    #endif
+}
+
+# ================================================================
+# Extended attributes, fchown, statx, getrlimit (6.6.12)
+# ================================================================
+# ⛔ WHY THESE EXIST. None had a name in either Linux peer, so consumers wrote numbers — and on
+# ELF-aarch64 NINE of the fourteen native numbers never reached the kernel as themselves: the
+# x86-compat rows in ESYSXLAT claim 5/6/7/9/10/11/12/16/55 as sources, so raw lgetxattr (9) ran
+# mmap, fgetxattr (10) mprotect, llistxattr (12) brk and fchown (55) getsockopt (measured under
+# `qemu-aarch64 -strace`). kriya returned -ENOSYS by hand for the four xattr calls it needed on
+# aarch64 and routed fchown through fchownat. The aarch64 peer spells the family through the
+# private alias band (1000 + native), renumbered at the tail of ESYSXLAT's ELF arm.
+# ⚠ DARWIN: fchown and getrlimit are pure renumbers (Darwin 123 / 194) and work on both Macs.
+# The xattr family and statx DECLINE with -78 (Darwin ENOSYS): Darwin's getxattr/setxattr take
+# two extra arguments (position, options), and Darwin has no statx — a bare renumber would pass
+# garbage in those slots. The PE and agnos peers decline all fifteen with -38. CHANGELOG [6.6.12]
+#
+# `name` is a NUL-terminated "namespace.attr" cstr ("user.foo", "security.selinux", …). Every
+# call returns -errno on failure; ENODATA is -61 (no such attribute) and EOPNOTSUPP -95 (the
+# filesystem stores no xattrs of that namespace).
+
+# Set attribute `name` on the file at `path` (following a final symlink) to `size` bytes at
+# `value`. `flags`: 0, XATTR_CREATE (1, fail if it exists) or XATTR_REPLACE (2, fail if absent).
+fn sys_setxattr(path, name, value, size, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_SETXATTR, path, name, value, size, flags);
+    #endif
+}
+
+# sys_setxattr on the symlink ITSELF rather than its target.
+fn sys_lsetxattr(path, name, value, size, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_LSETXATTR, path, name, value, size, flags);
+    #endif
+}
+
+# sys_setxattr on an open descriptor.
+fn sys_fsetxattr(fd, name, value, size, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_FSETXATTR, fd, name, value, size, flags);
+    #endif
+}
+
+# Read attribute `name` of the file at `path` into `value` (capacity `size`). Returns the value
+# length. `size` 0 PROBES: returns the length without copying. -ERANGE (-34) when `size` is
+# too small.
+fn sys_getxattr(path, name, value, size): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_GETXATTR, path, name, value, size);
+    #endif
+}
+
+# sys_getxattr on the symlink ITSELF rather than its target.
+fn sys_lgetxattr(path, name, value, size): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_LGETXATTR, path, name, value, size);
+    #endif
+}
+
+# sys_getxattr on an open descriptor.
+fn sys_fgetxattr(fd, name, value, size): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_FGETXATTR, fd, name, value, size);
+    #endif
+}
+
+# List the attribute names of the file at `path` into `list` (capacity `size`) as consecutive
+# NUL-terminated names. Returns the byte length; `size` 0 probes for it.
+fn sys_listxattr(path, list, size): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_LISTXATTR, path, list, size);
+    #endif
+}
+
+# sys_listxattr on the symlink ITSELF rather than its target.
+fn sys_llistxattr(path, list, size): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_LLISTXATTR, path, list, size);
+    #endif
+}
+
+# sys_listxattr on an open descriptor.
+fn sys_flistxattr(fd, list, size): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_FLISTXATTR, fd, list, size);
+    #endif
+}
+
+# Remove attribute `name` from the file at `path`. -ENODATA (-61) when it is absent.
+fn sys_removexattr(path, name): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_REMOVEXATTR, path, name);
+    #endif
+}
+
+# sys_removexattr on the symlink ITSELF rather than its target.
+fn sys_lremovexattr(path, name): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_LREMOVEXATTR, path, name);
+    #endif
+}
+
+# sys_removexattr on an open descriptor.
+fn sys_fremovexattr(fd, name): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_FREMOVEXATTR, fd, name);
+    #endif
+}
+
+# Change the owner and group of an open descriptor. -1 for `uid` or `gid` leaves that one
+# unchanged, so `sys_fchown(fd, 0 - 1, 0 - 1)` is a permitted no-op for any caller. Real on
+# every POSIX target, both Macs included (Darwin fchown 123).
+fn sys_fchown(fd, uid, gid): i64 {
+    return syscall(SYS_FCHOWN, fd, uid, gid);
+}
+
+# Extended stat: fill the 256-byte struct statx at `buf` for `path` relative to `dirfd`
+# (AT_FDCWD = -100). `flags` takes AT_SYMLINK_NOFOLLOW (0x100) / AT_EMPTY_PATH (0x1000);
+# `mask` names the wanted fields (STATX_BASIC_STATS 0x7FF, STATX_BTIME 0x800). Layout, per
+# include/uapi/linux/stat.h: u32 stx_mask @0, u32 stx_blksize @4, u32 stx_nlink @16,
+# u32 stx_uid @20, u32 stx_gid @24, u16 stx_mode @28, u64 stx_ino @32, u64 stx_size @40.
+# Linux-only: declines with -78 on macOS (Darwin has no statx; use sys_stat).
+fn sys_statx(dirfd, path, flags, mask, buf): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_STATX, dirfd, path, flags, mask, buf);
+    #endif
+}
+
+# Read resource limit `resource` into `rlim`, a 16-byte struct rlimit {u64 cur; u64 max}.
+# ⚠ THE RESOURCE NUMBERS ARE PER-OS: 0..4 (CPU, FSIZE, DATA, STACK, CORE) agree on Linux and
+# Darwin, but RLIMIT_NOFILE is 7 on Linux and 8 on Darwin, and RLIMIT_AS 9 vs 5. So is
+# "unlimited": RLIM_INFINITY is all-ones on Linux and 0x7FFFFFFFFFFFFFFF on Darwin.
+fn sys_getrlimit(resource, rlim): i64 {
+    return syscall(SYS_GETRLIMIT, resource, rlim);
 }
 
 # Flush all filesystem buffers to disk. Returns 0 (always).
@@ -392,7 +765,12 @@ fn sys_sync(): i64 {
 # Reboot / halt / power-off. `cmd` is LINUX_REBOOT_CMD_*; requires
 # CAP_SYS_BOOT.
 fn sys_reboot(cmd): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_REBOOT, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, cmd, 0);
+    #endif
 }
 
 # ================================================================
@@ -402,14 +780,24 @@ fn sys_reboot(cmd): i64 {
 # Change the calling thread's signal mask. `how` is SIG_BLOCK,
 # SIG_UNBLOCK, or SIG_SETMASK. `set` and `oldset` point at sigset_t.
 fn sys_sigprocmask(how, set, oldset): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_RT_SIGPROCMASK, how, set, oldset, 8);
+    #endif
 }
 
 # Create / update a signalfd: an fd that becomes readable when
 # any signal in `mask` is pending. Returns fd (or `fd` if
 # updating). `flags` accepts SFD_NONBLOCK | SFD_CLOEXEC.
 fn sys_signalfd(fd, mask, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_SIGNALFD4, fd, mask, 8, flags);
+    #endif
 }
 
 # ================================================================
@@ -419,14 +807,24 @@ fn sys_signalfd(fd, mask, flags): i64 {
 # Create an epoll instance fd via epoll_create1; EPOLL_CLOEXEC
 # ensures close-on-exec.
 fn sys_epoll_create(): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_EPOLL_CREATE1, EPOLL_CLOEXEC);
+    #endif
 }
 
 # Modify (add/remove/update) an fd in an epoll instance. `op` is
 # EPOLL_CTL_ADD (1) / DEL (2) / MOD (3); `event` is a struct
 # epoll_event* (8-byte events bitmask + 8-byte data).
 fn sys_epoll_ctl(epfd, op, fd, event): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_EPOLL_CTL, epfd, op, fd, event);
+    #endif
 }
 
 # ================================================================
@@ -436,14 +834,24 @@ fn sys_epoll_ctl(epfd, op, fd, event): i64 {
 # Create a timer fd backed by `clockid` (CLOCK_REALTIME, _MONOTONIC,
 # etc.). `flags` accepts TFD_NONBLOCK | TFD_CLOEXEC. Returns fd.
 fn sys_timerfd_create(clockid, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_TIMERFD_CREATE, clockid, flags);
+    #endif
 }
 
 # Arm / disarm a timerfd. `new_value` is itimerspec (struct {
 # it_interval, it_value }); each spec is timespec (sec, nsec).
 # `flags` accepts TFD_TIMER_ABSTIME.
 fn sys_timerfd_settime(fd, flags, new_value, old_value): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_TIMERFD_SETTIME, fd, flags, new_value, old_value);
+    #endif
 }
 
 # ================================================================
@@ -456,23 +864,49 @@ fn sys_timerfd_settime(fd, flags, new_value, old_value): i64 {
 # Returns bytes written into buf, 0 at end-of-dir, -errno on error.
 # Used by drm device-node enumeration; high-level fs::list_dir
 # wraps this for the typical case.
+#
+# macOS: declines with -ENOSYS (-78) and issues no syscall. The Mach-O backends route the
+# number to Darwin getdirentries64(fd, buf, nbytes, off_t *basep), which has a FOURTH
+# parameter and it is an OUT-pointer: through this 3-arg wrapper xnu wrote the 8-byte seek
+# position to whatever address the fourth argument register (r10 / x3) still held — measured on
+# both Macs zeroing a live 8-byte variable. The records it returns are not linux_dirent64
+# either (d_namlen u16 at 18, d_type at 20, d_name at 21, against d_type 18 / d_name 19 here),
+# so a caller parsing them read shifted names. lib/fs.cyr's dir_list has a Darwin lister that
+# passes basep and parses the Darwin layout; use that for a portable directory walk.
+# CHANGELOG [6.6.10]
 fn sys_getdents64(fd, buf, count): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_GETDENTS64, fd, buf, count);
+    #endif
 }
 
-# Fill `buf` with `len` bytes from the kernel CSPRNG. `flags`
+# Fill up to `len` bytes of `buf` from the kernel CSPRNG. `flags`
 # is GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE (see
-# lib/random.cyr for constants). Returns bytes filled or -errno.
+# lib/random.cyr for constants). Returns bytes filled (which may be
+# FEWER than `len` — a short read, as on Linux) or -errno. Use
+# random_bytes() to fill a whole buffer; it loops over short reads.
 #
 # macOS portability (v6.0.75): on Mach-O the backend ESYSXLAT rewrites the
 # getrandom syscall (318/278) to Darwin getentropy (500), which fills `len`
-# bytes (≤256) and returns 0 on success / -errno on failure — NOT the byte
+# bytes and returns 0 on success / -errno on failure — NOT the byte
 # count Linux getrandom returns. Normalize that 0→len here so every caller
 # gets the Linux contract on both platforms. This is a no-op on Linux:
 # getrandom only returns 0 when len==0 (otherwise it returns a positive
 # count or -errno), so `r==0 → return len` already equals `return r` there.
-# (getentropy's 256-byte cap is ample for TLS's ≤32-byte requests.)
+#
+# getentropy REFUSES any request above 256 bytes (EINVAL — it does not short-read), so
+# before 6.6.10 sys_getrandom(buf, 257, 0) was -22 on both Macs and random_bytes() failed
+# for every size above 256: sigil's RSA-3072/4096 blinding draw (384/512 B, on every private
+# key operation) and LUKS keygen above 256 B failed closed there. Clamping to 256 turns the
+# refusal into a Linux-shaped short read, which random_bytes (and any Linux-correct caller)
+# already loops over. CHANGELOG [6.6.10]
 fn sys_getrandom(buf, len, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    if (len > 256) { len = 256; }
+    #endif
     var r = syscall(SYS_GETRANDOM, buf, len, flags);
     if (r == 0) { return len; }
     return r;
@@ -518,7 +952,7 @@ fn sys_getpeername(fd, addr, addrlen): i64 {
 
 # getsockname(fd, addr, addrlen) — the LOCAL address of a socket. 0 / -errno.
 # Succeeds on an unconnected socket (unlike getpeername), which is what
-# vr01_getpeername_xlat.tcyr uses to prove 51 and 52 are not swapped.
+# tests/tcyr/crossos/getpeername_xlat.tcyr uses to prove 51 and 52 are not swapped.
 fn sys_getsockname(fd, addr, addrlen): i64 {
     return syscall(SYS_GETSOCKNAME, fd, addr, addrlen);
 }
@@ -546,6 +980,166 @@ fn sys_recvmsg(fd, msghdr, flags): i64 {
     return syscall(SYS_RECVMSG, fd, msghdr, flags);
 }
 
+# ── v6.6.5: the SEND side of the socket band, the truncate pair, memfd and the two
+# scheduler primitives. Until now none of these had a NAME in either Linux peer, so a
+# consumer had to hardcode the x86 number — and an unnamed number is invisible to the
+# ELF-aarch64 raw-literal diagnostic, whose table is derived from names declared in BOTH
+# peers. Measured under qemu-aarch64 with the 6.6.4 compiler: raw 46 ran ftruncate, raw 77
+# ran tee, raw 319 was ENOSYS, raw 44 ran fstatfs. Filed from thoth (its Wayland window had
+# no pixel buffer on aarch64 Linux); jalwa, puka, cyrius-doom, mishran, setu, mirshi,
+# kavach and yo carry the same literals. CHANGELOG [6.6.5]
+
+# Send with ancillary data (SCM_RIGHTS fd-passing is the load-bearing use: a Wayland
+# client hands the compositor its shared-memory buffer fd this way).
+fn sys_sendmsg(fd, msghdr, flags): i64 {
+    return syscall(SYS_SENDMSG, fd, msghdr, flags);
+}
+
+# Send to an explicit destination address (the datagram peer of sys_recvfrom).
+fn sys_sendto(fd, buf, len, flags, dstaddr, dstaddrlen): i64 {
+    return syscall(SYS_SENDTO, fd, buf, len, flags, dstaddr, dstaddrlen);
+}
+
+# Set an open file's length by descriptor. Sizing a memfd before mmap is the common use.
+fn sys_ftruncate(fd, length): i64 {
+    return syscall(SYS_FTRUNCATE, fd, length);
+}
+
+# Set a file's length by path.
+fn sys_truncate(path, length): i64 {
+    return syscall(SYS_TRUNCATE, path, length);
+}
+
+# ── v6.6.6: statfs / fstatfs — filesystem capacity for a PATH or an open fd.
+#
+# ⛔ WHY THESE ARRIVE ONLY NOW, AND WHAT IT COST. statfs had no NAME in either Linux peer,
+# so the one consumer in the ecosystem (yukti's `filesystem_usage`) had to hardcode a raw
+# number per arch — and its aarch64 arm picked the NATIVE 43, which ESYSXLAT's x86-compat
+# `accept 43→202` row silently reissued as **accept(2)**. Traced under `qemu-aarch64
+# -strace`: `accept(6293449, 0x7f…, [0]) = -1 errno=14`, so every ARM host answered
+# "statfs failed: errno 14" from v6.2.10 to here. A nameless syscall is also structurally
+# invisible to the raw-literal diagnostic (its table is derived from names declared in BOTH
+# peers), so nothing warned. CHANGELOG [6.6.6]
+#
+# ⚠ THE BUFFER AND THE FIELD OFFSETS ARE PER-OS — read them through STATFS_*, never a
+# hardcoded Linux offset. Linux's struct statfs is 120 bytes with an 8-byte f_type first;
+# Darwin's struct statfs64 is 2168 bytes and starts with a **32-bit** f_bsize. Both layouts
+# were read off real hardware (pi + the x86 host; ecb + ach), not from a header quote.
+# STATFS_BUFSZ is the max of both, the same "one buffer contract" STAT_BUFSZ = 144 uses.
+#ifdef CYRIUS_TARGET_MACOS
+enum Statfs {
+    STATFS_BSIZE = 0;       # uint32 — use statfs_bsize(), NOT load64
+    STATFS_BLOCKS = 8;
+    STATFS_BFREE = 16;
+    STATFS_BAVAIL = 24;
+    STATFS_BUFSZ = 2176;    # sizeof(struct statfs64) = 2168, rounded to 8
+}
+#endif
+#ifndef CYRIUS_TARGET_MACOS
+enum Statfs {
+    STATFS_BSIZE = 8;       # f_type occupies 0..7 on Linux
+    STATFS_BLOCKS = 16;
+    STATFS_BFREE = 24;
+    STATFS_BAVAIL = 32;
+    STATFS_BUFSZ = 2176;    # Linux needs 120; the contract is the max of both peers
+}
+#endif
+
+# Filesystem statistics for a path. `buf` must be STATFS_BUFSZ bytes.
+fn sys_statfs(path, buf): i64 {
+    return syscall(SYS_STATFS, path, buf);
+}
+
+# Filesystem statistics for an already-open descriptor.
+fn sys_fstatfs(fd, buf): i64 {
+    return syscall(SYS_FSTATFS, fd, buf);
+}
+
+# f_bsize out of a filled statfs buffer, at the right WIDTH for this target.
+# ⚠ This is not a convenience — it is the trap. Darwin's f_bsize is uint32 with f_iosize
+# packed directly above it, so `load64(buf + STATFS_BSIZE)` on macOS returns
+# `f_bsize | (f_iosize << 32)` — 4503599627374592 for a 4096-byte block on a 1 MiB-iosize
+# volume, which then multiplies straight into a capacity figure. Linux's is a full 8 bytes.
+fn statfs_bsize(buf): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return load32(buf + STATFS_BSIZE);
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return load64(buf + STATFS_BSIZE);
+    #endif
+}
+
+# Create an anonymous in-memory file. `flags` accepts MFD_CLOEXEC (1) | MFD_ALLOW_SEALING (2).
+# ⚠ Darwin has NO memfd_create — the nearest thing is shm_open, a different API with a
+# name in a global namespace, not a bare fd. Declining with -78 (Darwin ENOSYS) keeps the
+# number out of the Mach-O emit entirely, so neither backend warns "syscall 319 not
+# routed"; a shm_open-based emulation waits for a consumer that needs it. Same in-body
+# two-arm shape as sys_utimensat above.
+fn sys_memfd_create(name, flags): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 0 - 78;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_MEMFD_CREATE, name, flags);
+    #endif
+}
+
+# Sleep for a `struct timespec` ({tv_sec, tv_nsec} at +0/+8). `rem` receives the unslept
+# remainder on a signal, or 0 to ignore it.
+# ⚠ Darwin has no nanosleep syscall either, so the macOS arm composes it from poll(NULL,
+# 0, ms) — the same primitive EMACHO_NANOSLEEP_X86 reroutes raw 35 to, and the same one
+# lib/chrono.cyr's portable sleep_ms uses. Sub-millisecond resolution is lost there. The
+# bare 7 is the sanctioned "x86 number + an ESYSXLAT entry" spelling: both Mach-O backends
+# route 7 → BSD poll 230, so one line serves x86-macOS and arm64-macOS.
+# The timespec is checked the way Linux checks it (tv_sec < 0, or tv_nsec outside
+# 0..999999999: -22 EINVAL, no sleep) and the ms is clamped to INT_MAX: poll's timeout is a
+# C int where a negative value means "no limit", so until 6.6.20 a negative tv_sec, or a
+# tv_nsec of -1 ms or less, slept for ever (cyrius `/` truncates, so tv_nsec -1 slept 0 ms),
+# and an over-wide request slept for its low 32 bits. CHANGELOG [6.6.20]
+fn sys_nanosleep(req, rem): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    var sec = load64(req);
+    var nsec = load64(req + 8);
+    if (sec < 0) { return 0 - 22; }                 # EINVAL, as Linux
+    if (nsec < 0) { return 0 - 22; }
+    if (nsec > 999999999) { return 0 - 22; }
+    var ms = 0x7FFFFFFF;
+    if (sec < 2147483) { ms = sec * 1000 + nsec / 1000000; }   # 2147483 s = INT_MAX ms
+    return syscall(7, 0, 0, ms);
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_NANOSLEEP, req, rem);
+    #endif
+}
+
+# Yield the remainder of this thread's timeslice to the scheduler.
+# ⚠ Darwin has no sched_yield syscall (it is a libsystem call over swtch_pri), so the
+# macOS arm uses a zero-timeout poll — a real trip through the kernel, which is what a
+# yield buys. ⚠ x86 24 is NOT routed on ELF-aarch64 on purpose: aarch64's native 24 IS
+# dup3, so a compat row for it would break every raw dup3. That is why this wrapper exists
+# at all — spell the name and the peer picks 24 or 124 correctly.
+fn sys_sched_yield(): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return syscall(7, 0, 0, 0);
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return syscall(SYS_SCHED_YIELD);
+    #endif
+}
+
+# Reposition the fd offset (whence 0=SET / 1=CUR / 2=END); returns the new offset.
+# ⚠ THIS IS A SYMMETRY FIX, NOT A NEW CAPABILITY. `SYS_LSEEK` is declared in all five
+# peers (Linux #8, aarch64 #62, macOS #8, agnos #58, Windows #8 → SetFilePointerEx) and
+# `lib/io.cyr`'s `xlseek` has always been the portable spelling — but `sys_lseek` itself
+# existed on the agnos and Windows peers ONLY, so a consumer that spelled the name built
+# on two targets and failed to resolve on the other three. The v6.6.5 naming pass shipped
+# six of the seven asymmetries the premise-check found and dropped this one silently;
+# round-2 review caught it. No per-target branch: unlike nanosleep/sched_yield, Darwin has
+# a real lseek and the peer's own number reaches it. CHANGELOG [6.6.5]
+fn sys_lseek(fd, off, whence): i64 {
+    return syscall(SYS_LSEEK, fd, off, whence);
+}
+
 # Bind a socket to a local address.
 fn sys_bind(fd, sockaddr, addrlen): i64 {
     return syscall(SYS_BIND, fd, sockaddr, addrlen);
@@ -554,6 +1148,98 @@ fn sys_bind(fd, sockaddr, addrlen): i64 {
 # Mark a socket as accepting connections.
 fn sys_listen(fd, backlog): i64 {
     return syscall(SYS_LISTEN, fd, backlog);
+}
+
+# ================================================================
+# fcntl + the O_NONBLOCK toggle (v6.6.8)
+# ================================================================
+# ⛔ WHY. There was no fcntl wrapper, so every consumer that wanted a non-blocking fd wrote
+# `syscall(SYS_FCNTL, fd, 4, fl | <O_NONBLOCK>)` and re-derived the flag at the call site —
+# and the Linux value, 2048, is Darwin's O_EXCL, which F_SETFL ignores: on macOS the fd
+# stayed BLOCKING (sigil's bounded capture drain, daimon, cyim-lsp, cyrius-doom). The only
+# exported toggle was net.cyr's socket-named sock_set_nonblocking.
+# ⚠ THE FLAG IS PRIVATE AND PER-TARGET, NOT THE PUBLIC `O_NONBLOCK`. Enum constants are
+# global and the LAST definition wins retroactively, program-wide: yukti <= 2.3.12's
+# `enum EjectConst { O_NONBLOCK = 2048; }` turned every O_NONBLOCK in a macOS program into
+# O_EXCL, including code compiled before it. A wrapper built on the public name inherits
+# whatever a fold redefines it to; the literal below cannot be poisoned.
+# The command numbers are the same on Linux (x86_64 and aarch64) and Darwin.
+# CHANGELOG [6.6.8]
+enum FcntlCmd {
+    F_DUPFD = 0;
+    F_GETFD = 1;
+    F_SETFD = 2;
+    F_GETFL = 3;
+    F_SETFL = 4;
+}
+# The one F_SETFD descriptor flag.
+enum FdFlag {
+    FD_CLOEXEC = 1;
+}
+
+# fcntl(2): `cmd` is F_GETFD / F_SETFD / F_GETFL / F_SETFL / ... (Darwin adds F_GETPATH = 50).
+# Returns the command's result, or -errno.
+fn sys_fcntl(fd, cmd, arg): i64 {
+    return syscall(SYS_FCNTL, fd, cmd, arg);
+}
+
+# The O_NONBLOCK bit of THIS target (Darwin 4, Linux 2048), private so no enum can poison it.
+fn _fd_o_nonblock(): i64 {
+    #ifdef CYRIUS_TARGET_MACOS
+    return 4;
+    #endif
+    #ifndef CYRIUS_TARGET_MACOS
+    return 2048;
+    #endif
+}
+
+# Make `fd` non-blocking. Returns the SAVED status flags (>= 0) to hand to fd_restore_flags,
+# or -errno if F_GETFL or F_SETFL failed (a failed F_SETFL is reported, never swallowed).
+fn fd_set_nonblocking(fd): i64 {
+    var fl = sys_fcntl(fd, 3, 0);                   # F_GETFL
+    if (fl < 0) { return fl; }
+    var r = sys_fcntl(fd, 4, fl | _fd_o_nonblock()); # F_SETFL
+    if (r < 0) { return r; }
+    return fl;
+}
+
+# Restore the status flags fd_set_nonblocking saved. Returns 0 or -errno.
+fn fd_restore_flags(fd, saved): i64 {
+    return sys_fcntl(fd, 4, saved);                 # F_SETFL
+}
+
+# Wait until `fd` is readable (`want_write` == 0) or writable (`want_write` != 0), for at most
+# `timeout_ms` milliseconds. Returns 1 when it is ready — INCLUDING an error or a hang-up
+# (POLLERR / POLLHUP), so the caller's next read or write reports what happened — 0 when the
+# timeout passed first, or -errno (-4 EINTR: the caller re-checks its clock and waits again;
+# -9 EBADF for an fd that is not open, which poll reports as POLLNVAL rather than an error).
+# `timeout_ms` < 0 waits indefinitely; a value above INT_MAX is clamped to it.
+# A negative fd (a failed socket()/accept() result) or one past INT_MAX is -9 EBADF at once:
+# poll(2) IGNORES an entry whose fd is < 0 (revents 0), so passed through it would read as a
+# timeout — or, with timeout_ms < 0, never return — and store32 would truncate a wide one.
+# One raw poll(2) (7): ESYSXLAT makes it ppoll(73) with a timespec on aarch64-Linux and BSD
+# poll(230) on both Mach-O backends; POLLIN 1 / POLLOUT 4 / POLLNVAL 0x20 are the same on Linux
+# and Darwin. Literals, not names: a program-wide enum can redefine a public constant.
+# The stdlib's other waits do not fit a caller-owned fd: process.cyr's _proc_poll_in is
+# read-only and private, net.cyr's WSAPoll is the Windows connect wait, and
+# async_await_readable_ms is read-only (it is built on this one on every host target: macOS
+# and Windows since 6.6.19, Linux since 6.6.20). CHANGELOG [6.6.13]
+fn fd_wait_ready(fd, want_write, timeout_ms): i64 {
+    if (fd < 0) { return 0 - 9; }                   # EBADF — poll would skip it silently
+    if (fd > 0x7FFFFFFF) { return 0 - 9; }          # not an int fd
+    var ms = timeout_ms;
+    if (ms < 0) { ms = 0 - 1; }
+    if (ms > 0x7FFFFFFF) { ms = 0x7FFFFFFF; }
+    var pfd[8];                                     # struct pollfd { int fd; short events, revents; }
+    store32(&pfd, fd);
+    if (want_write != 0) { store16(&pfd + 4, 4); }  # POLLOUT
+    else { store16(&pfd + 4, 1); }                  # POLLIN
+    store16(&pfd + 6, 0);
+    var r = syscall(7, &pfd, 1, ms);
+    if (r < 0) { return r; }
+    if (r == 0) { return 0; }
+    if ((load16(&pfd + 6) & 0x20) != 0) { return 0 - 9; }   # POLLNVAL: fd not open → -EBADF
+    return 1;
 }
 
 # Accept a connection on a listening socket; `flags` accepts
@@ -577,12 +1263,16 @@ fn sys_accept4(fd, srcaddr, srcaddrlen, flags): i64 {
     #ifdef CYRIUS_TARGET_MACOS
     var afd = syscall(43, fd, srcaddr, srcaddrlen);
     if (afd < 0) { return afd; }
+    # v6.6.8: through the fcntl wrappers, and a failed flag write is REPORTED — the accepted
+    # fd is closed and the error returned — rather than handing back a blocking or inheritable
+    # fd the caller asked not to get. CHANGELOG [6.6.8]
     if ((flags & 2048) != 0) {                          # Linux SOCK_NONBLOCK
-        var fl = syscall(SYS_FCNTL, afd, 3, 0);         # F_GETFL
-        syscall(SYS_FCNTL, afd, 4, fl | 4);             # F_SETFL |= Darwin O_NONBLOCK (4)
+        var nb = fd_set_nonblocking(afd);               # Darwin O_NONBLOCK (4), privately
+        if (nb < 0) { sys_close(afd); return nb; }
     }
     if ((flags & 524288) != 0) {                        # Linux SOCK_CLOEXEC
-        syscall(SYS_FCNTL, afd, 2, 1);                  # F_SETFD FD_CLOEXEC
+        var ce = sys_fcntl(afd, 2, 1);                  # F_SETFD FD_CLOEXEC
+        if (ce < 0) { sys_close(afd); return ce; }
     }
     return afd;
     #endif

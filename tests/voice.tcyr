@@ -869,10 +869,14 @@ assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, PRANI_POS_INF), PRANI_ERR_I
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, f64_neg(T_1_0)), PRANI_ERR_INVALID_VOCALIZATION,
   "negative duration -> PRANI_ERR_INVALID_VOCALIZATION");
 # num_samples overflow: 1e300 s is FINITE and passes the duration guard, but
-# 1e300 * 44100 does not fit an i64, f64_to gives i64::MIN, and the render loop
-# then returns an EMPTY buffer as a success. Audit F11's shape exactly.
+# 1e300 * 44100 does not fit an i64. f64_to saturates that to i64::MAX, past any
+# floor check, and the render loop then aborts the process. Ranged before the cast.
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, T_1E300), PRANI_ERR_INVALID_VOCALIZATION,
   "1e300 s (finite, overflows num_samples) -> PRANI_ERR_INVALID_VOCALIZATION");
+# And a product that fits an i64 but cannot be one vec: past VEC_CAP_MAX the
+# render ends in a process exit, so it is refused before it starts.
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, f64_from(VEC_CAP_MAX + 1), T_1_0),
+  PRANI_ERR_INVALID_VOCALIZATION, "one sample past VEC_CAP_MAX -> PRANI_ERR_INVALID_VOCALIZATION");
 # CONTROL -- the oracle's test_zero_duration_synthesis: duration 0 is VALID and
 # yields an EMPTY buffer, not an error. Re-asserted here because it is the one
 # value prani_is_non_negative admits that prani_is_positive would not.
@@ -936,6 +940,8 @@ assert_eq(crvoice_synthesize_cat_purr(g_cat, T_NAN, 100, g_mods), PRANI_ERR_INVA
   "cat purr NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(crvoice_synthesize_cat_purr(g_cat, 0, 100, g_mods), PRANI_ERR_INVALID_TRACT,
   "cat purr sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
+assert_eq(crvoice_synthesize_cat_purr(g_cat, T_SR, VEC_CAP_MAX + 1, g_mods), PRANI_ERR_INVALID_VOCALIZATION,
+  "a count past VEC_CAP_MAX -> PRANI_ERR_INVALID_VOCALIZATION");
 assert_eq(crvoice_synthesize_cat_purr(g_cat, T_SR, (0 - 1), g_mods), PRANI_ERR_INVALID_VOCALIZATION,
   "cat purr num_samples -1 -> PRANI_ERR_INVALID_VOCALIZATION");
 # size_scale DIVIDES 27.0 to make purr_f0, and f64_clamp(NaN, 20, 35) is NaN --

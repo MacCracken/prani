@@ -1,6 +1,6 @@
 # hashmap_fast.cyr — SIMD-accelerated hash table (Swiss table inspired)
 # Usage: include "lib/hashmap_fast.cyr"
-# Requires: alloc.cyr, string.cyr, fnptr.cyr
+# Includes its own definers: alloc.cyr, string.cyr, vec.cyr, fnptr.cyr, hashseed.cyr.
 #
 # **Status (v5.8.62 audit): experimental, zero consumers.** Not in
 # cyrius.cyml's `[deps].stdlib` auto-prepend, not included by any
@@ -11,7 +11,7 @@
 # pinned for re-evaluation in the pre-v6.0 hardening sweep.
 #
 # Layout: separate metadata array (1 byte per slot) + key/value
-# arrays (8 bytes each).
+# arrays (8 bytes each). Header (48 B): { meta, keys, vals, cap, count, tombs }.
 # Metadata byte: 0x00 = empty, 0xFF = tombstone, 0x01-0xFE = H2
 # hash (top 7 bits + 1).
 # Probe: load 16 metadata bytes → SSE2 pcmpeqb → pmovmskb →
@@ -20,18 +20,27 @@
 # then next group.
 
 include "lib/fnptr.cyr"
+include "lib/hashseed.cyr"   # v6.5.39: shared seed — do NOT re-copy the hash here
+# 6.6.9: memset / streq / vec_* were called and not included. CHANGELOG [6.6.9]
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
 
 # FNV-1a hash for null-terminated string (same as hashmap.cyr)
+# v6.5.39: seeded + finalized, like its twin. ⚠ This was a VERBATIM second copy of the
+# unseeded hash and the flooding filing did not mention it at all — measured, it floods too
+# (N=4096: 22.4 ms colliding vs 1.16 ms distinct). Both copies now draw from lib/hashseed.cyr
+# rather than each carrying their own constant, so they cannot drift apart again.
 fn _fhm_hash(s): i64 {
     if (s == 0) { return 0; }
-    var h = 0xCBF29CE484222325;
+    var h = 0xCBF29CE484222325 ^ _hm_seed_get();
     var hi = 0;
     while (load8(s + hi) != 0) {
         h = h ^ load8(s + hi);
         h = h * 0x100000001B3;
         hi = hi + 1;
     }
-    return h;
+    return _hm_mix(h);
 }
 
 var _FHM_EMPTY = 0;
@@ -40,19 +49,25 @@ var _FHM_TOMB = 255;
 # Compute H2 (metadata hash): top 7 bits of hash, +1 to avoid 0x00
 fn _fhm_h2(h): i64 { return ((h >> 57) & 0x7F) + 1; }
 
-# Create a new fast hashmap (capacity must be multiple of 16, minimum 16)
+# Create a new fast hashmap (capacity must be multiple of 16, minimum 16).
+# Returns 0 when an allocation is refused (6.6.7 — it stored through them unchecked).
 fn fhm_new(): i64 {
-    var m = alloc(40);
+    var m = alloc(48);
+    if (m == 0) { return 0; }
     var cap = 16;
     var meta = alloc(cap);
+    if (meta == 0) { return 0; }
     var keys = alloc(cap * 8);
+    if (keys == 0) { return 0; }
     var vals = alloc(cap * 8);
+    if (vals == 0) { return 0; }
     memset(meta, 0, cap);
     store64(m, meta);
     store64(m + 8, keys);
     store64(m + 16, vals);
     store64(m + 24, cap);
     store64(m + 32, 0);
+    store64(m + 40, 0);   # tombstones
     return m;
 }
 
@@ -182,24 +197,41 @@ fn fhm_get_or(m, key, default_val): i64 {
 # Alias for fhm_count
 fn fhm_size(m): i64 { return load64(m + 32); }
 
-# Set key-value pair
+# Set key-value pair. Returns 0, or -1 when the table had to grow and the grow's allocation
+# was refused — the map is then UNCHANGED (the old table stays live). CHANGELOG [6.6.7]
+#
+# ⛔ TOMBSTONES COUNT AS OCCUPIED (v6.6.8). The rehash trigger counted only LIVE entries while
+# fhm_delete leaves a 255 tombstone in every slot it frees, and an insert only ever took an
+# EMPTY slot. After enough delete/insert churn no group had an empty slot: the probe walked
+# the whole table, fell out of the loop and returned 0 — success — WITHOUT inserting, and
+# every get/has on a missing key scanned the whole table. Now:
+#   * the trigger is (live + tombstones) at 87.5%; it DOUBLES only when the live load alone
+#     is past 43.75%, otherwise it rehashes at the same capacity, which drops the tombstones —
+#     so churn at a steady size does not grow the table without bound;
+#   * a new key reuses the FIRST tombstone on its probe path (once the key is known absent);
+#   * the trigger keeps at least one empty slot, so the probe always ends; the fall-through is
+#     a -1, never a silent 0. CHANGELOG [6.6.8]
 fn fhm_set(m, key, val): i64 {
+    var cap = load64(m + 24);
+    var count = load64(m + 32);
+    if ((count + load64(m + 40)) * 8 >= cap * 7) {
+        var nc = cap;
+        if (count * 16 >= cap * 7) { nc = cap * 2; }
+        if (_fhm_rehash(m, nc) < 0) { return 0 - 1; }
+    }
+    return _fhm_insert(m, key, val);
+}
+
+# The probe-and-place half of fhm_set, on a table the caller has already made room in.
+fn _fhm_insert(m, key, val): i64 {
     var meta = load64(m);
     var keys = load64(m + 8);
     var vals = load64(m + 16);
     var cap = load64(m + 24);
-    var count = load64(m + 32);
-    # Grow at 87.5% load (14/16 per group)
-    if (count * 8 >= cap * 7) {
-        _fhm_grow(m);
-        meta = load64(m);
-        keys = load64(m + 8);
-        vals = load64(m + 16);
-        cap = load64(m + 24);
-    }
     var h = _fhm_hash(key);
     var h2 = _fhm_h2(h);
     var idx = (h & (cap - 1)) & (0 - 16);
+    var tomb = 0 - 1;   # first tombstone on the probe path
     var probes = 0;
     while (probes < cap) {
         # Check for existing key
@@ -212,45 +244,68 @@ fn fhm_set(m, key, val): i64 {
             }
             mask = mask & (mask - 1);
         }
-        # Find empty slot
+        if (tomb < 0) {
+            var tm = _fhm_probe16(meta, idx, _FHM_TOMB);
+            if (tm != 0) { tomb = idx + _fhm_ctz(tm); }
+        }
+        # An empty slot ends the probe: the key is absent.
         var empty = _fhm_empty16(meta, idx);
         if (empty != 0) {
-            var si = idx + _fhm_ctz(empty);
-            store8(meta + si, h2);
-            store64(keys + si * 8, key);
-            store64(vals + si * 8, val);
-            store64(m + 32, count + 1);
-            return 0;
+            if (tomb >= 0) { return _fhm_place(m, tomb, h2, key, val, 1); }
+            return _fhm_place(m, idx + _fhm_ctz(empty), h2, key, val, 0);
         }
         idx = (idx + 16) & (cap - 1);
         probes = probes + 16;
     }
+    if (tomb >= 0) { return _fhm_place(m, tomb, h2, key, val, 1); }
+    return 0 - 1;   # no free slot at all — unreachable while the trigger above holds
+}
+
+# Write a new entry into slot `si`; `was_tomb` = 1 when that slot held a tombstone.
+fn _fhm_place(m, si, h2, key, val, was_tomb): i64 {
+    store8(load64(m) + si, h2);
+    store64(load64(m + 8) + si * 8, key);
+    store64(load64(m + 16) + si * 8, val);
+    store64(m + 32, load64(m + 32) + 1);
+    if (was_tomb == 1) { store64(m + 40, load64(m + 40) - 1); }
     return 0;
 }
 
-# Grow the table (double capacity)
+# Grow the table (double capacity). Returns 0, or -1 when an allocation is refused.
 fn _fhm_grow(m): i64 {
+    return _fhm_rehash(m, load64(m + 24) * 2);
+}
+
+# Rebuild the table at `new_cap` slots (live entries only, so every tombstone is dropped).
+# Returns 0, or -1 when an allocation is refused.
+# ⚠ All three arrays are allocated and CHECKED before `m` is touched, so a refused grow
+# leaves the old table fully intact. They were unchecked, so a refusal memset through 0.
+# CHANGELOG [6.6.7]
+fn _fhm_rehash(m, new_cap): i64 {
     var old_meta = load64(m);
     var old_keys = load64(m + 8);
     var old_vals = load64(m + 16);
     var old_cap = load64(m + 24);
-    var new_cap = old_cap * 2;
     var new_meta = alloc(new_cap);
+    if (new_meta == 0) { return 0 - 1; }
     var new_keys = alloc(new_cap * 8);
+    if (new_keys == 0) { return 0 - 1; }
     var new_vals = alloc(new_cap * 8);
+    if (new_vals == 0) { return 0 - 1; }
     memset(new_meta, 0, new_cap);
     store64(m, new_meta);
     store64(m + 8, new_keys);
     store64(m + 16, new_vals);
     store64(m + 24, new_cap);
     store64(m + 32, 0);
-    # Reinsert all entries
+    store64(m + 40, 0);
+    # Reinsert all entries (no trigger check: the new table holds them with room to spare)
     var oi = 0;
     while (oi < old_cap) {
         var st = load8(old_meta + oi);
         if (st != 0) {
             if (st != 255) {
-                fhm_set(m, load64(old_keys + oi * 8), load64(old_vals + oi * 8));
+                _fhm_insert(m, load64(old_keys + oi * 8), load64(old_vals + oi * 8));
             }
         }
         oi = oi + 1;
@@ -296,8 +351,18 @@ fn fhm_delete(m, key): i64 {
         while (mask != 0) {
             var si = idx + _fhm_ctz(mask);
             if (streq(load64(keys + si * 8), key) == 1) {
-                store8(meta + si, 255);
                 store64(m + 32, load64(m + 32) - 1);
+                # A group that still has an empty slot ends every probe that reaches it, so
+                # nothing lies "past" this slot and it can go back to EMPTY. Only a full
+                # group needs the tombstone. (Groups are 16-aligned, and a group that was
+                # full when a later key was placed can never regain an empty — so this
+                # cannot strand an entry.) CHANGELOG [6.6.8]
+                if (_fhm_empty16(meta, idx) != 0) {
+                    store8(meta + si, _FHM_EMPTY);
+                } else {
+                    store8(meta + si, _FHM_TOMB);
+                    store64(m + 40, load64(m + 40) + 1);
+                }
                 return 1;
             }
             mask = mask & (mask - 1);
@@ -344,5 +409,6 @@ fn fhm_values(m): i64 {
 fn fhm_clear(m): i64 {
     memset(load64(m), 0, load64(m + 24));
     store64(m + 32, 0);
+    store64(m + 40, 0);
     return 0;
 }

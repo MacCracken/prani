@@ -31,6 +31,7 @@
 #           `dmb ish` for `atomic_fence`. Plain `cas` / `ldadd` are
 #           ARMv8.1-LSE and not available on Pi 4 A72 (ARMv8.0-A), so
 #           the LL-SC form is used.
+# cx:       plain load/compare/store (cxvm is single-threaded; v6.6.8).
 #
 # >>> include "lib/atomic.cyr"
 
@@ -49,8 +50,9 @@
 # atomic.cyr, so thread.cyr was not self-sufficient: it compiled purely
 # because every real consumer happened to include alloc.cyr too. Two
 # allocators now need the flag (alloc.cyr's bump lock and freelist.cyr's
-# freelist lock) and freelist.cyr does not include alloc.cyr, so the flag
-# belongs in the lowest module all three already share. ONE flag, not two
+# freelist lock) and freelist.cyr did not include alloc.cyr (it reaches it
+# only through poison.cyr since 6.6.18), so the flag belongs in the lowest
+# module all three already share. ONE flag, not two
 # — a second copy would be armed by thread_create and silently missed by
 # whichever allocator read the other one. See CHANGELOG [6.5.19].
 var _threads_active = 0;
@@ -112,6 +114,20 @@ fn atomic_cas(ptr, expected, new): i64 {
         0xA3; 0x03; 0x1E; 0xF8;        # stur x3, [x29, #-32]  ; ret = x3
     }
     #endif
+    # cx bytecode: cxvm runs ONE interpreter loop — no threads, no preemption
+    # between guest instructions — so a plain compare-then-store IS atomic.
+    # ⚠ Without this arm the body was empty on cx and every CAS reported
+    # FAILURE: lib/hashseed.cyr drew a seed and then returned the unpublished
+    # `_hm_seed` (0), so every cx map hashed with the published constant, and
+    # any `while (atomic_cas(...) == 0)` lock spun forever. Inactive in the
+    # compiler's own compile (CYRIUS_TARGET_CX is a guest-only predefine).
+    # CHANGELOG [6.6.8]
+    #ifdef CYRIUS_TARGET_CX
+    if (load64(ptr) == expected) {
+        store64(ptr, new);
+        ret = 1;
+    }
+    #endif
     return ret;
 }
 
@@ -143,6 +159,13 @@ fn atomic_fetch_add(ptr, delta): i64 {
         0xA5; 0xFF; 0xFF; 0x35;        # cbnz w5, retry (-3 instrs)
         0xA3; 0x83; 0x1E; 0xF8;        # stur x3, [x29, #-24]  ; ret = old
     }
+    #endif
+    # cx: single-threaded VM, so load-add-store is atomic (see atomic_cas).
+    # Without it the body was empty and every fetch_add returned 0 and added
+    # nothing. CHANGELOG [6.6.8]
+    #ifdef CYRIUS_TARGET_CX
+    ret = load64(ptr);
+    store64(ptr, ret + delta);
     #endif
     return ret;
 }

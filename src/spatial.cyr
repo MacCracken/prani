@@ -51,7 +51,7 @@
 #   negative sample_rate   -> alpha ~ 1.64 (> 1): an overshooting filter
 #   +inf sample_rate       -> alpha 0 -> a digitally silent buffer
 #   sample_rate 5e-324     -> dt overflows to +inf -> alpha NaN -> NaN buffer
-#   NaN velocity           -> ratio NaN -> out_len = f64_to(NaN) = i64::MIN
+#   NaN velocity           -> ratio NaN -> out_len = f64_to(NaN) = 0
 #                             -> the loop never runs -> a silently EMPTY buffer
 #   +/-inf velocity        -> f64_clamp bounds them to +/-308.7 -- an infinite
 #                             velocity renders as 308.7 m/s (a fabricated
@@ -190,8 +190,8 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
 fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     # See spatial_apply_distance_attenuation for the handle guard.
     if (samples < 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    # NaN is the live defect: it survives the clamp, so out_len becomes
-    # i64::MIN and the caller gets an empty buffer instead of an error.
+    # NaN is the live defect: it survives the clamp, so out_len becomes 0 and
+    # the caller gets an empty buffer instead of an error.
     # +/-inf ARE clamped (measured) -- they are rejected because rendering an
     # infinite velocity as 308.7 m/s is a fabricated answer, not because they
     # would overflow anything.
@@ -206,6 +206,9 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     var len = vec_len(samples);
     # out_len = (len / ratio) as usize  -- len as f64, divide, truncate.
     var out_len = f64_to(f64_div(f64_from(len), ratio));
+    # Moving away stretches a buffer up to 1.9x, so one past ~1.41e8 samples can
+    # outgrow a vec. Refused before the first push, which would be a process exit.
+    if (prani_buffer_len_ok(out_len) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     var output = vec_new();
     var i = 0;

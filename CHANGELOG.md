@@ -20,6 +20,174 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.0.14] - cyrius 6.6.20, and a guard that saturation walked past
+
+Toolchain and dependency release. `cyrius` 6.6.3 -> **6.6.20**, `svara` 3.5.4 ->
+**3.5.6**, `naad` 2.2.2 -> **2.2.5**, `hisab` 2.11.2 -> **3.3.7**, `goonj` 2.0.4 ->
+**2.0.6**, `sakshi` -> **2.5.7**, with bayan 1.5.6 -> 1.5.12 and ganita 1.2.5 -> 1.2.14
+from the snapshot. This is the matched set for 6.6.20: svara, naad, hisab and goonj
+each pin it exactly and agree on each other's sub-pins, sakshi 2.5.7 is the copy the
+toolchain bundles, and the next tag of each of the four needs cyrius 6.7.x.
+
+No API change, and no accepted input renders differently beyond the last bits. One
+input that used to be refused started killing the process instead, which is the
+reason this is more than a pin bump.
+
+### Fixed
+
+⭐ **`crvoice_vocalize` aborted the host process on an overflowing sample count.**
+Cyrius 6.6.8 made `f64_to` saturate: +Inf and anything at or past 2^63 went from
+`i64::MIN` to `i64::MAX`, and NaN to 0. `num_samples < 0` had been catching the old
+sentinel by accident. The new one walks past it, into a render loop that pushes until
+`vec: capacity overflow` ends the process.
+
+| Input | 2.0.13 on 6.6.3 | 2.0.13's source on 6.6.20 | 2.0.14 |
+|---|---|---|---|
+| 1e300 s at 44.1 kHz | `INVALID_VOCALIZATION` | **process abort** | `INVALID_VOCALIZATION` |
+
+The count is now ranged in f64 **before** the cast, as `stream_new` already did. That
+check is shared as `prani_sample_count_ok`, `PR_ST_MAX_SAMPLES` is gone, and
+`crvoice_vocalize` applies the tighter limit below.
+
+This reaches released versions. **Any prani up to 2.0.13 has this defect if it is
+built with cyrius 6.6.8 or later, or for aarch64**, where cyrius's 6.6.8 notes record
+that `f64_to` already gave `i64::MAX` for +Inf. `SECURITY.md` says so.
+
+Every other `f64_to` site was read and needs no change: each is ranged first or
+bounded by a clamp. `block_size` at an absurd rate now saturates high rather than
+flooring to 1, which is what the oracle's `as usize` and `.min()` give, and it is
+bounded by the remaining count either way.
+
+⭐ **A request too long for one buffer ended the same way, on every toolchain.** A vec
+cannot grow past `VEC_CAP_MAX`, 2^28 samples, about 101 minutes at 44.1 kHz: the next
+push is `vec: capacity overflow` and a process exit, with no return value to check.
+`crvoice_vocalize` had no ceiling, so 3e9 s at 44.1 kHz rendered for minutes and then
+died, on 2.0.13 as well. A rate of 2^63 Hz or 1e19 Hz for 0.01 s had the same shape: the
+product fits an i64, and those ran past a 25 s timeout. The same exit was reachable
+without going through `vocalize` at all:
+
+| Path | Way in |
+|---|---|
+| `crvoice_vocalize`, `_with_intent` | a duration or rate past the limit, on every apparatus and the purr path |
+| `crvoice_synthesize_cat_purr`, `crtract_synthesize*` | a count past the limit |
+| `stream_next_block` | one block past the limit: `remaining` can be 2^53, and the call ignored `prani_vec_push_zeros`'s return |
+| `spatial_apply_doppler_shift` | a buffer past ~1.41e8 samples moving away, which stretches it up to 1.9x |
+
+Each now returns `PRANI_ERR_INVALID_VOCALIZATION` before the first push, through
+`prani_buffer_count_ok` and `prani_buffer_len_ok`. The limit is `lib/vec.cyr`'s own
+constant, not a copy, so it refuses exactly what could never have succeeded, and every
+render that worked still does. `stream_new` keeps its 2^53 ceiling because a stream is
+not one buffer, so it carries anything longer. This diverges from the oracle, whose
+`Vec` had no such limit, and [ADR-0006](docs/adr/0006-reject-non-finite-numeric-input.md)
+records it.
+
+Not covered: an allocation refused below the limit is also a process exit, because
+`vec_push` exits on that failure too. That is roadmap 2.1.0 Lane B, whose entry wrongly
+said `vec_push` returns -1 and is corrected here.
+
+**Two assertions were still passing, for a reason that was no longer true.**
+`tests/sequence.tcyr` asserted `f64_to(NaN) * 2 == 0` "because i64::MIN wraps", and
+`tests/hardening.tcyr` asserted a NaN count appends nothing "because it is i64::MIN".
+Both pass on 6.6.20 only because NaN is now 0. They are rewritten, along with the
+nine probes that did fail. A NaN `interval` or `gap` is the case this took a backstop
+from: `prani_vec_push_zeros` used to report the count, and can no longer see it. The
+pre-pass catches it and always did, but only +inf was tested, so NaN is pinned there
+now.
+
+**The comments and docs that restated the old conversion**: seven `src/` modules,
+`input-ranges.md`, the `error_handling` example's printed text, and an amendment on
+[ADR-0006](docs/adr/0006-reject-non-finite-numeric-input.md), whose decision stands.
+
+**`README.md`'s consumer snippet included `dist/prani.cyr`**, a path a consumer does
+not have: a dep vendors to `lib/prani.cyr`, and the snippet as written fails with
+`cannot open include file`. Its tag still said 2.0.11, as did `SECURITY.md`'s table,
+and `state.md` still said pin 6.5.36.
+
+### Changed
+
+- **39 `bayan_json_v_obj_get` calls moved to `bayan_json_v_obj_get_by_cstr`.** bayan
+  1.5.10 deprecated the old name, which forwards to the new one: same lookup, same
+  answers, 39 fewer warnings on every build.
+- **`dist/prani.deps` is gone, and CI's comment with it.** `cyrius distlib` 6.6.18 and
+  later names only what a fold needs beyond its named deps, and for prani that is
+  nothing: svara's own sidecar brings `bayan`.
+- **The `sakshi` pin now describes what ships.** `lib/sakshi.cyr` was the 6.6.3
+  snapshot's 2.5.2, not the pinned 2.4.12: the resolver kept the snapshot and skipped
+  the dep, and said so on every build. Both are 2.5.7 now, byte-identical, and the
+  resolver has nothing left to skip.
+- **`cyrius.lock` and `lib/` are a clean resolve at the pin.** 42 files, 38
+  byte-identical to the snapshot and four to their tag's `dist/`; five commit rows;
+  `cyrius deps --verify` passes all 42. `alloc_cx.cyr`, `chrono.cyr` and `poison.cyr`
+  arrive.
+- **Seven `crtract_synthesize*` wrappers gained a doc comment.** cyrdoc used to read
+  `#must_use` as documentation, and `cyrius audit` failed on these.
+- **Build warnings 136 -> 6**, on a clean tree. naad and svara dropped their dead
+  `#inline` markers; the six left are prani's own, and are on the roadmap's watch list.
+- **Samples move by up to 6.8e-14 of peak.** 84% of sample values differ in their last
+  bits. The likely source is the toolchain's transcendentals: cyrius 6.6.9 took x86 sin
+  and cos off x87 `fsin` / `fcos`. The RNG stream is bit-identical. One garbage input
+  improved with it: a 1e-297 Hz rate into `crvoice_apply_nasal_antiformant` went from
+  438 non-finite samples of 441 to none.
+- ⚠ **Three paths got slower; the rest are flat.** Six alternating rounds on one
+  machine, best of each: median 1.00x, with `bee_buzz` +29%, `cricket_stridulate` +16%
+  and `songbird_trill` +11%. `f64_sin` alone went from 55 to 91 ns a call when it left
+  x87 `fsin`, and those three are the paths that call it most per sample. That is the
+  likely cause, not an isolated one. The ~2x `scripts/bench-check.sh` reports is not a
+  result: 2.0.13 measures about as far from `benches/baseline.csv` on this machine
+  today. `baseline.csv` is unchanged.
+
+### Upgrading
+
+- **Move the pins together:** cyrius 6.6.20, svara 3.5.6, naad 2.2.5, hisab 3.3.7 and
+  goonj 2.0.6. naad 2.2.5 needs hisab 3.x, so no older set can sit beside it.
+- After a pin move, delete `cyrius.lock` before `cyrius deps`, which keeps old commit
+  rows beside the new ones.
+- Golden values taken from an earlier prani may need a tolerance rather than bit
+  equality.
+- A consumer includes `lib/prani.cyr`, and needs no `dist/prani.deps`.
+- A single buffer past 2^28 samples, about 101 minutes at 44.1 kHz, is now
+  `PRANI_ERR_INVALID_VOCALIZATION` rather than a process exit. A longer render goes
+  through `stream_new`, in blocks of at most that size.
+
+### Verified
+
+Every figure below was measured on x86_64 against this tree, and neither the sweeps
+nor the benchmarks ran on aarch64.
+
+- **Value sweep, 2.0.13 on 6.6.3 against this tree on 6.6.20.** 3,198,946 values across
+  1,799 renders: every species, vocalization and intent at two rates, the builders,
+  streams, a bout, a phrase, a chorus, spatial, the nasal path and the RNG. 2,682,303
+  differ, none by more than 6.8e-14 of peak, with no length, error-code, sign or
+  non-finite change.
+- **Hostile inputs, one process per case.** 12 values (NaN, ±Inf, f64::MAX, 2^63, 1e19,
+  3e9, the smallest denormal, 1e-297, 0, -1, 1e300) through 34 entry-point and
+  parameter combinations, 408 cases per tree, 25 s each. On this tree all 408 exit 0,
+  with no abort and no timeout; 2.0.13 had 12 timeouts. Thirteen cases moved: eleven
+  that ran past the window are now refused, the nasal case above, and one 30M-sample
+  render that finished inside the window on this run.
+- **The ceiling sits on the real boundary.** One sample past `VEC_CAP_MAX` is refused at
+  once. A render of exactly `VEC_CAP_MAX` samples through `crvoice_vocalize` returned
+  268,435,456 samples, all finite, at a 4.1 GiB peak. 3e9 s at 44.1 kHz went from a
+  process exit, 87 to 345 s in depending on the run, to an instant refusal.
+- **The guards were mutated.** For the overflow fix, a floor-only check, a finite-only
+  check and a 2^63 ceiling each abort inside the new hardening group, and a guard that
+  refuses everything fails its controls. For the ceiling, an off-by-one in either helper,
+  `stream_next_block` ignoring the return, `prani_vec_push_zeros` without its sum check
+  and an unguarded Doppler each fail, and weakening the vocalize or purr guard aborts
+  inside its group.
+- **The consumed surface was diffed, not assumed.** Of the 58 external names prani
+  calls, 39 have identical bodies, including every svara entry point. The rest are 13
+  compiler builtins, `f64_le` / `f64_ge` / `f64_trunc` (builtins since 6.6.13, NaN
+  behaviour probed), `alloc_init`'s chunk size, the bayan rename, and
+  `ease_in_out_smooth`, which gained `public` and renamed three constants with the
+  same values. This compares entry points only: what they call is covered by the value
+  sweep.
+- **A from-scratch consumer** declaring only svara, naad, hisab, goonj, prani and a
+  minimal stdlib builds and runs `lib/prani.cyr`, with no sidecar.
+- **Gate:** `cyrius audit` exit 0, 18 suites / 2013 assertions (`hardening` 96 -> 120);
+  `cyrius fuzz`, `scripts/run-examples.sh`, `cyrius distlib --check` and
+  `cyrius deps --verify` all clean.
+
 ## [2.0.13] - Unblocked by cyrius 6.6.3
 
 Toolchain-pin release. `cyrius` 6.6.2 -> **6.6.3**; no source change.
