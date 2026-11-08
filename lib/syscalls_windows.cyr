@@ -156,14 +156,17 @@ enum OFlags {
     # the file it named. The map now (EOPEN_PE's `_pe_open_attr_flags` + `sys_open` below):
     #   · O_CREAT|O_EXCL → CREATE_NEW + FILE_FLAG_OPEN_REPARSE_POINT. CREATE_NEW never opens
     #     an existing object, so the flag cannot make it open a link; the name exists, so the
-    #     create fails. Race-free, no check. (The raw syscall gets this too.)
+    #     create fails: -EEXIST (-17). Over a directory Windows answers ERROR_ACCESS_DENIED
+    #     (-13), and since 6.7.16 `sys_open` asks the name on that -13 and answers -17 itself
+    #     (D95; the raw syscall still hands back -13). Race-free: the kernel refuses, the ask
+    #     only names the error. (The raw syscall gets the disposition too.)
     #   · O_NOFOLLOW → FILE_FLAG_OPEN_REPARSE_POINT, then `sys_open` asks the OPENED HANDLE
     #     (GetFileInformationByHandleEx, FileAttributeTagInfo): a NAME-SURROGATE reparse point
     #     (symlink, junction) is closed and refused with -ELOOP (-40). A junction or a link to a
     #     DIRECTORY is a directory object that CreateFileW refuses without BACKUP_SEMANTICS —
     #     before there is a handle to ask — so a FAILED O_NOFOLLOW open asks the name why, with a
     #     read-only O_DIRECTORY|O_NOFOLLOW probe that only picks the errno (-40 for a surrogate,
-    #     -21 for a real directory under write access, else the original -1). Any OTHER reparse
+    #     -21 for a real directory under write access, else the open's own -errno). Any OTHER reparse
     #     point (OneDrive placeholder, dedup) is reopened normally, as the default taken
     #     2026-09-27 says — those are files, not redirections — and that reopen by name must be
     #     the SAME FILE as the verified handle (file id), or it is refused. With O_TRUNC the open
@@ -173,7 +176,9 @@ enum OFlags {
     #     plus the handle check: a non-directory is -ENOTDIR (-20), a directory opened for
     #     writing (or with O_CREAT/O_TRUNC) is -EISDIR (-21). BACKUP_SEMANTICS is NEVER set
     #     without O_DIRECTORY: it would let O_WRONLY open a directory, so a plain open() of a
-    #     directory stays -1 on Windows (fail-closed; Linux answers a read fd).
+    #     directory stays refused on Windows: a read-only one -EACCES (-13) since 6.7.14, -1
+    #     before (fail-closed; Linux answers a read fd); one for writing, O_CREAT or O_TRUNC
+    #     -EISDIR (-21) since 6.7.16, as Linux (D95: `_win_open_eacces` asks the name).
     # ⚠ The refusals live in `sys_open` (every stdlib open funnels through it). A RAW
     # `syscall(2, p, O_NOFOLLOW, 0)` still never follows a link — the attribute word is the
     # emitter's — but it hands back the LINK's handle instead of -40, and O_TRUNC on it
@@ -193,13 +198,21 @@ enum OFlags {
 # kernel32!WriteFile via the PE IAT at emit time (v5.4.7 reroute).
 # For fd 1/2 the PE backend inserts a GetStdHandle(-11/-12) call
 # first so the WriteFile `hFile` arg is a real Windows handle.
+# Returns the bytes written, or a negative errno when WriteFile fails
+# (the Win32 code mapped by the reroute: -9 a bad handle, -32 a closed
+# pipe, -28 a full disk, -13 no write access; -1 for a code with no
+# POSIX peer). Until 6.7.14 a failed write answered 0. CHANGELOG [6.7.14]
 fn sys_write(fd, buf, count) {
     return syscall(SYS_WRITE, fd, buf, count);
 }
 
 # Read up to `count` bytes from `fd` into `buf`. Rerouted to
 # kernel32!ReadFile by the PE backend. GetStdHandle(-10) is
-# inserted for fd 0 (stdin). Returns bytes read or -1 on error.
+# inserted for fd 0 (stdin). Returns the bytes read — 0 at end of file,
+# which includes a pipe whose writer closed (ERROR_BROKEN_PIPE) — or a
+# negative errno when ReadFile fails (-9 a bad handle, -13 no read
+# access, ...; -1 for a code with no POSIX peer). Until 6.7.14 a failed
+# read answered 0, end of file. CHANGELOG [6.7.14]
 fn sys_read(fd, buf, count) {
     return syscall(SYS_READ, fd, buf, count);
 }
@@ -209,7 +222,13 @@ fn sys_read(fd, buf, count) {
 # Win32 `dwDesiredAccess` + `dwCreationDisposition` +
 # `dwFlagsAndAttributes` inside the reroute. `mode` has no Win32
 # equivalent and is dropped. Returns a handle usable by
-# sys_read/write/close, or a negative value: -1 for a Win32 failure,
+# sys_read/write/close, or a negative errno: CreateFileW's failure mapped
+# by the reroute since 6.7.14 (-2 not found, -13 access denied — a plain
+# read-only open of a directory too; -21 for one under write access,
+# O_CREAT or O_TRUNC, as Linux, since 6.7.16's D95 —, -17 exists for
+# O_CREAT|O_EXCL (a directory too), -22, -36 ...;
+# -1 for a Win32 code with no POSIX peer and for a path that cannot be
+# widened; until 6.7.14 every failure was -1),
 # -40 (-ELOOP) for O_NOFOLLOW on a symlink or junction (to a file or a
 # directory), -20 (-ENOTDIR) / -21 (-EISDIR) for O_DIRECTORY, and -21 for
 # O_NOFOLLOW with write access / O_CREAT / O_TRUNC on a real directory
@@ -217,9 +236,68 @@ fn sys_read(fd, buf, count) {
 # See the OFlags note. CHANGELOG [6.6.9]
 fn sys_open(path, flags, mode) {
     # Neither O_NOFOLLOW nor O_DIRECTORY; or O_CREAT|O_EXCL, whose CREATE_NEW never follows.
-    if ((flags & 196608) == 0) { return syscall(SYS_OPEN, path, flags, mode); }
-    if ((flags & 192) == 192) { return syscall(SYS_OPEN, path, flags, mode); }
+    if ((flags & 196608) == 0) { return _win_open_eacces(path, flags, syscall(SYS_OPEN, path, flags, mode)); }
+    if ((flags & 192) == 192) { return _win_open_eacces(path, flags, syscall(SYS_OPEN, path, flags, mode)); }
     return _win_open_checked(path, flags, mode);
+}
+
+# 6.7.16 — A DIRECTORY ANSWERS EISDIR, as on Linux (6.7.16's D95, the user, 2026-10-20: "-21 as
+# Linux"). CreateFileW and DeleteFileW refuse a directory with ERROR_ACCESS_DENIED, which the Win32
+# table maps to -13, so an open of a directory for writing (or creating / truncating), its
+# truncate and its unlink answered -13 where Linux answers -21. When -13 comes back the name is
+# asked (GetFileAttributesW, 0xF019 — 6.7.14's file_create_exclusive shape): a directory is -21; a
+# real permission or sharing refusal on anything else stays -13. 1 when `path` names a directory
+# (a directory link too: it carries the directory attribute). CHANGELOG [6.7.16]
+fn _win_is_dir(path): i64 {
+    var at = syscall(61465, path);              # GetFileAttributesW (narrow)
+    if (at == 4294967295) { return 0; }         # INVALID_FILE_ATTRIBUTES
+    if ((at & 16) != 0) { return 1; }           # FILE_ATTRIBUTE_DIRECTORY
+    return 0;
+}
+
+# An open's answer `h` once -13 is asked about: a directory under write access, O_CREAT or O_TRUNC
+# is -21 — and under O_CREAT|O_EXCL -17, as Linux's EEXIST (real Windows' CREATE_NEW refuses an
+# existing directory ERROR_ACCESS_DENIED; wine already says ERROR_FILE_EXISTS); a read-only open of
+# a directory keeps its -13 (Linux opens one: CreateFileW needs FILE_FLAG_BACKUP_SEMANTICS, which
+# only O_DIRECTORY asks for). CHANGELOG [6.7.16]
+fn _win_open_eacces(path, flags, h): i64 {
+    if (h != 0 - 13) { return h; }
+    if ((flags & 579) == 0) { return h; }       # O_RDONLY without O_CREAT / O_TRUNC
+    if (_win_is_dir(path) == 0) { return h; }
+    if ((flags & 192) == 192) { return 0 - 17; }
+    return 0 - 21;
+}
+
+# An unlink's answer `r` once -13 is asked about: a directory is -21 (DeleteFileW refuses one
+# ERROR_ACCESS_DENIED). Shared by sys_unlink and lib/io.cyr's xunlink. CHANGELOG [6.7.16]
+fn _win_unlink_eacces(path, r): i64 {
+    if (r != 0 - 13) { return r; }
+    if (_win_is_dir(path) == 1) { return 0 - 21; }
+    return r;
+}
+
+# 6.7.17 — A RENAME ONTO THE OTHER KIND answers Linux's errno (6.7.17's D35 / D36, the user,
+# 2026-10-22: "Refuse with -20, as Linux"; "-21, as Linux"). MoveFileExW with
+# MOVEFILE_REPLACE_EXISTING let a DIRECTORY replace an existing FILE (it answered 0 and the file
+# and its bytes were gone), and refuses a file onto a directory ERROR_ACCESS_DENIED (-13 through
+# the table). A directory onto an existing non-directory is -20 (ENOTDIR) without the move, the
+# file kept: the target is asked just before the move, so a file made there in that instant can
+# still be replaced (Linux refuses atomically). A -13 whose target is a directory and whose source
+# is not is -21 (EISDIR), D95's shape; a real permission refusal stays -13, and so does a directory
+# onto a directory (Windows cannot replace one; Linux answers 0 or -39). Shared by sys_rename and
+# lib/io.cyr's file_rename. CHANGELOG [6.7.17]
+fn _win_rename(oldpath, newpath): i64 {
+    if (_win_is_dir(oldpath) == 1) {
+        var at = syscall(61465, newpath);       # GetFileAttributesW (narrow)
+        if (at != 4294967295) {                 # the target exists ...
+            if ((at & 16) == 0) { return 0 - 20; }   # ... and is no directory
+        }
+    }
+    var r = syscall(61492, oldpath, newpath);   # MoveFileExW (REPLACE_EXISTING | WRITE_THROUGH)
+    if (r != 0 - 13) { return r; }
+    if (_win_is_dir(newpath) == 0) { return r; }
+    if (_win_is_dir(oldpath) == 1) { return r; }
+    return 0 - 21;
 }
 
 # Attributes (low dword) and reparse tag (high dword) of an OPEN handle, via
@@ -263,7 +341,8 @@ fn _win_same_file(a, b): i64 {
 # O_DIRECTORY|O_NOFOLLOW (BACKUP_SEMANTICS + OPEN_REPARSE_POINT: never follows, never
 # truncates, never creates) and ask THAT handle: a name surrogate is -ELOOP (-40); a real
 # directory under write access / O_CREAT / O_TRUNC is -EISDIR (-21), as on Linux; anything else
-# keeps the original answer `err` — including the documented plain-directory divergence (-1).
+# keeps the original answer `err` — including the documented plain-directory divergence (-13,
+# -EACCES since 6.7.14 — it was -1). CHANGELOG [6.7.14]
 # The probe only CHOOSES AN ERRNO; nothing it opens is handed back. CHANGELOG [6.6.9]
 fn _win_nofollow_refusal(path, flags, err): i64 {
     var p = syscall(SYS_OPEN, path, 196608, 0);   # O_RDONLY | O_DIRECTORY | O_NOFOLLOW
@@ -342,27 +421,72 @@ fn _win_open_checked(path, flags, mode): i64 {
 # and truncated only when it is the SAME FILE as `h` (`_win_same_file`) — a name swapped in
 # between, for a link or for another file, is refused. 0 on success, -1 on failure.
 # CHANGELOG [6.6.9]
+# The 0xF03F reroute answers 0 / -errno since 6.7.16 (it was SetEndOfFile's BOOL), so success is
+# `== 0`. CHANGELOG [6.7.16]
 fn _win_truncate_verified(h, path): i64 {
-    if (syscall(61503, h) != 0) { return 0; }
+    if (syscall(61503, h) == 0) { return 0; }
     var t = syscall(SYS_OPEN, path, 131073, 0);   # O_WRONLY | O_NOFOLLOW
     if (t < 0) { return 0 - 1; }
     var r = 0 - 1;
     if (_win_same_file(h, t) == 1) {
-        if (syscall(61503, t) != 0) { r = 0; }
+        if (syscall(61503, t) == 0) { r = 0; }
     }
     syscall(SYS_CLOSE, t);
     return r;
 }
 
 # Close the descriptor `fd`. Rerouted to kernel32!CloseHandle.
-# Returns 0 on success, -1 on failure.
+# Returns 0 on success, or a negative errno when the close fails: -9
+# for a handle that is not open, as on Linux. Until 6.7.15 it answered
+# CloseHandle's BOOL (1 closed, 0 failed). CHANGELOG [6.7.15]
+# fd 0 / 1 / 2 close the std streams, as on Linux: the std handle is
+# closed and its slot cleared (SetStdHandle), so a later write to the fd
+# answers -9 and a second close -9. A HANDLE another std slot still holds
+# (a child started with one handle as stdout and stderr) stays open for
+# that slot. Until 6.7.16 the fd went to CloseHandle as the HANDLE value
+# 0 / 1 / 2: the close answered -9 and the stream stayed open.
+# CHANGELOG [6.7.16]
+# A negative fd answers -9, as on Linux, and never reaches CloseHandle:
+# -1 / -2 are the current-process / -thread pseudo-handles, which it
+# "closes" with TRUE, so until 6.7.16 `sys_close(-1)` answered 0.
+# CHANGELOG [6.7.16]
+# An fd above 2 with a low bit set answers -9 too, in this close and in
+# the read / write / seek / fsync / ftruncate reroutes: the NT kernel
+# ignores a handle value's two low bits, so until 6.7.16
+# `sys_close(h + 3)` closed the open `h` and answered 0. CHANGELOG [6.7.16]
 fn sys_close(fd) {
     return syscall(SYS_CLOSE, fd);
 }
 
+# 1 when `fd` cannot be a descriptor on Windows: above 2 with a low bit set. The NT kernel ignores a
+# HANDLE value's two low bits, so such a value reaches a Win32 or Winsock call as the live handle
+# below it — `h + 3` IS `h`: a closesocket(s + 3) closed the socket `s`, a LockFileEx(h + 1) locked
+# `h`'s file. Every handle cyrius hands out as an fd above 2 (a file, a pipe, a socket) is a
+# multiple of 4. The fd reroutes (close / read / write / seek / fsync / ftruncate) refuse such an
+# fd in the emitter; each wrapper that hands an fd to a raw handle reroute (the socket verbs here
+# and in lib/net.cyr, lib/tls_native_conn.cyr, lib/async_win.cyr; xflock; win_handle_under) asks
+# this first and answers -9 (EBADF), as Linux answers an fd it never handed out. CHANGELOG [6.7.16]
+fn _win_fd_aliases(fd): i64 {
+    if (fd > 2) {
+        if ((fd & 3) != 0) { return 1; }
+    }
+    return 0;
+}
+
 # Seek within `fd`. `whence`: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END.
 # Rerouted to kernel32!SetFilePointerEx (the 64-bit-capable form).
-# Returns the new offset or -1 on failure.
+# Returns the new offset, or a negative errno when the seek fails: -22
+# for a position before 0 (ERROR_NEGATIVE_SEEK) or a bad `whence`, -9
+# for a bad handle, as on Linux. The position is unchanged then. Until
+# 6.7.14 a failed seek answered 0. CHANGELOG [6.7.14]
+# fd 0 / 1 / 2 seek the std handles (GetStdHandle), so a seek on a
+# redirected stdin / stdout / stderr reaches its file, as on Linux; until
+# 6.7.15 they failed -9. CHANGELOG [6.7.15]
+# A pipe or a console (a std handle or any other) answers -29 (ESPIPE),
+# as on Linux (macOS: a pipe), so `xlseek(0, 0, SEEK_CUR) < 0` detects a
+# piped stdin; NUL still seeks, as /dev/null does. Until 6.7.16 real
+# Windows answered the asked offset (the stream did not move) and wine -1.
+# CHANGELOG [6.7.16]
 fn sys_lseek(fd, offset, whence) {
     return syscall(SYS_LSEEK, fd, offset, whence);
 }
@@ -484,25 +608,34 @@ var WNOHANG = 1;
 fn sys_kill(pid, sig): i64 { return 0 - 1; }
 # chmod has no Windows equivalent (ACL model differs); no-op success.
 fn sys_chmod(path, mode): i64 { return 0; }
-# Best-effort dup2 stub: returns the requested newfd (handle dup is rerouted).
-fn sys_dup2(oldfd, newfd): i64 { return newfd; }
+# dup2 — Win32 has no dup2, and the PE backend has no route for it (no DuplicateHandle /
+# SetStdHandle reroute), so it fails closed with -ENOSYS (-38) for every call, as sys_fcntl does:
+# answering `newfd` read as a redirect that never happened, and a portable
+# `if (sys_dup2(a, b) < 0)` never saw the failure. CHANGELOG [6.7.15]
+fn sys_dup2(oldfd, newfd): i64 { return 0 - 38; }
 # pipe — Windows has no anonymous-pipe syscall on the reroute table. Fail closed with -1 so a
 # caller's `< 0` path runs (lib/regression.cyr, lib/pam.cyr's Linux-only body); before this the
 # name was UNDEFINED on PE and every call site compiled to a ud2 trap. CHANGELOG [6.6.9] bite 7.
 fn sys_pipe(fds): i64 { return 0 - 1; }
+# mkdir / unlink / rmdir answer 0 on success, or a negative errno as Linux does: the Win32
+# failure is mapped through the PE backend's GetLastError table, so an existing name is -17,
+# a missing path -2, a non-empty directory -39 (macOS answers its own -66 there) and a refused
+# one -13. Until 6.7.16 every failure was -1. A path the emitter cannot widen (invalid UTF-8)
+# is still -1: no Win32 call was made. CHANGELOG [6.7.16]
 # mkdir — routed to kernel32!CreateDirectoryW by the PE backend's syscall(83)
-# reroute (src/backend/pe/emit.cyr _pe_ensure_createdir, v5.11.22). Returns 0 on
-# success, -1 on failure. (Was a no-op `return 0` stub through v6.3.42 — VR-01
-# surfaced that it never actually created the directory on Windows.)
+# reroute (src/backend/pe/emit.cyr _pe_ensure_createdir, v5.11.22). (Was a no-op
+# `return 0` stub through v6.3.42 — VR-01 surfaced that it never actually created
+# the directory on Windows.)
 fn sys_mkdir(path, mode): i64 { return syscall(83, path, mode); }
 # unlink — routed to kernel32!DeleteFileW by the PE backend's syscall(87) reroute
-# (_pe_ensure_deletef, v5.11.22). Returns 0 on success, -1 on failure. (Was a
-# no-op `return 0` stub through v6.3.42 — VR-01 surfaced the file was never deleted.)
-fn sys_unlink(path): i64 { return syscall(87, path); }
+# (_pe_ensure_deletef, v5.11.22). (Was a no-op `return 0` stub through v6.3.42 —
+# VR-01 surfaced the file was never deleted.)
+# A directory answers -21, as Linux, where DeleteFileW's refusal read -13 (6.7.16's D95).
+fn sys_unlink(path): i64 { return _win_unlink_eacces(path, syscall(87, path)); }
 # Remove an empty directory — kernel32!RemoveDirectoryW through the 0xF03B reroute (the one
-# lib/io.cyr's xrmdir already uses). Returns 0 on success, -1 on failure. 6.6.10: the reroute
-# existed since 6.6.6 but no `sys_rmdir` did, so a portable caller of the POSIX name failed to
-# COMPILE for PE (tests/tcyr/platform/fs.tcyr). CHANGELOG [6.6.10]
+# lib/io.cyr's xrmdir already uses). 6.6.10: the reroute existed since 6.6.6 but no
+# `sys_rmdir` did, so a portable caller of the POSIX name failed to COMPILE for PE
+# (tests/tcyr/platform/fs.tcyr). CHANGELOG [6.6.10]
 fn sys_rmdir(path): i64 { return syscall(0xF03B, path); }
 
 # --- v6.5.25: raw floor wrappers this STANDALONE peer never defined ---
@@ -535,7 +668,7 @@ fn sys_getppid(): i64 { return 0 - 1; }
 # including it) failed to COMPILE, with `array size identifier must be an enum constant`
 # followed by a run of undefined-variable errors. A build failure, not a runtime one.
 #
-# ⚠ THE HALF-FIX TRAP THIS AVOIDS, which CLAUDE.md records from v6.5.7: adding `STAT_SIZE`
+# ⚠ THE HALF-FIX TRAP THIS AVOIDS (met at v6.5.7): adding `STAT_SIZE`
 # alone, or only the names in the first error message, leaves the next consumer hitting the
 # next missing member. The full set the peers publish is defined here in one go.
 #
@@ -607,106 +740,55 @@ fn sys_sendto(fd, buf, len, flags, dstaddr, dstaddrlen): i64 { return 0 - 38; }
 # Set a file's length by descriptor — REAL since 6.6.9 (it declined with -38 before). Windows
 # sets the end of file at the CURRENT file pointer (SetEndOfFile, reroute 0xF03F), so this
 # seeks to `length`, sets it, and puts the pointer back where the caller had it, which is what
-# ftruncate(2) leaves alone. Growing zero-fills, as POSIX requires. 0 on success, -22
-# (-EINVAL) for a negative length, -1 on a Win32 failure (a handle without write access, for
-# one). ⚠ That includes an O_APPEND descriptor, where Linux succeeds: the PE open of O_APPEND
+# ftruncate(2) leaves alone. Growing zero-fills, as POSIX requires. 0 on success, or a
+# negative errno as Linux answers it (6.7.16's D79 / D80): -22 (-EINVAL) for a negative length
+# and for a descriptor it cannot truncate — a pipe or a console (the seek's -29), a device such as
+# NUL, and a handle without write access (SetEndOfFile's -13: a read-only descriptor), -9 for a
+# bad or closed one, another failure's own errno through the Win32 table. Until 6.7.16 every
+# Win32 failure was -1.
+# ⚠ An O_APPEND descriptor answers -22 too, where Linux succeeds: the PE open of O_APPEND
 # grants FILE_APPEND_DATA WITHOUT FILE_WRITE_DATA (NT's per-write append), and SetEndOfFile
 # needs the latter. Truncate by path (sys_truncate), or open without O_APPEND. CHANGELOG [6.6.9]
+# fd 0 / 1 / 2 truncate the std stream's file (a redirected stdout, say), as on Linux; until 6.7.16
+# SetEndOfFile got the HANDLE value 0 / 1 / 2 and the truncate answered -1. CHANGELOG [6.7.16]
 fn sys_ftruncate(fd, length): i64 {
     if (length < 0) { return 0 - 22; }
     var cur = syscall(SYS_LSEEK, fd, 0, 1);
-    if (cur < 0) { return 0 - 1; }
-    if (syscall(SYS_LSEEK, fd, length, 0) < 0) { return 0 - 1; }
-    var ok = syscall(61503, fd);
+    if (cur < 0) { return _win_ftrunc_err(cur); }
+    var sk = syscall(SYS_LSEEK, fd, length, 0);
+    if (sk < 0) { return _win_ftrunc_err(sk); }
+    var r = syscall(61503, fd);
     syscall(SYS_LSEEK, fd, cur, 0);
-    if (ok == 0) { return 0 - 1; }
+    # Both seeks just accepted the descriptor, so a -9 here is the object refusing the truncate,
+    # not a bad fd: wine answers SetEndOfFile on its NUL device ERROR_INVALID_HANDLE. -22, as
+    # Linux's ftruncate of /dev/null (6.7.16's D80). CHANGELOG [6.7.16]
+    if (r == 0 - 9) { return 0 - 22; }
+    if (r < 0) { return _win_ftrunc_err(r); }
     return 0;
 }
+# A failed step of sys_ftruncate → its answer: what it cannot truncate is -22, as Linux's
+# ftruncate answers a pipe, a device and a read-only descriptor — the seek check's -29 (a pipe or
+# a console), SetEndOfFile's -13 (no FILE_WRITE_DATA) and a code the shared Win32 table leaves -1:
+# a device that cannot be truncated, like NUL, whose SetEndOfFile fails ERROR_INVALID_FUNCTION on
+# real Windows (the table keeps -1 for that code: a `1:22` row would change every reroute's
+# answer). Any other errno is the answer as it is. CHANGELOG [6.7.16]
+fn _win_ftrunc_err(e): i64 {
+    if (e == 0 - 29) { return 0 - 22; }
+    if (e == 0 - 13) { return 0 - 22; }
+    if (e == 0 - 1) { return 0 - 22; }
+    return e;
+}
 # Set a file's length by path — REAL since 6.6.9: opens the path for writing (following a
-# link, as truncate(2) does), then sys_ftruncate. Same returns. CHANGELOG [6.6.9]
+# link, as truncate(2) does), then sys_ftruncate. Same returns, and a failed open answers its own
+# errno (-2 for a missing path; -1 until 6.7.16; a directory -21, as Linux — 6.7.16's D95 — through
+# sys_open). CHANGELOG [6.6.9] [6.7.16]
 fn sys_truncate(path, length): i64 {
     if (length < 0) { return 0 - 22; }
-    var h = syscall(SYS_OPEN, path, 1, 0);   # O_WRONLY
-    if (h < 0) { return 0 - 1; }
+    var h = sys_open(path, 1, 0);            # O_WRONLY
+    if (h < 0) { return h; }
     var r = sys_ftruncate(h, length);
     syscall(SYS_CLOSE, h);
     return r;
-}
-
-# Decode EXACTLY `n` bytes of UTF-8 at `src` into UTF-16LE at `dst` ('/' → '\'), at most
-# `cap` - 1 units plus a NUL; a code point past U+FFFF becomes a surrogate pair. Returns the unit
-# count, or -1 — and then `dst` must not be used — for an embedded NUL (a NUL inside the bytes
-# would silently cut the path), invalid UTF-8 (a stray continuation byte, a truncated or overlong
-# sequence, an encoded surrogate, anything past U+10FFFF) or no room. REFUSE, NEVER TRUNCATE: the
-# byte-per-unit loops this replaced zero-extended UTF-8 as Latin-1 and cut at their cap, so a
-# non-ASCII name was answered as some other name and a long one as its own prefix. It is the ONE
-# stdlib decoder, behind `_win_widen` below — which `sys_symlink` uses for CreateSymbolicLinkW
-# (0xF03E), the one reroute that still takes wide paths. Since 6.6.12 the stat/list reroutes
-# (0xF016 FindFirstFileW, 0xF019 GetFileAttributesW) take narrow paths and are decoded by the
-# emitter, like open. CHANGELOG [6.6.11], [6.6.12]
-fn _win_widen_n(dst, src, n, cap): i64 {
-    var i = 0;
-    var o = 0;
-    while (i < n) {
-        var c = load8(src + i);
-        var cp = c;
-        var k = 0;
-        if (c == 0) { return 0 - 1; }
-        if (c >= 0x80) {
-            if (c < 0xC2) { return 0 - 1; }             # continuation byte / overlong 2-byte lead
-            if (c >= 0xF5) { return 0 - 1; }            # past U+10FFFF
-            k = 1;
-            cp = c & 0x1F;
-            if (c >= 0xE0) { k = 2; cp = c & 0x0F; }
-            if (c >= 0xF0) { k = 3; cp = c & 0x07; }
-            if (i + k >= n) { return 0 - 1; }           # truncated sequence
-            var j = 1;
-            while (j <= k) {
-                var cc = load8(src + i + j);
-                if ((cc & 0xC0) != 0x80) { return 0 - 1; }
-                cp = (cp << 6) | (cc & 0x3F);
-                j = j + 1;
-            }
-            if (k == 2) {
-                if (cp < 0x800) { return 0 - 1; }       # overlong
-                if ((cp & 0xF800) == 0xD800) { return 0 - 1; }   # an encoded surrogate
-            }
-            if (k == 3) {
-                if (cp < 0x10000) { return 0 - 1; }     # overlong
-                if (cp > 0x10FFFF) { return 0 - 1; }
-            }
-        }
-        if (cp == 47) { cp = 92; }                      # '/' → '\'
-        if (cp >= 0x10000) {
-            if (o + 2 >= cap) { return 0 - 1; }
-            var v = cp - 0x10000;
-            store16(dst + o * 2, 0xD800 | (v >> 10));
-            store16(dst + o * 2 + 2, 0xDC00 | (v & 0x3FF));
-            o = o + 2;
-        } else {
-            if (o + 1 >= cap) { return 0 - 1; }
-            store16(dst + o * 2, cp);
-            o = o + 1;
-        }
-        i = i + 1 + k;
-    }
-    store16(dst + o * 2, 0);
-    return o;
-}
-
-# Widen a NUL-terminated UTF-8 path into `dst` (`cap` units including the NUL) via
-# `_win_widen_n`. Returns the unit count, or -1 when the path does not fit or is not valid
-# UTF-8 — it never cuts a path to fit (it did until 6.6.11: `sys_symlink` then created its link
-# at the path's first 518 units). This peer includes nothing, which is why the one decoder lives
-# here for the other modules to call; the stack buffers its callers pass need no allocator.
-# CHANGELOG [6.6.9], [6.6.11]
-fn _win_widen(dst, src, cap): i64 {
-    var n = 0;
-    while (load8(src + n) != 0) {
-        n = n + 1;
-        if (n >= cap * 3) { return 0 - 1; }             # more bytes than `cap` units can hold
-    }
-    return _win_widen_n(dst, src, n, cap);
 }
 
 # symlink(target, linkpath) — REAL since 6.6.9: CreateSymbolicLinkW (reroute 0xF03E). Windows
@@ -714,21 +796,32 @@ fn _win_widen(dst, src, cap): i64 {
 # resolved the way the link will resolve it (a relative target against the LINK's directory):
 # a directory gets SYMBOLIC_LINK_FLAG_DIRECTORY, anything else — including a target that does
 # not exist yet, a dangling link — a file link. SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
-# is asked first (Developer Mode lets a normal user create links with it); a Windows too old
-# to know the flag refuses it, so the call is retried without. ⚠ Without Developer Mode a
-# NON-elevated process cannot create a link at all and this returns -1 — a Windows policy,
-# not a missing route. 0 on success, -1 on failure. CHANGELOG [6.6.9]
+# is asked first (Developer Mode lets a normal user create links with it); a Windows older than
+# 10 1703 does not know the flag and refuses it ERROR_INVALID_PARAMETER (-22), so ONLY that
+# answer is retried without the flag. Any other answer stands: the flagless call fails
+# ERROR_PRIVILEGE_NOT_HELD (-1) in every non-elevated process, Developer Mode or not, so a retry
+# on any failure replaced the flagged call's -2 / -17 with -1 (measured on cass under `runas
+# /trustlevel:0x20000`, 6.7.16 pw review). ⚠ Without Developer Mode a NON-elevated process
+# cannot create a link at all and this returns -1 — a Windows policy, not a missing route
+# (ERROR_PRIVILEGE_NOT_HELD, a code the Win32 table leaves -1); a path error is answered before
+# that check. 0 on success, or the flagged call's negative errno, as Linux answers: a link under
+# a missing directory -2, an existing link path -17, elevated or not (6.7.16's D94; every failure
+# was -1 before). A resolved target too long to probe is still -1, as a path the widen refuses
+# is.
+# ⛔ 6.7.12 — both paths go to the reroute NARROW (UTF-8), and the emitter widens them: the link
+# path is made absolute and `\\?\`-prefixed at 248+ units, as open() / mkdir() / rename() do;
+# the target is stored verbatim, so a relative one is decoded only ('/' → '\'), never made
+# absolute, and an absolute one (`X:\…`, `\\server\…`) takes the same `\\?\` at 248+ units.
+# Until 6.7.12 this fn widened both itself, capped at 519 units and never prefixed, so a link
+# path over MAX_PATH (260 units) failed -1 on a Windows without process-wide long paths while
+# open() of the same path worked. CHANGELOG [6.6.9], [6.7.12]
 fn sys_symlink(target, linkpath): i64 {
-    var wl[1040];
-    var wt[1040];
-    var rr[3120];
-    if (_win_widen(&wl, linkpath, 519) < 0) { return 0 - 1; }   # 6.6.11: refused, never cut
-    var tn = _win_widen(&wt, target, 519);
-    if (tn < 0) { return 0 - 1; }
+    # The resolved target, NARROW, for the kind probe (the GetFileAttributesW reroute takes UTF-8
+    # and widens it into 32768 units, so 98304 bytes hold anything it can accept: a longer join is
+    # past what Windows can resolve through the link at all, and is refused).
+    var rr[98304];
     # Resolve the target as the link will: absolute ('\...', '/...', 'X:...') as-is, else against
-    # the link's directory (the part of linkpath up to its last separator). Built NARROW (UTF-8):
-    # the GetFileAttributesW reroute takes a narrow path since 6.6.12. Both inputs passed
-    # `_win_widen` at 519 units, so each is under 1557 bytes and `rr` holds the two plus a NUL.
+    # the link's directory (the part of linkpath up to its last separator).
     var abs = 0;
     var t0 = load8(target);
     if (t0 == 92) { abs = 1; }
@@ -736,9 +829,10 @@ fn sys_symlink(target, linkpath): i64 {
     if (t0 != 0) {
         if (load8(target + 1) == 58) { abs = 1; }
     }
-    var ri = 0;
+    var tn = 0;
+    while (load8(target + tn) != 0) { tn = tn + 1; }
+    var ls = 0 - 1;
     if (abs == 0) {
-        var ls = 0 - 1;
         var li = 0;
         while (load8(linkpath + li) != 0) {
             var lc = load8(linkpath + li);
@@ -746,13 +840,15 @@ fn sys_symlink(target, linkpath): i64 {
             if (lc == 47) { ls = li; }
             li = li + 1;
         }
-        while (ri <= ls) {
-            store8(&rr + ri, load8(linkpath + ri));
-            ri = ri + 1;
-        }
+    }
+    if (ls + 1 + tn + 1 > 98304) { return 0 - 1; }   # refused, never cut
+    var ri = 0;
+    while (ri <= ls) {
+        store8(&rr + ri, load8(linkpath + ri));
+        ri = ri + 1;
     }
     var ti = 0;
-    while (load8(target + ti) != 0) {
+    while (ti < tn) {
         store8(&rr + ri + ti, load8(target + ti));
         ti = ti + 1;
     }
@@ -762,9 +858,11 @@ fn sys_symlink(target, linkpath): i64 {
     if (at != 4294967295) {
         if ((at & 16) != 0) { kind = 1; }         # SYMBOLIC_LINK_FLAG_DIRECTORY
     }
-    if (syscall(61502, &wl, &wt, kind | 2) != 0) { return 0; }
-    if (syscall(61502, &wl, &wt, kind) != 0) { return 0; }
-    return 0 - 1;
+    # 0 / -errno since 6.7.16 (the BOOLEAN before); the flagless retry only on -22 (see above).
+    # CHANGELOG [6.7.16]
+    var r = syscall(61502, linkpath, target, kind | 2);   # narrow (6.7.12)
+    if (r != 0 - 22) { return r; }
+    return syscall(61502, linkpath, target, kind);
 }
 # Filesystem statistics by path. Declines on Windows: the nearest peer is GetDiskFreeSpaceExW,
 # a kernel32 import with three out-params and a wide path — a different contract, not a
@@ -887,6 +985,7 @@ fn _sw_wsa_err(): i64 {
 # reroute defines only eax, so rax[63:32] is the callee's to leave dirty. CHANGELOG [6.6.16]
 fn fd_wait_ready(fd, want_write, timeout_ms): i64 {
     if (fd < 0) { return 0 - 10038; }                   # INVALID_SOCKET → -WSAENOTSOCK
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }     # never a descriptor (6.7.16)
     var ms = timeout_ms;
     if (ms < 0) { ms = 0 - 1; }
     if (ms > 0x7FFFFFFF) { ms = 0x7FFFFFFF; }
@@ -945,9 +1044,10 @@ fn sys_mount(source, target, fstype, flags, data): i64 { return 0 - 38; }
 fn sys_umount2(target, flags): i64 { return 0 - 38; }
 # Flush a file (data + metadata) to storage. NOT a decline like the block above: it issues
 # the LINUX number 74 — the sys_mkdir/sys_unlink 83/87 shape — so the PE backend owns the
-# meaning. With the 6.6.7 route, 74/75 at argc 2 go to kernel32!FlushFileBuffers (0 /
-# negative); without it the unrouted literal returns -38/-ENOSYS. Either way a bogus fd reads
-# < 0 and no caller is told a flush happened that did not. Consumers (patra's fdatasync sites,
+# meaning. With the 6.6.7 route, 74/75 at argc 2 go to kernel32!FlushFileBuffers (0, or the
+# negative errno through the Win32 table since 6.7.16's D94 — a bad fd -9, a read-only one -13;
+# -1 for every failure before); without it the unrouted literal returns -38/-ENOSYS. Either way a
+# bogus fd reads < 0 and no caller is told a flush happened that did not. Consumers (patra's fdatasync sites,
 # the write-tmp + fsync + rename pattern) name these, so without them a PE build is refused.
 fn sys_fsync(fd): i64 { return syscall(74, fd); }
 # Flush file data only. Windows has no data-only flush, so the route is the same
@@ -974,12 +1074,14 @@ fn sys_fdatasync(fd): i64 { return syscall(75, fd); }
 # Winsock error, e.g. -10057 WSAENOTCONN). WSAGetLastError is read immediately, before
 # any other call can reset the per-thread last-error. CHANGELOG [6.6.16]
 fn sys_getpeername(fd, addr, addrlen): i64 {
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }     # never a descriptor (6.7.16)
     var r = syscall(61494, fd, addr, addrlen);
     if ((r & 0xFFFFFFFF) == 0) { return 0; }
     return _sw_wsa_err();           # -WSAGetLastError (0xF024)
 }
 # getsockname (0xF037 → ws2_32!getsockname): same normalization as getpeername.
 fn sys_getsockname(fd, addr, addrlen): i64 {
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }     # never a descriptor (6.7.16)
     var r = syscall(61495, fd, addr, addrlen);
     if ((r & 0xFFFFFFFF) == 0) { return 0; }
     return _sw_wsa_err();
@@ -990,6 +1092,7 @@ fn sys_getsockname(fd, addr, addrlen): i64 {
 # `fd` is a ws2_32 SOCKET (lib/net.cyr's tcp_socket on PE, real since 6.6.11 — until then it
 # returned -38 there and this comment described a socket nothing could create). CHANGELOG [6.6.10]
 fn sys_listen(fd, backlog): i64 {
+    if (_win_fd_aliases(fd) == 1) { return 0 - 9; }     # never a descriptor (6.7.16)
     var r = syscall(0xF033, fd, backlog);
     if ((r & 0xFFFFFFFF) == 0) { return 0; }
     return _sw_wsa_err();           # -WSAGetLastError (0xF024)
@@ -1000,7 +1103,7 @@ fn sys_listen(fd, backlog): i64 {
 # ================================================================
 # 0xF038 → kernel32!QueryPerformanceCounter(LARGE_INTEGER*)
 # 0xF039 → kernel32!QueryPerformanceFrequency(LARGE_INTEGER*)
-# (src/backend/x86/emit.cyr EQPC_PE / EQPF_PE, routed in src/frontend/parse_expr.cyr.)
+# (src/backend/x86/emit.cyr EQPC_PE / EQPF_PE, routed in src/frontend/parse/expr/callee.cyr.)
 #
 # ⛔ WHY: Windows had NO sub-millisecond clock in cyrius at all. `syscall(228)` reroutes
 # to kernel32!GetTickCount64, whose counter advances in **15 ms** steps (measured on
@@ -1080,11 +1183,14 @@ fn sys_qpc_ns(): i64 {
 
 # rename(old, new) — REAL, not a degrade: 0xF034 (61492) → kernel32!MoveFileExW with
 # MOVEFILE_REPLACE_EXISTING, live since v6.4.57 and already the Windows arm of
-# lib/io.cyr's portable `file_rename`. Returns 0 on success / -1 on failure (the BOOL is
-# folded to the POSIX contract by the emitter), which is what POSIX callers check.
-# ⚠ Unlike rename(2) this CAN move across volumes (MOVEFILE_COPY_ALLOWED is not set, so
-# it does not; a cross-volume move fails, as rename(2) does with EXDEV).
-fn sys_rename(oldpath, newpath): i64 { return syscall(61492, oldpath, newpath); }
+# lib/io.cyr's portable `file_rename`. Returns 0 on success, or the negative errno through the
+# Win32 table, as rename(2) answers — a missing source -2 (6.7.16's D94; -1 for every failure
+# before). A directory onto an existing file is -20 and a file onto a directory -21, as Linux
+# (`_win_rename`; 6.7.17's D35 / D36 — the directory replaced the file and a file answered -13).
+# ⚠ MoveFileExW moves a file across volumes only with MOVEFILE_COPY_ALLOWED, which is not set, so
+# a cross-volume rename fails ERROR_NOT_SAME_DEVICE, which the Win32 table maps to -18 (EXDEV), as
+# rename(2) answers (6.7.17's D96; it was -1). CHANGELOG [6.7.17]
+fn sys_rename(oldpath, newpath): i64 { return _win_rename(oldpath, newpath); }
 
 # GetModuleFileNameW(NULL, wbuf, cch) — 0xF03A (61498), the Windows source for the full
 # path of THIS executable. `cch` is the buffer capacity in WCHARs (wbuf must hold

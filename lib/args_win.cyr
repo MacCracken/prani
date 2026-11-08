@@ -32,21 +32,24 @@ var _args_len = 0;
 # Initialize argument access. Splits GetCommandLineW with the real
 # CommandLineToArgvW, converts each wide arg to UTF-8, joins into the blob,
 # frees the array. Safe to call first-thing: alloc() lazy-bootstraps the
-# heap (alloc.cyr v5.8.37). Returns the blob length (informational — Linux
-# returns bytes read, macOS returns 0, WIN returns blob bytes).
+# heap (alloc.cyr v5.8.37). Returns the blob length, or a negative errno when
+# the command line cannot be read (D7, as the Linux arm): -5 (EIO) when
+# GetCommandLineW answers NULL, -12 (ENOMEM) when CommandLineToArgvW (whose
+# failure is its own allocation's) or the blob's alloc fails — never 0 for a
+# failure, since 0 is what macOS answers on success. CHANGELOG [6.7.12]
 fn args_init() {
     var w = syscall(61446);                  # GetCommandLineW -> LPWSTR
-    if (w == 0) { return 0; }
+    if (w == 0) { return 0 - 5; }
     var nargs[8];                            # int* out-param for CommandLineToArgvW
     store64(&nargs, 0);
     var argvw = syscall(61456, w, &nargs);   # CommandLineToArgvW(w, &argc) -> LPWSTR*
-    if (argvw == 0) { return 0; }
+    if (argvw == 0) { return 0 - 12; }
     var n = load64(&nargs) & 0xFFFFFFFF;     # argc (it writes a 4-byte int)
     # UTF-8 of a valid Windows cmdline (32767 wide chars, <=3 bytes/char) fits
     # well under 128 KB, so the joined blob never truncates.
     var cap = 131072;
     var buf = alloc(cap);
-    if (buf == 0) { syscall(61457, argvw); return 0; }   # LocalFree on failure
+    if (buf == 0) { syscall(61457, argvw); return 0 - 12; }   # LocalFree on failure
     _args_base = buf;
     var bo = 0;
     var k = 0;

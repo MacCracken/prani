@@ -12,7 +12,7 @@
 # Cyrius re-implementation of agnosys syscall bindings.
 # Constants are enums so they fold to compile-time literals: no data slot and no load, and a
 # syscall number spelled with one is a LITERAL to the compiler's per-target syscall routing (a
-# `var` number is not — parse_expr.cyr's non-literal-number warning). CHANGELOG [6.6.11]
+# `var` number is not — parse/expr/callee.cyr's non-literal-number warning). CHANGELOG [6.6.11]
 
 # ================================================================
 # Syscall numbers (x86_64)
@@ -24,6 +24,7 @@ enum SysNr {
     SYS_CLOSE = 3;
     SYS_STAT = 4;
     SYS_FSTAT = 5;
+    SYS_POLL = 7;           # 6.7.14: fd_wait_ready's number, named (the native-region warning)
     SYS_LSEEK = 8;
     SYS_MMAP = 9;
     # v6.6.4: was a raw 73 in lib/io.cyr, and a raw NATIVE 32 on its aarch64 arm that the
@@ -459,6 +460,10 @@ fn sys_rmdir(path): i64 {
 }
 
 # Delete a file.
+# cx (this peer is the .cyx guest's table): cxvm translates unlink's path and serves it through
+# the host's own wrapper since 6.7.15. It answered -ENOSYS here from 6.7.12, when cxvm passed the
+# path to the host untranslated (-EFAULT, the file left), and so file_write_atomic's failure
+# cleanup left its temp on cx. CHANGELOG [6.7.12] [6.7.15]
 fn sys_unlink(path): i64 {
     return syscall(SYS_UNLINK, path);
 }
@@ -540,7 +545,12 @@ fn sys_fork(): i64 {
 }
 
 # pipe: create pipe, fds[0]=read end, fds[1]=write end
+# cx: -ENOSYS, and `fds` is left as it was. cxvm passes the fd-pair buffer to the host
+# untranslated (a guest offset: -EFAULT). CHANGELOG [6.7.12]
 fn sys_pipe(fds): i64 {
+    #ifdef CYRIUS_TARGET_CX
+    return 0 - 38;
+    #endif
     return syscall(SYS_PIPE, fds);
 }
 
@@ -583,10 +593,31 @@ fn sigset_has(set, signum): i64 {
 # sys_sigprocmask / sys_signalfd / sys_epoll_create moved to
 # lib/syscalls_linux_common.cyr at v5.11.20.
 
-# epoll_event: { u32 events, u64 data } = 12 bytes
+# epoll_event: { u32 events, u64 data } = 12 bytes. A new one, filled by epoll_event_set (16
+# bytes allocated). Returns the event, or 0 when the allocation fails.
 fn epoll_event_new(events, data): i64 {
     var ev = alloc(16);
     if (ev == 0) { return 0; }
+    return epoll_event_set(ev, events, data);
+}
+
+# The size of one epoll_event on x86_64 Linux — the array stride sys_epoll_wait writes at. The
+# struct is EPOLL_PACKED here, { u32 events, u64 data @4 }: 12 bytes (16 on aarch64, where it is
+# not packed). CHANGELOG [6.7.12]
+const EPOLL_EVENT_SIZE = 12;
+
+# The events mask of the epoll_event at `ev` (one element of a sys_epoll_wait array, or an
+# epoll_event_new result).
+fn epoll_event_events(ev): i64 { return load32(ev); }
+
+# The u64 data of the epoll_event at `ev` — at offset 4 on x86_64 (the packed layout
+# epoll_event_new writes). Step through a sys_epoll_wait array by EPOLL_EVENT_SIZE.
+fn epoll_event_data(ev): i64 { return load64(ev + 4); }
+
+# Fill the epoll_event at `ev`, a buffer the caller owns (a stack `var ev[16]`, at least
+# EPOLL_EVENT_SIZE bytes): `events` at 0 and `data` at offset 4 (x86_64's packed layout).
+# Returns ev, for sys_epoll_ctl. The allocation-free twin of epoll_event_new. CHANGELOG [6.7.14]
+fn epoll_event_set(ev, events, data): i64 {
     store32(ev, events);
     store64(ev + 4, data);
     return ev;

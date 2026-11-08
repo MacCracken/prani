@@ -6,7 +6,9 @@ call to the **ported Cyrius symbol names** in `lib/svara.cyr` / `lib/naad.cyr`
 (resolved via cyrius.cyml). Verify against `../svara/src/{glottal,formant,tract}.cyr`
 and `../naad/src/filter.cyr` if a signature looks off.
 
-**Checked against svara 3.6.0 / naad 2.3.0** — the tags pinned in `cyrius.cyml`.
+**Checked against svara 3.6.3 / naad 2.3.3** — the tags pinned in `cyrius.cyml`.
+At 2.1.1 no entry point below changed what its return means. One refuses an input
+more, noted on its row.
 Written as a porting map, kept as the standing description of the surface prani
 consumes: **re-verify it on every svara or naad bump.** 2.0.3's CRITICAL was a
 return value whose name and arity did not change while its *meaning* did.
@@ -34,7 +36,7 @@ where the Rust used `PraniError::SynthesisFailed`, to `PRANI_ERR_SYNTHESIS_FAILE
 | Rust | Cyrius |
 |---|---|
 | `VocalTract::new(sr)` | `svara_tract_new(sr)` → ptr **or a negative `SVARA_ERR_*`** — `_INVALID_FORMANT` if no formant bank builds, `_COMPUTATION` (via `svara_map_naad_error`) if a fixed biquad does not. **Check it.** Rust returned `Self` infallibly; svara 3.x made it checkable, and the port using the return as a pointer regardless is the SIGSEGV 2.0.3 repaired ([ADR-0001](../adr/0001-check-svara-tract-constructor.md)). |
-| `t.set_formants_from_target(&target)?` | `svara_tract_set_formants_from_target(t, target)` → `SVARA_ERR_NONE`(0) or negative |
+| `t.set_formants_from_target(&target)?` | `svara_tract_set_formants_from_target(t, target)` → `SVARA_ERR_NONE`(0) or negative. Since svara 3.6.3 an infinite bandwidth is negative too; a finite but huge one (`f64::MAX`) is still accepted and renders NaN |
 | `t.process_sample(x)` | `svara_tract_process_sample(t, x)` |
 | `t.synthesize(&mut g, n)` → Vec | `svara_tract_synthesize(t, g, n)` → **raw `alloc(n*8)` buffer, or `0`** if `n` is not an allocatable sample count (NOT a stdlib vec; read with `load64(buf+i*8)`). Internals = per-sample loop `store64(out+i*8, process_sample(t, glottal_next_sample(g)))`. **Prefer inlining that loop to push into a `vec` directly**, avoiding the raw-buffer/vec mismatch when you then DC-block. |
 | `t.reset()` | `svara_tract_reset(t)` |

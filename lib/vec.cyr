@@ -81,19 +81,30 @@ fn _vec_die(): i64 {
     #endif
     return 0;
 }
+# 6.7.17 — WHAT A VEC ABORT RUNS FIRST: a fn pointer (0: nothing). A program holding output it has not written yet sets
+# it — the compiler holds a parse's diagnostics to print them in source order (src/common/util.cyr `_eb_end`), and an
+# abort mid-parse (an index out of range: a compiler bug) wrote its own line and exited with them unwritten. Then the
+# abort's line, then the exit. CHANGELOG [6.7.17]
+var _vec_die_hook = 0;
+fn _vec_abort(msg, n): i64 {
+    if (_vec_die_hook != 0) { fncall0(_vec_die_hook); }
+    syscall(1, 2, msg, n);
+    _vec_die();
+    return 0;
+}
 
 # Get element at index, abort if out of bounds
 fn vec_get(v, idx): i64 {
-    if (idx < 0) { syscall(1, 2, "vec: index < 0\n", 15); _vec_die(); }
-    if (idx >= load64(v + 8)) { syscall(1, 2, "vec: index out of bounds\n", 25); _vec_die(); }
+    if (idx < 0) { _vec_abort("vec: index < 0\n", 15); }
+    if (idx >= load64(v + 8)) { _vec_abort("vec: index out of bounds\n", 25); }
     var data = load64(v);
     return load64(data + idx * 8);
 }
 
 # Set element at index, abort if out of bounds
 fn vec_set(v, idx, val): i64 {
-    if (idx < 0) { syscall(1, 2, "vec: index < 0\n", 15); _vec_die(); }
-    if (idx >= load64(v + 8)) { syscall(1, 2, "vec: index out of bounds\n", 25); _vec_die(); }
+    if (idx < 0) { _vec_abort("vec: index < 0\n", 15); }
+    if (idx >= load64(v + 8)) { _vec_abort("vec: index out of bounds\n", 25); }
     var data = load64(v);
     store64(data + idx * 8, val);
     return 0;
@@ -116,8 +127,7 @@ fn vec_push_a(a, v, val): i64 {
         var old_data = load64(v);
         var new_cap = cap * 2;
         if (new_cap > VEC_CAP_MAX) {
-            syscall(1, 2, "vec: capacity overflow\n", 23);
-            _vec_die();
+            _vec_abort("vec: capacity overflow\n", 23);
         }
         var new_data = alloc_via(a, new_cap * 8);
         if (new_data == 0) { return 0 - 1; }
@@ -140,8 +150,7 @@ fn vec_push_a(a, v, val): i64 {
 fn vec_push(v, val): i64 {
     var rc = vec_push_a(default_alloc(), v, val);
     if (rc < 0) {
-        syscall(1, 2, "vec: alloc failed\n", 18);
-        _vec_die();
+        _vec_abort("vec: alloc failed\n", 18);
     }
     return 0;
 }
@@ -365,8 +374,8 @@ fn vec_sort_by(v, cmp): i64 {
 # in-band sentinel that a valid element could equal.
 fn vec_select_nth(v, k, cmp): i64 {
     var len = load64(v + 8);
-    if (k < 0) { syscall(1, 2, "vec: select_nth k < 0\n", 22); _vec_die(); }
-    if (k >= len) { syscall(1, 2, "vec: select_nth out of bounds\n", 30); _vec_die(); }
+    if (k < 0) { _vec_abort("vec: select_nth k < 0\n", 22); }
+    if (k >= len) { _vec_abort("vec: select_nth out of bounds\n", 30); }
     var data = load64(v);
     var l = 0;
     var h = len - 1;

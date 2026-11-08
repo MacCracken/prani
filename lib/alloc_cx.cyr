@@ -2,15 +2,18 @@
 # Drop-in peer of alloc.cyr's Linux arm / alloc_macos.cyr / alloc_agnos.cyr.
 # API-compatible: alloc_init(), alloc(size), alloc_reset(), alloc_used().
 #
-# WHY A STATIC BUMP HEAP AND NOT mmap/brk (v6.6.6): a .cyx guest has no
-# allocatable address space of its own. cxvm gives it ONE flat region
-# (`_cx_mem`, 1 MB — programs/cxvm.cyr) holding code, data and a downward
-# stack, and guest pointers are OFFSETS into that region which cxvm translates
-# on the pointer-taking syscalls. So a host allocation is useless here twice
-# over: cxvm's syscall dispatch captures only r2..r6, so the 6-argument mmap
-# cannot even be issued, and a host address returned through brk/mmap would be
-# meaningless as a guest offset. The heap therefore has to live INSIDE the
-# guest's own data section, which is what the static buffer below is.
+# WHY A BUMP HEAP OVER THE GUEST BREAK (6.7.14). A .cyx guest has no allocatable host
+# address space: cxvm gives it ONE flat region (`_cx_mem`, 8 MiB since 6.7.12 —
+# programs/cxvm.cyr) holding code, data and a downward stack, and guest pointers are OFFSETS into
+# that region. A host mmap is useless here twice over (cxvm captures only r2..r6, and since
+# 6.7.14's D55 answers it -38; a host address is meaningless as a guest offset). brk (12) is the
+# exception: cxvm SERVES it in guest space — the break starts at the image end and grows into the
+# free guest memory below the stack (programs/cxvm.cyr `_cx_guest_brk`). Until 6.7.14 the heap was
+# a static 128 KB buffer (`_cx_heap_buf`, sized at v6.6.6 for the 1 MB guest) written into every
+# allocating .cyx — 151 KB for a program that allocated 16 bytes — and it was exhausted by any
+# program needing more than 128 KB though the guest had ~7 MiB free (audit_walk's two 2 MB
+# buffers). A .cyx built by this cycc_cx needs a cxvm that serves brk (6.7.14 or later); an older
+# one answers it -38 or with a host address, and alloc_init says so. CHANGELOG [6.7.14]
 #
 # This is why `cycc_cx` could not compile `lib/assert.cyr` at all before
 # v6.6.6: alloc.cyr's arms are per-target `#ifdef`s and the cx driver
@@ -23,56 +26,85 @@
 # no lock — alloc.cyr's `_alloc_lock_acquire`/`_release` are no-ops without an
 # arch macro anyway.
 
-var _heap_base = 0;       # start of the static heap (0 until alloc_init)
+var _heap_base = 0;       # start of the heap: the guest break alloc_init found (0 until then)
 var _heap_ptr = 0;        # bump pointer
-var _heap_end = 0;        # one past the last usable byte
+var _heap_end = 0;        # the guest break: one past the last usable byte
 var _heap_used = 0;       # bytes handed out since the last init/reset
 
 # Maximum single allocation — matches alloc.cyr so a size check written
-# against the Linux arm behaves the same here. The real bound is the buffer.
+# against the Linux arm behaves the same here. The real bound is the guest break.
 var ALLOC_MAX = 0x80000000;
 
-# 16384 slots x 8 B = 131072 B (128 KB), inside cxvm's 1 MB `_cx_mem`. It shares that
-# region with the program's code, the rest of its data and a stack growing
-# down from the top, so this cannot be raised much without shrinking the
-# usable stack — raise _CX_MEM_SIZE in programs/cxvm.cyr first if it ever
-# needs to be. Exhaustion is LOUD (below): a silent 0 from alloc() inside a
-# .cyx would surface as a store to guest offset 0, which cxvm happily
-# performs, corrupting the program's own header area.
-#
-# ONE slot count sizes the buffer AND bounds the heap, so the two cannot drift. (Through 6.6.9
-# the bound was a separate byte constant, `_CX_HEAP_BYTES = 131072`, kept to dodge a cx codegen
-# defect — `global * <power of two>` appeared to corrupt the next call's first argument. The real
-# cause was cx ESETCC compiling `<=` / `>=` the wrong way round, fixed at 6.6.6 bite 21a and
-# pinned by tests/gates/codegen/cx_relational_or_equal.sh axis 3; the workaround outlived it.)
-# The name `_cx_heap_buf` is load-bearing: src/main_cx.cyr's large-static advisory exempts it
-# by name. CHANGELOG [6.6.10]
-enum CxHeap { _CX_HEAP_SLOTS = 16384; }
-var _cx_heap_buf[_CX_HEAP_SLOTS];
+# The break grows in 64 KB steps, so a run of small allocations asks cxvm once per 64 KB; a step
+# cxvm refuses (the stack reserve) is retried at the exact size before alloc gives up.
+var _CX_HEAP_GRAIN = 65536;
+
+# brk(addr) through cxvm: the break after the call (unchanged when the move is refused).
+fn _cx_brk(addr): i64 {
+    return syscall(12, addr);
+}
+
+# Write `v` in decimal on stderr (the exhaustion message; this file includes nothing).
+fn _cx_heap_put_dec(v): i64 {
+    var b[24];
+    var i = 23;
+    if (v == 0) { store8(&b + i, 48); i = i - 1; }
+    while (v > 0) {
+        store8(&b + i, 48 + v % 10);
+        i = i - 1;
+        v = v / 10;
+    }
+    syscall(1, 2, &b + i + 1, 23 - i);
+    return 0;
+}
+
+# Grow the break so the heap reaches `need`: 1 when it does, 0 when cxvm refuses.
+fn _cx_heap_grow(need): i64 {
+    var want = (need + _CX_HEAP_GRAIN - 1) & (0 - _CX_HEAP_GRAIN);
+    var got = _cx_brk(want);
+    if (got < need) { got = _cx_brk(need); }
+    if (got < need) { return 0; }
+    _heap_end = got;
+    return 1;
+}
 
 # Initialize the heap allocator. Idempotent: once the heap is up, a re-call is
 # a no-op returning the existing base. Optional — alloc() lazy-inits.
 fn alloc_init(): i64 {
     if (_heap_base != 0) { return _heap_base; }
-    _heap_base = &_cx_heap_buf;
-    _heap_ptr = _heap_base;
-    _heap_end = _heap_base + _CX_HEAP_SLOTS * 8;
+    var b = _cx_brk(0);
+    if (b <= 0) {
+        syscall(1, 2, "alloc: this cxvm does not serve brk (12): ", 42);
+        syscall(1, 2, "a .cyx from cycc_cx 6.7.14 or later needs cxvm 6.7.14 or later\n", 63);
+        syscall(60, 1);
+    }
+    b = (b + 15) & (0 - 16);
+    _heap_base = b;
+    _heap_ptr = b;
+    _heap_end = b;
     _heap_used = 0;
     return _heap_base;
 }
 
-# Allocate `size` bytes from the static heap, 8-byte aligned. Returns 0 for a
-# non-positive or absurd size; a genuine exhaustion aborts LOUDLY rather than
-# returning 0, because a null store in a .cyx guest writes to guest offset 0,
-# which cxvm performs happily.
+# Allocate `size` bytes from the heap, 8-byte aligned, growing the guest break as
+# it goes. Returns 0 for a non-positive or absurd size; a genuine exhaustion (cxvm
+# refuses to move the break: the guest stack keeps 1 MiB below its live frame)
+# aborts LOUDLY rather than returning 0, because a null store in a .cyx guest is
+# a trap far from the cause, and the message names the size the heap reached.
 fn alloc(size): i64 {
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
     size = (size + 7) & (0 - 8);
     if (_heap_base == 0) { alloc_init(); }
     if (_heap_ptr + size > _heap_end) {
-        syscall(1, 2, "alloc: cx static heap exhausted (128 KB)\n", 41);
-        syscall(60, 1);
+        if (_cx_heap_grow(_heap_ptr + size) == 0) {
+            syscall(1, 2, "alloc: cx heap exhausted at ", 28);
+            _cx_heap_put_dec(_heap_end - _heap_base);
+            syscall(1, 2, " B (the guest break cannot grow by ", 35);
+            _cx_heap_put_dec(_heap_ptr + size - _heap_end);
+            syscall(1, 2, " B more)\n", 9);
+            syscall(60, 1);
+        }
     }
     var ptr = _heap_ptr;
     _heap_ptr = ptr + size;
@@ -83,7 +115,7 @@ fn alloc(size): i64 {
 # Batch-free: rewind the bump pointer. Scrubs the reused span first, for the
 # same memory-reuse information-leak reason alloc.cyr's Linux arm does —
 # alloc_reset is the only point this allocator hands an address to a new
-# owner. ⚠ Invalidates every pointer it has handed out.
+# owner. The break stays where it is. ⚠ Invalidates every pointer it has handed out.
 fn alloc_reset(): i64 {
     if (_heap_base == 0) { return 0; }
     var span = _heap_ptr - _heap_base;

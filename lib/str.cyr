@@ -166,6 +166,131 @@ fn str_builder_add_json_str(sb, s: Str): i64 {
     return 0;
 }
 
+# 6.7.10 — a C string (NUL-terminated) as a JSON value: `null` for a NULL pointer, else its bytes
+# as a quoted string through str_builder_add_json_str's escaper — sigil's hand-rolled
+# `agnosys_json_emit_cstr_or_null` shape byte for byte, without its Str header allocation.
+# `#derive(Serialize)` writes a `: cstring` field through it. The Str is a 16-byte stack cell
+# passed by ADDRESS (`&t`): a `Str` local passed by name reaches an `s: Str` parameter as its
+# data word (issues/archived/2026-10-12-inline-str-local-passed-to-str-param-wrong-value.md). CHANGELOG [6.7.10]
+fn str_builder_add_json_cstr(sb, p): i64 {
+    if (p == 0) { return str_builder_add_cstr(sb, "null"); }
+    var t[16];
+    store64(&t, p);
+    store64(&t + 8, strlen(p));
+    return str_builder_add_json_str(sb, &t);
+}
+
+# The value of the four hex digits at `p` (0-9 a-f A-F), or -1 when one is not a hex digit.
+fn _str_json_hex4(p): i64 {
+    var v = 0;
+    var i = 0;
+    while (i < 4) {
+        var c = load8(p + i);
+        var d = 0 - 1;
+        if (c >= 48 && c <= 57) { d = c - 48; }
+        elif (c >= 97 && c <= 102) { d = c - 87; }
+        elif (c >= 65 && c <= 70) { d = c - 55; }
+        if (d < 0) { return 0 - 1; }
+        v = v * 16 + d;
+        i = i + 1;
+    }
+    return v;
+}
+
+# Code point `cp` (at most 0x10FFFF) written as UTF-8 at `d`; returns the bytes written (1..4).
+fn _str_json_utf8(d, cp): i64 {
+    if (cp < 0x80) { store8(d, cp); return 1; }
+    if (cp < 0x800) {
+        store8(d, 0xC0 | (cp >> 6));
+        store8(d + 1, 0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        store8(d, 0xE0 | (cp >> 12));
+        store8(d + 1, 0x80 | ((cp >> 6) & 0x3F));
+        store8(d + 2, 0x80 | (cp & 0x3F));
+        return 3;
+    }
+    store8(d, 0xF0 | (cp >> 18));
+    store8(d + 1, 0x80 | ((cp >> 12) & 0x3F));
+    store8(d + 2, 0x80 | ((cp >> 6) & 0x3F));
+    store8(d + 3, 0x80 | (cp & 0x3F));
+    return 4;
+}
+
+# Decodes the JSON string body `p[0..n)` (the bytes between its quotes, escapes as written) into
+# `d`; returns the decoded length, never more than `n` (no escape decodes longer than it is
+# written: `\uHHHH` is 6 bytes for at most 3, a surrogate pair 12 for 4).
+fn _str_json_unesc_into(d, p, n): i64 {
+    var i = 0;
+    var o = 0;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c != 92 || i + 1 >= n) {
+            store8(d + o, c);
+            o = o + 1;
+            i = i + 1;
+        } else {
+            var e = load8(p + i + 1);
+            i = i + 2;
+            var cp = 0 - 1;
+            if (e == 117) {
+                if (i + 4 <= n) { cp = _str_json_hex4(p + i); }
+            }
+            if (e == 98) { store8(d + o, 8); o = o + 1; }
+            elif (e == 102) { store8(d + o, 12); o = o + 1; }
+            elif (e == 110) { store8(d + o, 10); o = o + 1; }
+            elif (e == 114) { store8(d + o, 13); o = o + 1; }
+            elif (e == 116) { store8(d + o, 9); o = o + 1; }
+            elif (cp >= 0) {
+                i = i + 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    # A high surrogate joins a following `\uDC00`..`\uDFFF` into one code point.
+                    var lo = 0 - 1;
+                    if (i + 6 <= n && load8(p + i) == 92 && load8(p + i + 1) == 117) {
+                        lo = _str_json_hex4(p + i + 2);
+                    }
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        i = i + 6;
+                    } else { cp = 0xFFFD; }
+                } elif (cp >= 0xDC00 && cp <= 0xDFFF) { cp = 0xFFFD; }
+                o = o + _str_json_utf8(d + o, cp);
+            } else {
+                # \" \\ \/ — and any other escaped byte, `\u` without four hex digits included
+                # (its `u`) — stand for themselves.
+                store8(d + o, e);
+                o = o + 1;
+            }
+        }
+    }
+    return o;
+}
+
+# 6.7.10 — a JSON string body (the bytes between its quotes, escapes as written: what bayan's
+# pairs hold and what a scanner finds) decoded per RFC 8259 §7 into a FRESH NUL-terminated C
+# string: `\" \\ \/ \b \f \n \r \t`, and `\uHHHH` written as UTF-8 (a surrogate pair joined into
+# its 4-byte code point, a lone surrogate U+FFFD); any other escaped byte stands for itself, and
+# other bytes are copied. A decoded U+0000 ends the C string there. 0 when the allocation is
+# refused. `#derive(Serialize)` decodes a `: cstring` field through it. CHANGELOG [6.7.10]
+fn str_json_unescape_cstr(p, n): i64 {
+    var d = alloc(n + 1);
+    if (d == 0) { return 0; }
+    store8(d + _str_json_unesc_into(d, p, n), 0);
+    return d;
+}
+
+# 6.7.10 — str_json_unescape_cstr's decode as a FRESH Str: its length is the decoded length, so a
+# decoded U+0000 stays in it (the buffer is NUL-terminated after it too). 0 when an allocation is
+# refused. `#derive(Serialize)` decodes a `Str` field through it. CHANGELOG [6.7.10]
+fn str_json_unescape(p, n): Str {
+    var d = alloc(n + 1);
+    if (d == 0) { return 0; }
+    var dn = _str_json_unesc_into(d, p, n);
+    store8(d + dn, 0);
+    return str_new(d, dn);
+}
+
 # Compare two Strs
 fn str_eq(a: Str, b: Str): i64 {
     var la = load64(a + 8);
@@ -741,20 +866,22 @@ fn Str_data(self): i64 { return str_data(self); }
 fn Str_print(self): i64 { return str_print(self); }
 # Print string + newline to stdout
 fn Str_println(self): i64 { return str_println(self); }
-# Compare two Strs for equality
-fn Str_eq(self, other): i64 { return str_eq(self, other); }
+# Compare two Strs for equality. `other` (and `Str_cat`'s, the needle / prefix / suffix below) is typed `Str`,
+# so an inline `Str` argument passes its header and a string literal is passed as a `Str` (6.7.14, the user's
+# D18 (c): an untyped one took an inline Str's data word). CHANGELOG [6.7.14]
+fn Str_eq(self, other: Str): i64 { return str_eq(self, other); }
 # Concatenate two Strs (allocates new)
-fn Str_cat(self, other): Str { return str_cat(self, other); }
+fn Str_cat(self, other: Str): Str { return str_cat(self, other); }
 # Substring from start with given length
 fn Str_sub(self, start, len): Str { return str_sub(self, start, len); }
 # Deep copy of string
 fn Str_clone(self): Str { return str_clone(self); }
-# Check if string contains needle (C string)
-fn Str_contains(self, needle): i64 { return str_contains(self, needle); }
-# Check if string starts with prefix (C string)
-fn Str_starts_with(self, prefix): i64 { return str_starts_with(self, prefix); }
-# Check if string ends with suffix (C string)
-fn Str_ends_with(self, suffix): i64 { return str_ends_with(self, suffix); }
+# Check if string contains needle (a Str)
+fn Str_contains(self, needle: Str): i64 { return str_contains(self, needle); }
+# Check if string starts with prefix (a Str)
+fn Str_starts_with(self, prefix: Str): i64 { return str_starts_with(self, prefix); }
+# Check if string ends with suffix (a Str)
+fn Str_ends_with(self, suffix: Str): i64 { return str_ends_with(self, suffix); }
 # Find first occurrence of needle, return offset or -1
 fn Str_index_of(self, needle): i64 { return str_index_of(self, needle); }
 # Create Str from integer

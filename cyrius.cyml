@@ -5,7 +5,7 @@ description = "prani — creature & animal vocal synthesis (species vocal tracts
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/prani"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "src/main.cyr"
@@ -77,11 +77,12 @@ stdlib = [
     "bench",
 ]
 
-# The dep tags below are the matched set for cyrius 6.7.9, and they move
-# TOGETHER: each of svara 3.6.0, naad 2.3.0, hisab 3.4.0 and goonj 2.1.0 pins
-# cyrius 6.7.9 exactly, sakshi 2.5.8 is the copy that snapshot bundles, and the
-# next tag of each of the first four needs cyrius 6.7.18. This set puts a floor
-# under consumers: sakshi 2.5.8 needs `const`, so cyrius 6.7.2 or later.
+# The dep tags below are the matched set for cyrius 6.7.18, and they move
+# TOGETHER: each of svara 3.6.3, naad 2.3.3, hisab 3.4.1 and goonj 2.3.1 pins
+# cyrius 6.7.18 exactly, svara pins the other three at these tags, and sakshi
+# 2.5.10 is the copy that snapshot bundles and hisab declares. Each is also its
+# project's newest tag. The floor under consumers stays cyrius 6.7.2: sakshi
+# needs `const`.
 
 # svara — human/formant vocal synthesis primitives. prani consumes svara's
 # GlottalSource / FormantFilter / VocalTract surface (tract.cyr, voice.cyr)
@@ -89,7 +90,7 @@ stdlib = [
 # goonj + sakshi symbols, resolved from THIS manifest below.
 [deps.svara]
 git = "https://github.com/MacCracken/svara.git"
-tag = "3.6.0"
+tag = "3.6.3"
 modules = ["dist/svara.cyr"]
 
 # naad — audio synthesis primitives (noise / biquad / LFO). Referenced by
@@ -97,29 +98,28 @@ modules = ["dist/svara.cyr"]
 # _process_sample + NAAD_FILTER_BANDPASS, the NoiseOnly path).
 [deps.naad]
 git = "https://github.com/MacCracken/naad.git"
-tag = "2.3.0"
+tag = "2.3.3"
 modules = ["dist/naad.cyr"]
 
 # hisab — math/geometry (HVec3/HComplex/FFT/ganita least-squares). Referenced
 # by svara + naad bundles. Pinned to the tag they consume.
 [deps.hisab]
 git = "https://github.com/MacCracken/hisab.git"
-tag = "3.4.0"
+tag = "3.4.1"
 modules = ["dist/hisab.cyr"]
 
 # goonj — acoustics engine. Referenced by naad's acoustics/* modules (present
 # in the monolithic bundle). Pulls sakshi + hisab transitively.
 [deps.goonj]
 git = "https://github.com/MacCracken/goonj.git"
-tag = "2.1.0"
+tag = "2.3.1"
 modules = ["dist/goonj.cyr"]
 
 # sakshi — structured logging. Arrives transitively via hisab/goonj/naad AND is
 # called directly by src/logging.cyr (prani_log_* -> sakshi_debug/info/warn/
-# error/fatal); declared explicitly so both resolve. 2.5.8 is the copy the
-# 6.7.9 snapshot bundles and the tag hisab 3.4.0 pins. 2.5.9 and 2.5.10 also pin
-# 6.7.9, but neither is the matched copy.
+# error/fatal); declared explicitly so both resolve. 2.5.10 is the copy the
+# 6.7.18 snapshot bundles, the tag hisab 3.4.1 pins, and sakshi's newest tag.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.5.8"
+tag = "2.5.10"
 modules = ["dist/sakshi.cyr"]

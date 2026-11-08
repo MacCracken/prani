@@ -34,7 +34,7 @@ fn _macho_argv_base() {
     return result;
     #else
     # x86-macOS (v6.1.30): the entry parks the init rsp in r15, reserved from
-    # regalloc (parse_fn.cyr caps the pool at 4 on _TARGET_MACHO==1), so r15
+    # regalloc (parse/fn.cyr caps the pool at 4 on _TARGET_MACHO==1), so r15
     # survives from entry through every call into here. Read it via inline asm.
     var result = 0;
     asm {

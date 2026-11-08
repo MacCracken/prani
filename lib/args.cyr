@@ -113,38 +113,62 @@ include "lib/alloc.cyr"
 var _args_base = 0;
 var _args_len = 0;
 
-# Initialize argument access by reading /proc/self/cmdline.
-#
-# v5.9.5 — heap-backed 2 MB buffer (was 4 KB stack buffer).
-# Linux ARG_MAX is 2 MB (the kernel's hard cap on argv+envp combined);
-# the prior 4096-byte read truncated 99.8% of valid argv ranges
-# silently, with `argc()` undercounting and downstream verbs falling
-# through to "usage" branches. Reported by cyim 1.0.2+
-# (cyim's `docs/development/issues/archive/2026-05-06-cyrius-args-init-4kb-cap.md`; CHANGELOG [5.9.5];
-# threshold bisected 4063 / 4064 byte boundary). 2 MB matches the
-# kernel's hard cap; alloc() lazy-inits the heap via the v5.8.37
-# auto-bootstrap so calling args_init() first-thing still works.
-#
-# v6.0.9 — switched from raw `syscall(2, ...)` / `syscall(0, ...)` /
-# `syscall(3, ...)` to the lib/syscalls.cyr `sys_open` / `sys_read` /
-# `sys_close` wrappers. The raw numbers were x86_64-only: syscall 2 is
-# `open` on x86_64 but `io_destroy` on aarch64 (which uses openat at
-# 56), and syscall 0 is `read` on x86_64 but `io_setup` on aarch64.
-# Pre-v6.0.9, the cross-built aarch64 `cyrius` wrapper called
-# io_destroy("/proc/self/cmdline") → garbage fd → io_setup(...) →
-# _args_len landed at 0 → argc() returned 0 → every dispatch fell
-# through to "usage". Surfaced by the v6.0.2 cross-host smoke
-# ([[project_v6_0_2_cross_host_smoke_findings]] item 1).
-fn args_init() {
-    var cap = 2097152;            # ARG_MAX on Linux
+# Copy `n` bytes from `src` to `dst` (non-overlapping): qwords, then the byte tail. A private
+# loop rather than lib/string.cyr's memcpy, so `include "lib/args.cyr"` brings no string names.
+fn _args_copy(dst, src, n) {
+    var i = 0;
+    while (i + 8 <= n) {
+        store64(dst + i, load64(src + i));
+        i = i + 8;
+    }
+    while (i < n) {
+        store8(dst + i, load8(src + i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Read `fd` to EOF into a heap buffer of `cap` bytes that doubles whenever it fills, then publish
+# it as the argument blob. Returns the byte count, or a negative errno: the read's own, or -12
+# (ENOMEM) when a buffer cannot be allocated. On failure nothing is published — argc() never
+# describes a prefix. The loop is the fix: one read of a fixed buffer returned the first
+# 2,097,152 bytes of a longer command line with no error. CHANGELOG [6.7.12]
+fn _args_read_all(fd, cap) {
     var buf = alloc(cap);
-    if (buf == 0) { return 0; }
-    var fd = sys_open("/proc/self/cmdline", 0, 0);
-    if (fd < 0) { return 0; }
-    var n = sys_read(fd, buf, cap);
-    sys_close(fd);
+    if (buf == 0) { return 0 - 12; }
+    var n = 0;
+    var r = 1;
+    var nb = 0;
+    while (r > 0) {
+        if (n == cap) {
+            nb = alloc(cap * 2);
+            if (nb == 0) { return 0 - 12; }
+            _args_copy(nb, buf, n);
+            buf = nb;
+            cap = cap * 2;
+        }
+        r = sys_read(fd, buf + n, cap - n);
+        if (r < 0) { return r; }
+        n = n + r;
+    }
     _args_base = buf;
     _args_len = n;
+    return n;
+}
+
+# Initialize argument access by reading /proc/self/cmdline (the kernel's NUL-joined copy of
+# argv). Returns the bytes read, or a negative errno when the command line cannot be read (D7): the open's or the read's
+# -errno, or -12 when the buffer cannot be allocated — never 0 for a failure, since 0 is what
+# macOS answers on success. Reads to EOF: Linux's ARG_MAX is not 2 MiB but RLIMIT_STACK / 4 (up
+# to 6 MiB), which an unprivileged `ulimit -s` raises. The 2 MiB first buffer is heap-backed (a
+# 4 KB stack buffer truncated silently, CHANGELOG [5.9.5]); alloc() lazy-inits the heap, so this
+# can run first thing. The sys_* wrappers, not raw numbers: x86's open / read numbers are other
+# calls on aarch64 (CHANGELOG [6.0.9]). CHANGELOG [6.7.12]
+fn args_init() {
+    var fd = sys_open("/proc/self/cmdline", 0, 0);
+    if (fd < 0) { return fd; }
+    var n = _args_read_all(fd, 2097152);
+    sys_close(fd);
     return n;
 }
 

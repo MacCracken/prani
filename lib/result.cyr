@@ -67,12 +67,15 @@ enum Result<T, E>: stack {
 # other Result producer). The allocator argument is accepted and ignored ON PURPOSE: deleting
 # the parameter would break every call site for no benefit, and there is no longer anything to
 # allocate from. CHANGELOG [6.6.0].
-fn ok_via(a, v): i64 {
+# Both are declared `: Result`, what their bodies return: a `: i64` signature over the pair is
+# what `cyrius header` refuses (6.7.12's D23; kept by 6.7.13's D37), and callers compile
+# byte-identical. CHANGELOG [6.7.13]
+fn ok_via(a, v): Result {
     return Ok(v);
 }
 
 # Build an `Err(e)` the same way. See `ok_via` above for why both survive the flip.
-fn err_via(a, e): i64 {
+fn err_via(a, e): Result {
     return Err(e);
 }
 

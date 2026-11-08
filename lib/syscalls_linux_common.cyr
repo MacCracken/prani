@@ -157,7 +157,13 @@ fn sys_write(fd, buf, count): i64 {
 # x86_64 has a bare SYS_FSTAT (5); aarch64's bare SYS_FSTAT (80)
 # also exists — only sys_stat needs the at-family detour on aarch64
 # (kept in the per-arch peer).
+# cx (the x86_64 peer is the .cyx guest's table): -ENOSYS. cxvm passes the stat buffer to the
+# host untranslated (a guest offset: -EFAULT), and a host's struct stat is not the x86_64-Linux
+# layout the guest reads STAT_* from. CHANGELOG [6.7.12]
 fn sys_fstat(fd, buf): i64 {
+    #ifdef CYRIUS_TARGET_CX
+    return 0 - 38;
+    #endif
     return syscall(SYS_FSTAT, fd, buf);
 }
 
@@ -175,10 +181,13 @@ fn sys_fchmod(fd, mode): i64 {
 # those repos audit against, and invited the shadowing bug darshana filed separately.
 #
 # ⚠ THE NUMBER IS PER-ARCH AND MUST STAY THE PEER'S NATIVE ONE: x86_64 16, aarch64 29,
-# Darwin 29 (routed 29→54 by ESYSXLAT's Mach-O arm). Do NOT "normalise" these to the x86
-# value — on ELF-aarch64 a literal 16 is not translated at all (there is no 16→29 row), so a
-# consumer that hardcodes the x86 number silently issues a different, valid syscall. That is
-# the exact defect `2026-08-23-darshana-aarch64-syscall-shadow-no-diagnostic` reports.
+# Darwin 29 (routed 29→54 by ESYSXLAT's Mach-O arm) — right because it depends on no x86-compat
+# ESYSXLAT row. Do NOT "normalise" these to the x86 value: on ELF-aarch64 a literal 16 reaches
+# ioctl only through the 16→29 compat row (v6.5.38), and a hardcoded x86 number that has NO row
+# still silently issues a different, valid syscall — the defect
+# `2026-08-23-darshana-aarch64-syscall-shadow-no-diagnostic` reported (archived, resolved).
+# Inside a native-aarch64 region a raw 16 is renumbered to ioctl as well, with a warning since
+# 6.7.12; native fremovexattr is spelled 1016 there. CHANGELOG [6.7.12]
 #
 # The third argument is untyped by design: it is a pointer for TCGETS/TCSETS and an integer
 # for many drivers, and the kernel's interpretation is request-specific.
@@ -378,9 +387,11 @@ fn sys_setresgid(rgid, egid, sgid): i64 {
 # ran as unlinkat(3, NULL, 0). Return -ENOSYS instead. Same two-#ifdef shape as
 # sys_utimensat above, which keeps syscall(167) out of the Mach-O emit entirely
 # (no "syscall not routed" warning). See CHANGELOG [6.5.15].
+# The decline is -78, ENOSYS in Darwin's numbering, as every other macOS decline answers (38 is
+# Darwin's ENOTSOCK). CHANGELOG [6.7.16]
 fn sys_prctl(option, arg2, arg3, arg4, arg5): i64 {
     #ifdef CYRIUS_TARGET_MACOS
-    return 0 - 38;
+    return 0 - 78;
     #endif
     #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_PRCTL, option, arg2, arg3, arg4, arg5);
@@ -572,11 +583,18 @@ fn sys_process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags): i
 # type bits: S_IFIFO 0o010000 (4096) makes a FIFO — `sys_mknodat(AT_FDCWD, p, 4096 | 0600,
 # 0)` is mkfifo(3); S_IFREG/S_IFCHR/S_IFBLK the rest (devices need CAP_MKNOD). `dev` is the
 # device number, 0 otherwise.
-# ⚠ Darwin declines (-78): no Mach-O row exists for it, and a composed arm (over mknod or
-# mkfifo) waits for a consumer that needs one there.
+# ⚠ Darwin: a FIFO only, over mknod (BSD 14, through the x86 mknod number 133, which both Mach-O
+# backends route; XNU's mknod makes a FIFO without privilege) — at AT_FDCWD or an absolute path,
+# since mknod takes no dirfd. Any other node type, or a relative path under another dirfd,
+# declines with -78 (-ENOSYS), as every call did there until 6.7.16; cxvm's mknodat for a cx guest
+# on a Mac is the consumer that needed the route. CHANGELOG [6.7.16]
 fn sys_mknodat(dirfd, path, mode, dev): i64 {
     #ifdef CYRIUS_TARGET_MACOS
-    return 0 - 78;
+    if ((mode & 0xF000) != 0x1000) { return 0 - 78; }      # S_IFIFO only
+    if (dirfd != AT_FDCWD && path != 0) {
+        if (load8(path) != 47) { return 0 - 78; }          # relative to a dirfd mknod cannot take
+    }
+    return syscall(133, path, mode, dev);                  # mknod: 133 → BSD 14 on both Macs
     #endif
     #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_MKNODAT, dirfd, path, mode, dev);
@@ -779,9 +797,16 @@ fn sys_reboot(cmd): i64 {
 
 # Change the calling thread's signal mask. `how` is SIG_BLOCK,
 # SIG_UNBLOCK, or SIG_SETMASK. `set` and `oldset` point at sigset_t.
+# On macOS it is Darwin's __pthread_sigmask (329) through the private alias 1329, a shim rather
+# than a renumber: Darwin reads a 32-bit set (the low half of our 8-byte one on little-endian) and
+# writes 4 bytes to `oldset`, so the upper word is zeroed here. 329, not Darwin's sigprocmask (48),
+# which is process-wide in XNU. It returned -78 before 6.7.12, so the exec family could not empty
+# a mask inherited from a launcher there. CHANGELOG [6.7.12]
 fn sys_sigprocmask(how, set, oldset): i64 {
     #ifdef CYRIUS_TARGET_MACOS
-    return 0 - 78;
+    var r = syscall(1329, how, set, oldset);
+    if (r == 0) { if (oldset != 0) { store32(oldset + 4, 0); } }
+    return r;
     #endif
     #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_RT_SIGPROCMASK, how, set, oldset, 8);
@@ -1088,9 +1113,10 @@ fn sys_memfd_create(name, flags): i64 {
 # remainder on a signal, or 0 to ignore it.
 # ⚠ Darwin has no nanosleep syscall either, so the macOS arm composes it from poll(NULL,
 # 0, ms) — the same primitive EMACHO_NANOSLEEP_X86 reroutes raw 35 to, and the same one
-# lib/chrono.cyr's portable sleep_ms uses. Sub-millisecond resolution is lost there. The
-# bare 7 is the sanctioned "x86 number + an ESYSXLAT entry" spelling: both Mach-O backends
-# route 7 → BSD poll 230, so one line serves x86-macOS and arm64-macOS.
+# lib/chrono.cyr's portable sleep_ms uses. Sub-millisecond resolution is lost there.
+# SYS_POLL (the x86 7, by name since 6.7.14) is the sanctioned "x86 number + an ESYSXLAT
+# entry" spelling: both Mach-O backends route 7 → BSD poll 230, so one line serves x86-macOS
+# and arm64-macOS.
 # The timespec is checked the way Linux checks it (tv_sec < 0, or tv_nsec outside
 # 0..999999999: -22 EINVAL, no sleep) and the ms is clamped to INT_MAX: poll's timeout is a
 # C int where a negative value means "no limit", so until 6.6.20 a negative tv_sec, or a
@@ -1105,7 +1131,7 @@ fn sys_nanosleep(req, rem): i64 {
     if (nsec > 999999999) { return 0 - 22; }
     var ms = 0x7FFFFFFF;
     if (sec < 2147483) { ms = sec * 1000 + nsec / 1000000; }   # 2147483 s = INT_MAX ms
-    return syscall(7, 0, 0, ms);
+    return syscall(SYS_POLL, 0, 0, ms);
     #endif
     #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_NANOSLEEP, req, rem);
@@ -1120,7 +1146,7 @@ fn sys_nanosleep(req, rem): i64 {
 # at all — spell the name and the peer picks 24 or 124 correctly.
 fn sys_sched_yield(): i64 {
     #ifdef CYRIUS_TARGET_MACOS
-    return syscall(7, 0, 0, 0);
+    return syscall(SYS_POLL, 0, 0, 0);
     #endif
     #ifndef CYRIUS_TARGET_MACOS
     return syscall(SYS_SCHED_YIELD);
@@ -1217,9 +1243,12 @@ fn fd_restore_flags(fd, saved): i64 {
 # A negative fd (a failed socket()/accept() result) or one past INT_MAX is -9 EBADF at once:
 # poll(2) IGNORES an entry whose fd is < 0 (revents 0), so passed through it would read as a
 # timeout — or, with timeout_ms < 0, never return — and store32 would truncate a wide one.
-# One raw poll(2) (7): ESYSXLAT makes it ppoll(73) with a timespec on aarch64-Linux and BSD
-# poll(230) on both Mach-O backends; POLLIN 1 / POLLOUT 4 / POLLNVAL 0x20 are the same on Linux
-# and Darwin. Literals, not names: a program-wide enum can redefine a public constant.
+# One poll(2), SYS_POLL (the x86 7): ESYSXLAT makes it ppoll(73) with a timespec on
+# aarch64-Linux and BSD poll(230) on both Mach-O backends. It was a raw 7 until 6.7.14, when a
+# raw literal inside lib/syscalls.cyr's aarch64 region became a warned native number (D61), so
+# the x86 number is spelled by name (guide rule 2). POLLIN 1 / POLLOUT 4 / POLLNVAL 0x20 are the
+# same on Linux and Darwin; they stay literals: a program-wide enum can redefine a public
+# constant.
 # The stdlib's other waits do not fit a caller-owned fd: process.cyr's _proc_poll_in is
 # read-only and private, net.cyr's WSAPoll is the Windows connect wait, and
 # async_await_readable_ms is read-only (it is built on this one on every host target: macOS
@@ -1235,7 +1264,7 @@ fn fd_wait_ready(fd, want_write, timeout_ms): i64 {
     if (want_write != 0) { store16(&pfd + 4, 4); }  # POLLOUT
     else { store16(&pfd + 4, 1); }                  # POLLIN
     store16(&pfd + 6, 0);
-    var r = syscall(7, &pfd, 1, ms);
+    var r = syscall(SYS_POLL, &pfd, 1, ms);
     if (r < 0) { return r; }
     if (r == 0) { return 0; }
     if ((load16(&pfd + 6) & 0x20) != 0) { return 0 - 9; }   # POLLNVAL: fd not open → -EBADF

@@ -8,7 +8,7 @@
 # `warning: undefined function 'strlen'` / `'vec_get'` and TRAPPED at run time (an undefined fn
 # becomes a ud2/SIGILL stub). CLAUDE.md's rule — a lib file referencing another module's symbols
 # includes its definers — applies to helpers, not only to flag constants. Includes are
-# include-once (lex_pp.cyr), so a caller that already pulled these in pays nothing.
+# include-once (lex/pp/include.cyr), so a caller that already pulled these in pays nothing.
 # CHANGELOG [6.6.6]
 # ⚠ The vec half of that contract was invisible on the native backends: an uncalled
 # fmt_sprintf makes `vec_get` merely UNREACHABLE, so the dangling reference was a

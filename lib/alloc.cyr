@@ -7,15 +7,16 @@
 # every consumer had to call alloc_init() at top-level before any
 # alloc() call; new code can omit it. Existing code that calls
 # alloc_init() explicitly continues to work (the explicit call
-# becomes a no-op-equivalent: it re-brk's the heap, same as before).
+# becomes a no-op-equivalent: it re-initialises the heap, same as before).
 # v6.0.0 closeout will sweep the explicit calls out of consumers.
 #
 # Bump allocator: fast, no individual free.
 # alloc(size) returns aligned pointer or 0 on failure.
 # alloc_reset() frees everything (batch).
 #
-# Linux/aarch64 → brk path (below); Windows → alloc_windows.cyr
-# (VirtualAlloc); macOS → alloc_macos.cyr (mmap; Darwin has no brk).
+# Linux (x86_64 and aarch64) → anonymous mmap since v6.1.19 (below; it was brk);
+# Windows → alloc_windows.cyr (VirtualAlloc); macOS → alloc_macos.cyr (mmap; Darwin
+# has no brk); agnos → chunked mmap(27) (below).
 # arena_* helpers are OS-agnostic. See CHANGELOG [5.5.0], [5.5.16].
 
 # ================================================================
@@ -159,8 +160,8 @@ include "lib/alloc_macos.cyr"
 include "lib/alloc_agnos.cyr"
 #endif
 
-# cyrius-x bytecode — no host heap reachable from a .cyx guest; a static bump
-# heap inside cxvm's flat data region. v6.6.6: without this arm the cx driver
+# cyrius-x bytecode — no host heap reachable from a .cyx guest; a bump heap over
+# the guest break cxvm serves (6.7.14; a static buffer until then). v6.6.6: without this arm the cx driver
 # matched NO target here (it predefined no CYRIUS_TARGET_* macro at all), so
 # `alloc` was undefined on cx and no .tcyr could compile. See lib/alloc_cx.cyr.
 #ifdef CYRIUS_TARGET_CX

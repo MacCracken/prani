@@ -11,7 +11,7 @@
 # LANDING into callee-saved r15: cycc emits `mov r15, rsp` as the FIRST runtime
 # instruction (gated _TARGET_AGNOS, src/main.cyr), while rsp still = the kernel
 # init rsp ([rsp]=argc, inline argv/envp). r15 is reserved from regalloc
-# (parse_fn.cyr caps the pool at 4 on _TARGET_AGNOS==1), so it survives from
+# (parse/fn/def.cyr caps the pool at 4 on _TARGET_AGNOS==1), so it survives from
 # entry through every call into the readers below. args read through r15.
 #
 # v6.1.32: switched from the v6.1.14 `call _agnos_capture_rsp`-after-EMIT_GVAR_INITS

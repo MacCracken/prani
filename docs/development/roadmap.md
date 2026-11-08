@@ -24,7 +24,8 @@ public surface — plus two externally-blocked items and the watch list.
 records, the 2026-08-30 audit and ADR-0006 among them, still call it that.*
 
 Both are minor-bump work on the same functions, so they share a release. **Lane B
-(allocation) can start today; Lane A (f32) is blocked on svara and naad.** If
+(allocation) can start today. Lane A (f32) waited on svara and naad, and both have
+since decided to stay f64**, so it needs a decision first (see Lane A). If
 Lane A is still blocked when Lane B is ready, ship Lane B as 2.2.0 and Lane A
 becomes 2.3.0 — do not hold a finished contract behind a blocked dependency.
 
@@ -83,6 +84,15 @@ they move, prani could convert only its own arithmetic and would widen at the
 boundary — a hybrid that costs work and buys neither parity nor speed.
 
 **Do not start this before svara and naad have.** Sequence: naad → svara → prani.
+
+> **Update, 2.1.1 (2026-11-07): both P0s are closed, and neither dependency will
+> move.** naad measured `filter_biquad_process_sample` at 18.3 ns in f64 and in f32,
+> and closed its P0 in its ADR-0008. svara followed in its own ADR-0008, *The
+> synthesis core stays f64*, which says prani's roadmap is no longer blocked on it.
+> naad also found that ganita's f32 tier routes through f64 (`sin` 15% slower, `exp`
+> 93%) and that `f32` cannot be a fn return type at cyrius 6.7.18. So the hybrid
+> above is the only form this lane can take. **It needs a decision: close it with an
+> ADR as svara did, or re-scope it.** That decision is not made here.
 
 **Done when**: prani's arithmetic is f32 end to end, the tolerance-loosened
 assertions are re-tightened to bit-exact against the oracle, and 2.0.7's
@@ -160,11 +170,20 @@ Things deliberately left alone, with the condition that would change that.
   and 7500/7501 boundaries with controls. **If those controls fail, the floor
   moved again — re-measure it, do not hardcode a new number in prani.**
 - **Six `#inline` markers that do not inline.** `src/dsp.cyr:87`, `src/rng.cyr:42`
-  and `:70`, `src/voice.cyr:804`, `src/tract.cyr:619` and `:709` are over the
+  and `:70`, `src/voice.cyr:804`, `src/tract.cyr:620` and `:710` are over the
   directive's limits, so the compiler ignores them and says so on every build. They
   are the only warnings left: 136 on 2.0.13, 6 now that naad and svara dropped
   theirs. Removing them changes no output. **Drop them the next time those files are
   touched, or sooner if a warning-free build becomes a gate here**, as it is in svara.
+- **svara accepts a finite bandwidth that turns its filter to NaN.** Since svara
+  3.6.3 an infinite target bandwidth is refused, and `tests/tract.tcyr` pins that
+  through `crtract_set_formant_blend`. `f64::MAX`, or `f32::MAX` as an f64, still
+  passes svara's check: the call returns success and every sample after it is NaN.
+  A probe of svara alone reproduces it (measured at 2.1.1). prani's own blends cannot
+  reach it, because species bandwidths are capped at `PR_SP_BW_MAX`. Only a direct
+  caller can, and prani does not guard it, for ADR-0001's reason. **If svara bounds
+  the bandwidth, add the case to the blend group. If a consumer hits it first, raise
+  it with svara rather than restating a bound here.**
 - **Re-running the Rust comparison depends on crates.io, not on this repo.**
   The oracle at tag `2.0.3` builds against `svara 1.0.0` / `naad 1.0.0` /
   `hisab 1.2.0`, checksums pinned in its `Cargo.lock`. **The risk that mattered

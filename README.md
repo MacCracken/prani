@@ -77,7 +77,7 @@ include "lib/prani.cyr"
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.1.0"
+tag = "2.1.1"
 modules = ["dist/prani.cyr"]
 ```
 

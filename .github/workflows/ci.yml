@@ -79,10 +79,9 @@ jobs:
         # must pass, and until 2.0.4 it ran only on contributors' machines —
         # so fmt, lint, docs and bench were never actually enforced anywhere.
         #
-        # Note the fmt stage here is STRICTER than `cyrius fmt <file> --check`:
-        # the per-file check accepts 4-space continuation indents, this
-        # requires the canonical 2 spaces per open paren (cyrfmt became
-        # paren-aware in 6.5.28). Trust this one.
+        # Its fmt stage takes `cyrfmt --check`'s verdict, so it agrees with
+        # `cyrius fmt <file> --check`: a 4-space continuation step passes, as
+        # does the canonical 2. Before cyrius 6.7.12 this stage was stricter.
         run: cyrius audit
 
       - name: Benchmark baseline — report timing deltas

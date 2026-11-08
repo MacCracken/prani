@@ -5,11 +5,15 @@
 
 ## Version
 
-**2.1.0** — cyrius 6.7.9 and the dep set that pins it. A minor because the floor for
-consumers moves: **they now need cyrius 6.7.2 or later** (measured on a from-scratch
-consumer: 6.7.2 through 6.7.18 build and run, 6.7.1 and below fail at compile time).
-No logic changed and no computed value moved. **Not the roadmap's allocation and f32
-milestone**, which is renumbered 2.2.0. **2013 assertions / 18 suites**, audit exit 0.
+**2.1.1** — cyrius 6.7.18 and the newest tag of every dep, which is also the matched
+set for that toolchain. No API change and no logic change: every sample value, JSON
+document prani writes and hostile-input result is identical to 2.1.0. Two contracts move,
+each because a dependency refuses more: `crtract_set_formant_blend` refuses an
+infinite bandwidth (svara 3.6.3), and the four hand-written JSON decoders refuse a
+duplicate key or a leading zero (bayan 1.11.1). Consumers still need **cyrius 6.7.2 or
+later** (re-measured with a from-scratch consumer: 6.7.2 through 6.7.18 build and
+run, 6.7.1 fails at compile time). **2025 assertions / 18 suites**, audit exit 0,
+and the suite also passes for aarch64 under qemu.
 
 Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
 cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
@@ -18,24 +22,26 @@ that builds one buffer refuses such a count first (`prani_buffer_count_ok`).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`).
-- `lib/` is a clean resolve at that pin: 42 files, 38 byte-identical to the
-  snapshot (sakshi 2.5.8, bayan **1.5.13** and ganita **1.2.15** among them) and
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`).
+- `lib/` is a clean resolve at that pin: 50 files, 46 byte-identical to the
+  snapshot (sakshi 2.5.10, bayan **1.11.1** and ganita **1.2.15** among them) and
   svara/naad/hisab/goonj byte-identical to their tags' `dist/`. `cyrius deps --verify`
-  passes all 42, and `cyrius deps --locked` confirms `lib/` and the lock are what the
+  passes all 50, and `cyrius deps --locked` confirms `lib/` and the lock are what the
   tags resolve. After a pin move, delete `cyrius.lock` and re-run `cyrius lib sync`
-  then `cyrius deps`: deps keeps old commit rows beside the new ones. `--full`
-  copies the whole snapshot, which this project does not want.
+  then `cyrius deps`: deps keeps old commit rows beside the new ones. Then drop
+  `lib/hashmap_fast.cyr`, which `lib sync` copies and nothing includes:
+  `rm lib/hashmap_fast.cyr && cyrius deps --lock`, or `cyrius deps` names it on every
+  build. `--full` copies the whole snapshot, which this project does not want.
 - Build: `cyrius build src/main.cyr build/prani`
-- Test ONE suite: `cyrius test tests/<mod>.tcyr` (explicit path — no discovery).
+- Test ONE suite: `cyrius test tests/<mod>.tcyr`; all of them: `cyrius test tests`.
+  `cyrius tests` is gone since cyrius 6.7.12.
 - Bundle: `cyrius distlib` → `dist/prani.cyr` (reads `[lib].modules`). There is no
   `dist/prani.deps`: distlib 6.6.18+ names only what a fold needs beyond its named
   deps, and for prani that is nothing. `src/main.cyr`, the benches and the examples
   include the bundle, so run `distlib` after a `src/` change or they see stale code.
-- Gate: `cyrius audit` (fmt · lint · docs · tests · bench). Note its fmt gate is
-  **stricter than `cyrius fmt <file> --check`** — the per-file check accepts
-  4-space continuation indents, the audit gate requires the canonical 2 spaces
-  per open paren (cyrfmt became paren-aware in 6.5.28).
+- Gate: `cyrius audit` (fmt · lint · docs · tests · bench). Since cyrius 6.7.12 its
+  fmt stage takes `cyrfmt --check`'s verdict, so the per-file check and the audit
+  agree: a 4-space continuation step passes, as does the canonical 2.
 - **Parallel-porting concurrency**: every `cyrius …` call re-resolves deps and
   races on `cyrius.lock`. Serialize all toolchain calls behind
   `flock <scratch>/prani-build.lock cyrius …`.
@@ -54,21 +60,20 @@ that builds one buffer refuses such a count first (`prani_buffer_count_ok`).
 
 Consumed as Cyrius distlib bundles (git+tag in `cyrius.cyml`):
 
-- **svara** 3.6.0 — glottal source, formant filter, vocal tract (the excitation
+- **svara** 3.6.3 — glottal source, formant filter, vocal tract (the excitation
   + resonance engine tract/voice bridge to).
-- **naad** 2.3.0 — biquad filters (noise-only bandpass shaping).
-- **hisab** 3.4.0 — `ease_in_out_smooth` (envelope curves) + transitive math.
-- **goonj** 2.1.0, **sakshi** 2.5.8 — goonj referenced transitively by the
+- **naad** 2.3.3 — biquad filters (noise-only bandpass shaping).
+- **hisab** 3.4.1 — `ease_in_out_smooth` (envelope curves) + transitive math.
+- **goonj** 2.3.1, **sakshi** 2.5.10 — goonj referenced transitively by the
   svara/naad bundles; sakshi both transitive and called directly by
   `src/logging.cyr`.
 - stdlib: syscalls, string, alloc, str, fmt, vec, io, args, assert, math, ganita,
   hashmap, bayan, tagged, fnptr, callback, bench.
 
-This is the matched set for cyrius 6.7.9, and it moves together. svara 3.6.0, naad
-2.3.0, hisab 3.4.0 and goonj 2.1.0 each pin 6.7.9 exactly and agree on each other's
-sub-pins. sakshi 2.5.8 is the copy the snapshot bundles and hisab declares; 2.5.9 and
-2.5.10 also pin 6.7.9, but neither is the matched copy. The next tag of svara, naad,
-hisab and goonj each needs cyrius 6.7.18, so none of these can move alone.
+This is the matched set for cyrius 6.7.18, and it moves together. svara 3.6.3, naad
+2.3.3, hisab 3.4.1 and goonj 2.3.1 each pin 6.7.18 exactly, and svara pins the other
+three at these tags. sakshi 2.5.10 is the copy the snapshot bundles and hisab
+declares. As of 2.1.1 each is also its project's newest tag.
 
 ## Port progress
 
@@ -92,14 +97,14 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.1.0: fmt · lint · docs · tests · bench,
-**exit 0**. 18 suites / **2013 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
+`cyrius audit` is green end to end as of 2.1.1: fmt · lint · docs · tests · bench,
+**exit 0**. 18 suites / **2025 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
 `scripts/run-examples.sh` (2.0.6) and `scripts/bench-check.sh` (2.0.11); before
 2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
 
-`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **120** today) is the
+`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **130** today) is the
 P(-1) sweep's regression suite — one group per repaired finding, each written so it FAILS on
 the 2.0.2 tree (the memory-safety groups crash the process there). Every group
 carries controls so it cannot pass vacuously. It also holds the two allocation
@@ -120,7 +125,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 
 ## In flight
 
-Nothing. The port is complete, on the cyrius 6.7.9 matched dep set, audited
+Nothing. The port is complete, on the cyrius 6.7.18 matched dep set, audited
 (2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), and with a gate that would catch the next one (2.0.11).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
@@ -144,5 +149,5 @@ condition that 2.0.6's `streaming.cyr` drives the full FFI lifecycle. The arc no
 has an end date rather than being blocked on kiran/joshua ports with no date.
 
 **2.x** carries what changes the public surface (the allocation-failure contract
-from audit F9) or is blocked outside this repo (consumer-green). Five watch items
+from audit F9) or is blocked outside this repo (consumer-green). Six watch items
 are recorded there too, with the condition that would schedule each.

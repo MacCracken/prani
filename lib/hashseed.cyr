@@ -37,7 +37,7 @@ var _hm_seed = 0;        # 0 = not yet drawn; never a legal seed value
 var _hm_seed_buf[1];     # 8 bytes (a top-level `var x[N]` is N*8), so no allocator dependency
 var _hm_seed_src = 0;    # where the seed came from: 0 = not drawn, 1 = OS RNG, 2 = time fallback
 
-# splitmix64 finalizer — diffuses every input bit into every output bit.
+# MurmurHash3's fmix64 finalizer (its shifts and constants) — diffuses every input bit into every output bit.
 fn _hm_mix(h): i64 {
     h = h ^ (h >> 33);
     h = h * 0xFF51AFD7ED558CCD;

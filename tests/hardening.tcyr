@@ -411,6 +411,56 @@ assert_eq(prani_is_err(hback), 0, "control: prani's own to_json output still des
 assert_eq(CreatureVoice_species(hback), PRANI_SP_WOLF, "control: and round-trips its species");
 
 # ================================================================
+# bayan 1.11.1 (2.1.1): a duplicate key or a leading zero refuses the document.
+# Through bayan 1.5.13 the four hand-written decoders took the FIRST of two equal
+# keys and read `00` as 0, so `{"species":1,"species":0,...}` restored a dog from
+# a document that also said wolf. The rule is bayan's (RFC 8259 section 6 for the
+# zero); this group pins what it does to prani's decoders. The #derive decoders
+# are the compiler's scanner, which still takes the LAST key and accepts `05`.
+# ================================================================
+# Returns `doc` with its opening brace replaced by `lead`, which reopens it.
+fn h_with_lead(doc, lead) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, lead);
+    str_builder_add_cstr(sb, doc + 1);
+    return str_data(str_builder_build(sb));
+}
+
+test_group("a duplicate key or a leading zero refuses the document (bayan 1.11.1)");
+var hd_vsb = str_builder_new();
+crvoice_to_json(crvoice_new(PRANI_SP_WOLF), hd_vsb);
+var hd_voice = str_data(str_builder_build(hd_vsb));
+var hd_tsb = str_builder_new();
+crtract_to_json(crtract_new(species_params(PRANI_SP_WOLF), H_SR), hd_tsb);
+var hd_tract = str_data(str_builder_build(hd_tsb));
+var hd_psb = str_builder_new();
+preset_to_json(preset_alpha_wolf(), hd_psb);
+var hd_preset = str_data(str_builder_build(hd_psb));
+var hd_elems = vec_new();
+vec_push(hd_elems, sequence_call_element_new(PRANI_VOC_BARK, F64_HALF, F64_HALF));
+var hd_qsb = str_builder_new();
+sequence_call_phrase_to_json(sequence_call_phrase_new(hd_elems, PRANI_INTENT_ALARM), hd_qsb);
+var hd_phrase = str_data(str_builder_build(hd_qsb));
+# CONTROLS: each decoder still takes prani's own output, so a refusal below is
+# the duplicate's doing and not a decoder that refuses everything.
+assert_eq(prani_is_err(crvoice_from_json_str(hd_voice)), 0, "control: own voice json decodes");
+assert_eq(prani_is_err(crtract_from_json_str(hd_tract)), 0, "control: own tract json decodes");
+assert_eq(prani_is_err(preset_from_json_str(hd_preset)), 0, "control: own preset json decodes");
+assert_eq(prani_is_err(sequence_call_phrase_from_json_str(hd_phrase)), 0, "control: own phrase json decodes");
+assert_eq(prani_is_err(crvoice_from_json_str(h_with_lead(hd_voice, "{\"species\":1,"))), 1,
+  "voice: a second species key refuses the document (took the first before)");
+assert_eq(prani_is_err(crtract_from_json_str(h_with_lead(hd_tract, "{\"phase\":0,"))), 1,
+  "tract: a second phase key refuses the document");
+assert_eq(prani_is_err(preset_from_json_str(h_with_lead(hd_preset, "{\"species\":1,"))), 1,
+  "preset: a second species key refuses the document");
+assert_eq(prani_is_err(sequence_call_phrase_from_json_str(h_with_lead(hd_phrase, "{\"intent\":5,"))), 1,
+  "phrase: a second intent key refuses the document");
+var hd_zero_ok = "{\"name\":\"P\",\"species\":0,\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":0}";
+var hd_zero_bad = "{\"name\":\"P\",\"species\":0,\"size\":4607182418800017408,\"f0_offset\":0,\"breathiness\":00}";
+assert_eq(prani_is_err(preset_from_json_str(hd_zero_ok)), 0, "control: the same preset with a plain 0 decodes");
+assert_eq(prani_is_err(preset_from_json_str(hd_zero_bad)), 1, "preset: a leading zero (00) refuses the document");
+
+# ================================================================
 # F13 (2.0.6) -- an out-of-range SPECIES tag rendered audio as success.
 #
 # 2.0.5 guarded the voc and intent tags for exactly this reason (the oracle's

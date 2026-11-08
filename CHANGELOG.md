@@ -20,6 +20,167 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.1.1] - cyrius 6.7.18, and the newest deps
+
+Toolchain and dependency release. `cyrius` 6.7.9 -> **6.7.18**, `svara` 3.6.0 ->
+**3.6.3**, `naad` 2.3.0 -> **2.3.3**, `hisab` 3.4.0 -> **3.4.1**, `goonj` 2.1.0 ->
+**2.3.1**, `sakshi` 2.5.8 -> **2.5.10**, with bayan 1.5.13 -> **1.11.1** from the
+snapshot; ganita stays 1.2.15. Each is its project's newest tag, and this time the
+newest tags are also the matched set: svara, naad, hisab and goonj each pin exactly
+6.7.18, svara pins the other three at these tags, and sakshi 2.5.10 is what hisab
+declares and what the toolchain bundles.
+
+No API change and no logic change in prani. Every sample value, every JSON document
+prani writes and every hostile-input result 2.1.0 produced is the same here, and the
+consumer floor stays cyrius 6.7.2. **Two contracts move, each because a dependency
+now refuses an input it used to accept**, and both are repairs: an infinite
+bandwidth in `crtract_set_formant_blend`, and a duplicate key or leading zero in
+prani's four hand-written JSON decoders.
+
+### Changed
+
+- ⚠ **The hand-written JSON decoders refuse a duplicate key or a leading zero.**
+  bayan 1.11.1 refuses both, the zero per RFC 8259 section 6. This reaches
+  `crvoice_from_json_str`, `crtract_from_json_str`, `preset_from_json_str` and
+  `sequence_call_phrase_from_json_str`.
+  - Through 2.1.0 they took the **first** of two equal keys, so
+    `{"species":1,"species":0,...}` restored a dog from a document that also said
+    wolf, and they read `00` as 0.
+  - They now return their usual error: `PRANI_ERR_INVALID_SPECIES`, or
+    `PRANI_ERR_INVALID_VOCALIZATION` for a phrase.
+  - prani's own writer emits neither, so every document it writes still round-trips.
+
+  A new `tests/hardening.tcyr` group pins the change for all four decoders, with a
+  control for each, and its five refusals fail on 2.1.0.
+- **`crtract_set_formant_blend` refuses an infinite target bandwidth.** svara 3.6.3
+  added it to what `svara_formant_validate` rejects.
+  - Through svara 3.6.0 the call returned `PRANI_ERR_NONE` and every sample after it
+    was NaN: 2,205 of 2,205 at 44.1 kHz, measured on 2.1.0 and on 2.0.14.
+  - It now returns `PRANI_ERR_SVARA`, and the tract keeps rendering finite audio with
+    its old formants.
+
+  prani adds no guard of its own, for the reason `tests/tract.tcyr` gives for a NaN
+  blend: the rule is svara's, and a copy here is what goes stale. The new assertion
+  pins svara's refusal and fails on 2.1.0. Only a direct caller can reach this,
+  because prani's own blends use built-in contours and species bandwidths
+  range-checked against `PR_SP_BW_MAX`.
+- **A steady-state stream fill retains 488 B, down from 512.** svara 3.6.3 reuses a
+  24 B scratch that every `svara_glottal_new` used to allocate. Measured per fill
+  over 40 fills: 512 on every one at 2.1.0, 488 on every one here. The `<= 512`
+  budgets in `tests/allocbudget.tcyr` and `tests/stream.tcyr` are unchanged; the
+  comments and `docs/benchmarks.md` that gave 512 as today's figure now say 488.
+- **JSON decoding costs about 1.5x what it did**, by bayan's own measure, because
+  its parsers now read through bounds-checked slices. prani has no JSON benchmark,
+  so this is bayan's figure, not one measured here. No synthesis path parses JSON.
+- **`lib/` gains `simd.cyr`, `slice.cyr` and seven `unicode/` files.** goonj 2.3.1's
+  bundle includes `simd`, and bayan 1.11.1 includes `slice` and `unicode/`. The
+  resolve brings them in. None is declared in `[deps].stdlib`, because prani calls
+  none of them.
+- **`lib/hashmap_fast.cyr` is gone.** Nothing includes it, and `cyrius deps` 6.7.18
+  names it outside the declared footprint on every build. `cyrius lib sync` still
+  copies it, so it has to be dropped again after every re-vendor, with the command
+  the note gives: `rm lib/hashmap_fast.cyr && cyrius deps --lock`.
+- **`lib/` and `cyrius.lock` are a clean resolve at the pin.** There are 50 files.
+  46 are byte-identical to the 6.7.18 snapshot and 4 to their tag's `dist/`, with
+  five commit rows. `cyrius deps --verify` passes all 50, and `cyrius deps --locked`
+  confirms them.
+- **`build/prani` grows from 3.10 MB to 4.23 MB.** hisab's bundle goes from 2.64 MB
+  to 3.66 MB and bayan's from 0.74 MB to 1.00 MB. In `dist/prani.cyr`, only the
+  version line and one comment change.
+
+### Fixed
+
+- **Three places said `cyrius audit`'s fmt gate is stricter than
+  `cyrius fmt <file> --check`:** `CONTRIBUTING.md`, `state.md` and the CI
+  workflow's comment. That has not been true since cyrius 6.7.12, where the audit
+  takes `cyrfmt --check`'s verdict. Both now accept a 4-space continuation step as
+  well as the canonical 2.
+
+### Found, not fixed
+
+- **A finite but huge bandwidth still renders NaN, inside svara.** A bandwidth of
+  `f64::MAX`, or `f32::MAX` as an f64, passes svara 3.6.3's check. The call returns
+  success and every sample after it is NaN. A probe of svara alone reproduces it,
+  with `svara_tract_set_formants_from_target` and then `svara_tract_process_sample`,
+  and 2.0.14 and 2.1.0 do the same through `crtract_set_formant_blend`. The rule is
+  svara's, so it is on the roadmap's watch list rather than guarded here.
+- **prani's derived decoders still take the last of two equal keys, and accept
+  `05`.** They are the compiler's `#derive(Serialize)` scanner, not bayan, so their
+  behaviour is unchanged. This covers `PrRng`, `DcBlocker`, the fatigue and emotion
+  types, `IntentModifiers`, `SpeciesParams`, `CallElement` and `CallBout`. prani now
+  answers a duplicate key two ways, depending on the type.
+- **svara and naad closed the f32 work that roadmap Lane A waits on.** Both decided
+  their synthesis core stays f64 (svara ADR-0008, naad ADR-0008). The lane's blocker
+  is now a standing decision, so the lane needs a decision too, and the roadmap says
+  so. This release does not make it.
+
+### Upgrading
+
+- **Move the pins together:** cyrius 6.7.18, svara 3.6.3, naad 2.3.3, hisab 3.4.1,
+  goonj 2.3.1 and sakshi 2.5.10.
+- **After `cyrius lib sync`, drop `lib/hashmap_fast.cyr`** as above, or `cyrius deps`
+  names it on every build.
+- **JSON that prani did not write may now be refused:** a repeated key, or a number
+  with a leading zero. A document from prani's own `*_to_json` is unaffected.
+- **A caller that relied on an infinite bandwidth being accepted** now gets
+  `PRANI_ERR_SVARA` from `crtract_set_formant_blend`. What it got before was NaN audio.
+- **`cyrius tests` no longer exists** (removed in cyrius 6.7.12): use
+  `cyrius test tests`. Nothing in this repo called it.
+
+### Verified
+
+Every figure below was measured on x86_64, against this tree. The test suite also
+ran for aarch64 under qemu, as noted; nothing else here ran on aarch64.
+
+- **Value sweep, 2.1.0 on 6.7.9 against this tree on 6.7.18.** All 3,198,946 values
+  across 1,799 renders are **byte-identical**. This is the same sweep that moved
+  2,682,303 values at 2.0.14, so it can see a change.
+- **JSON sweep, new at this release.** bayan moves from 1.5.13 to 1.11.1, and no
+  earlier prani sweep compared serialized output. Every type with a codec was
+  covered: 10 derived and 4 hand-rolled. Each was written, decoded and written again,
+  with 24 integer edges in each field (NaN and infinity bit patterns, -0, `INT64_MIN`
+  and `INT64_MAX`, denormals, `f64::MAX`, 2^53 and out-of-range enum codes). All 2,863
+  lines are **byte-identical** to 2.1.0. They include 1,959 exact round trips and the
+  879 decodes that the validating codecs refuse. The sweep feeds only prani's own
+  output, which is why it could not see the duplicate-key change above. That came
+  from bayan's changelog and a separate probe.
+- **Hostile inputs, one process per case.** 408 cases. All exit 0, and the output is
+  byte-identical to 2.1.0.
+- **The consumed surface was diffed.** Of the 59 external names prani calls, five
+  changed:
+  - `bayan_json_v_is_int` now returns `bool`. prani compares it with `== 0`.
+  - `svara_tract_set_formants_from_target` writes through a scratch target. This is
+    svara's stale-upper-formant fix.
+  - `vec_get`, `vec_set` and `vec_push` now exit through `_vec_abort`, which runs an
+    optional hook and then exits exactly as before. `VEC_CAP_MAX` is still 2^28.
+
+  Following every call down, 55 svara functions are reachable from prani's and 7 of
+  them changed: four refactors svara reports as bit-identical, the stale-formant fix,
+  a slot-index refusal in `svara_formant_bank_update`, and the bandwidth refusal
+  above. The value sweep shows that none of them moves a prani sample.
+- **The toolchain alone was isolated.** One build used the 6.7.18 compiler and
+  stdlib (bayan 1.11.1 included) with the 2.1.0 dep bundles; the other was the 2.1.0
+  tree on 6.7.9. On every synthesis path, the RNG, the emotion grid and every
+  round trip, the two agree byte for byte, allocation counts included. The fmt, lint
+  and doc tools give the same verdicts on every file under both. No new keyword
+  touches prani.
+- **svara 3.6.3's upstream decoder hang cannot reach prani.** The derived decoder
+  loops forever on a `Vec<struct>` field holding a stray `}`. None of prani's 10
+  derived types has a vec field, and `CallPhrase`'s element vec is decoded by hand
+  through bayan.
+- **Benchmarks, six alternating rounds of the 2.1.0 tree and this one.** The median is
+  1.005x across 18 benchmarks, ranging from 0.958 to 1.037.
+- **The consumer floor was re-measured** with a from-scratch consumer at the new pins.
+  6.7.2, 6.7.9, 6.7.17 and 6.7.18 build and run. 6.7.1 fails at compile time, in
+  `lib/goonj.cyr`.
+- **aarch64, for the first time.** `cyrius test --aarch64 tests` cross-compiles all
+  18 suites and runs them under `qemu-aarch64`: 2025 assertions pass. That is user-mode
+  emulation, not hardware.
+- **Gate:** `cyrius audit` exit 0, 18 suites / 2025 assertions (`tract` 154 -> 156,
+  `hardening` 120 -> 130); `cyrius fuzz`, `scripts/run-examples.sh`,
+  `cyrius distlib --check`, `cyrius deps --verify` and `cyrius deps --locked` all
+  clean.
+
 ## [2.1.0] - cyrius 6.7.9, and a new floor for consumers
 
 Toolchain and dependency release. `cyrius` 6.6.20 -> **6.7.9**, `svara` 3.5.6 ->

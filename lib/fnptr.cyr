@@ -56,7 +56,7 @@
 # Common to all backends:
 #   - fp loaded into rax (x86) / x9 (aarch64) for the indirect call.
 #   - Result comes back in rax / x0 and is stored to the result slot.
-#   - Cyrius pads the local frame to 16 bytes (parse_fn.cyr,
+#   - Cyrius pads the local frame to 16 bytes (parse/fn/def.cyr,
 #     `fsz = (flc*8 + 15) & ~15`), so RSP is 16-byte aligned in the
 #     body of every fncallN. ⚠ 6.6.5: that padding aligns the body
 #     BETWEEN statements only. What aligns the CALL is the emitter's
@@ -726,7 +726,7 @@ fn fncall6(fp, a, b, c, d, e, f): i64 {
 # mismatch will cause garbage for args 7-8: use a C shim that takes
 # a struct pointer instead (see docs/ffi/struct-packing.md).
 #
-# x86_64: cyrius pads the local frame to 16 bytes (parse_fn.cyr:
+# x86_64: cyrius pads the local frame to 16 bytes (parse/fn/def.cyr:
 # `fsz = (flc*8 + 15) & ~15`), so RSP ≡ 0 mod 16 in the body between
 # statements; 6.6.5's call-site parity pad is what holds it at a call
 # reached from inside an expression.

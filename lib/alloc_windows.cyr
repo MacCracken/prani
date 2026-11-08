@@ -35,7 +35,7 @@ var _WIN_HEAP_SIZE = 0x1000000;
 #
 # v6.0.39 FIX: this used `syscall(12)` (brk), assuming a
 # "PE-reroutes-brk-to-VirtualAlloc" that was NEVER implemented — the
-# PE syscall dispatch (parse_expr.cyr) has cases for 0/1/2/3/8/9/60/228
+# PE syscall dispatch (parse/expr/factor.cyr) has cases for 0/1/2/3/8/9/60/228
 # but NOT 12, so `syscall(12)` fell through to a raw SYSCALL instruction,
 # illegal on Windows → STATUS_ACCESS_VIOLATION. cycc's own `vec_new()`
 # at startup hit it on the first `alloc()` and crashed before reading a

@@ -78,15 +78,21 @@ include "lib/syscalls_x86_64_agnos.cyr"
 #endif
 
 # cyrius-x bytecode (v6.6.6). The .cyx guest ABI is x86_64-LINUX-numbered:
-# cxvm issues the guest's own syscall number on whatever host it runs on and
-# translates the pointer args, so the x86_64 peer is the correct table here.
+# cxvm serves each guest call it lists through the host's own stdlib wrapper
+# (6.7.15) and translates the pointer args, so the x86_64 peer is the correct
+# table here.
 # ⚠ The served set — authority: programs/cxvm.cyr's op-0x70 dispatch — is read(0) /
-# write(1) / open(2) / close(3) / lseek(8) / exit(60) with pointer translation, plus
-# getrandom(318) and clock_gettime(228) served through the HOST's stdlib (6.6.8). Anything
-# else goes to the host raw, WITHOUT pointer translation — so a wrapper outside that set
-# compiles on cx and will not work. (This read "read/write/open/close/lseek/exit" until
-# 6.6.10, two releases after 318/228 were added; docs/platform-status.md states the whole
-# guest contract.) Before this arm
+# write(1) / open(2) with pointer translation, getrandom(318) and clock_gettime(228) served
+# through the HOST's stdlib (6.6.8), brk(12) in guest space (6.7.14), and a short list of
+# scalar-only calls (close, lseek, exit, getpid, kill, fork, fcntl …) served through the
+# HOST's own wrappers running the call the guest names on every host, -38 where the host has
+# no route (6.7.15), as are the path calls mkdir / rmdir / unlink / rename / symlink /
+# readlink / stat, their paths and buffers translated (6.7.15), and getdents64 / mknodat /
+# wait4 likewise and poll as poll(NULL, 0, ms), a sleep (6.7.16). Every other number answers
+# -ENOSYS (-38) without reaching the host (6.7.14, D55), so a wrapper outside that set
+# compiles on cx and answers -38. docs/platform-status.md states the whole guest contract.
+# 6.7.12: sys_pipe / sys_fstat refuse with -ENOSYS on cx (sys_unlink too until 6.7.15) and
+# lib/mmap.cyr's cyr_mmap with -1, rather than hand the host a guest offset. Before this arm
 # the cx driver matched no target at all, so `sys_exit` (and every other
 # wrapper) was undefined and `lib/assert.cyr` could not compile for cx.
 #ifdef CYRIUS_TARGET_CX

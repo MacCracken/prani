@@ -50,10 +50,10 @@ cyrius audit
 It runs **fmt · lint · docs · tests · bench** — the same five gates CI runs. Two
 things to know about it:
 
-- Its **fmt gate is stricter** than `cyrius fmt <file> --check`. The per-file
-  check accepts 4-space continuation indents; the audit gate requires the
-  canonical 2 spaces per open paren (cyrfmt became paren-aware in 6.5.28). Trust
-  the audit, not the per-file check.
+- Its **fmt gate agrees with `cyrius fmt <file> --check`**, since cyrius 6.7.12:
+  both accept a 4-space continuation step as well as the canonical 2, and refuse
+  anything deeper. `cyrius fmt <file>` rewrites to the canonical 2. Before 6.7.12
+  the audit was the stricter of the two.
 - Every `cyrius …` call re-resolves dependencies and races on `cyrius.lock`. If
   you run more than one at a time, serialize them: `flock /tmp/prani-build.lock cyrius …`.
 

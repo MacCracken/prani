@@ -284,7 +284,14 @@ fn sleep_ms(ms): i64 {
     syscall(7, 0, 0, t);            # poll(NULL, 0, ms)
     return 0;
     #endif
-    # cx + any other target: no-op (agnos handled above)
+    # cx: the same poll(NULL, 0, ms), which cxvm serves as a sleep on every host (the host's poll,
+    # or Sleep on Windows). It was a no-op here until 6.7.16, so a cx wait loop that slept between
+    # tries ended at once (audit_walk_fifo.tcyr's 5 s window was ~0). CHANGELOG [6.7.16]
+    #ifdef CYRIUS_TARGET_CX
+    syscall(7, 0, 0, t);            # poll(NULL, 0, ms)
+    return 0;
+    #endif
+    # any other target: no-op (agnos handled above)
     return 0;
 }
 

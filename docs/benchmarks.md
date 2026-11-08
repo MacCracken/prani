@@ -202,8 +202,9 @@ cost of doubling the duration rather than an absolute byte count, so it cancels
 fixed setup and survives any buffer-growth change while still catching per-block
 overhead being retained.
 
-⚠ **`stream_fill_buffer`'s residual 512 B is a behaviour question, not a perf
-one.** It is one `svara_glottal_new` per block. Caching the source looks free, but
+⚠ **`stream_fill_buffer`'s residual is a behaviour question, not a perf one.** It
+is one `svara_glottal_new` per block: 512 B through svara 3.6.0, and 488 B since
+svara 3.6.3 reused a 24 B scratch. Caching the source looks free, but
 a fresh source resets its phase and jitter/shimmer state where a cached one
 carries them forward — the audio changes. The oracle rebuilt per block too, so
 rebuilding is parity-correct; closing it needs a decision that the continuity

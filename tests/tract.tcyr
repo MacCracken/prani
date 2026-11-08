@@ -641,11 +641,12 @@ assert_eq(DcBlocker_r(CreatureTract_dc_blocker(j_rng)), PRANI_DCBLOCK_R, "json: 
 # ================================================================
 test_group("2.0.5 set_formant_blend -- NOT guarded here: svara already rejects it");
 # MEASURED, and the reason this function has no guard of its own: svara refuses a
-# NaN blend and a NaN target formant already, and the tract is left synthesizing
-# finite audio afterwards. Restating a dependency's rule in prani is what ADR-0001
-# declined to do for the sample rate -- the duplicate is the thing that goes
-# stale. If svara ever stops refusing, these assertions fail and prani learns it
-# needs its own guard, which is the whole point of pinning them.
+# NaN blend, a NaN target formant and, since svara 3.6.3, an infinite target
+# bandwidth, and the tract is left synthesizing finite audio afterwards.
+# Restating a dependency's rule in prani is what ADR-0001 declined to do for the
+# sample rate -- the duplicate is the thing that goes stale. If svara ever stops
+# refusing, these assertions fail and prani learns it needs its own guard, which
+# is the whole point of pinning them.
 var fb_tract = crtract_new(wolf, T_SR);
 var fb_t = vec_new();
 vec_push(fb_t, f64_from(800));
@@ -670,6 +671,17 @@ assert_eq(crtract_set_formant_blend(fb_tract, fb_nan_t, fb_b, F64_ONE), PRANI_ER
   "blend: a NaN target formant -> PRANI_ERR_SVARA (svara's rejection)");
 var fb_after2 = crtract_synthesize(fb_tract, T_220, 16, opts);
 assert_eq(t_all_finite(fb_after2), 1, "blend: still finite after a refused NaN target formant");
+# svara 3.6.3 added an infinite bandwidth to what it refuses. Through svara 3.6.0
+# this same call returned PRANI_ERR_NONE and every sample after it was NaN:
+# measured on 2.1.0, 2205 of 2205 at 44.1 kHz.
+var fb_inf_b = vec_new();
+vec_push(fb_inf_b, f64_from(80));
+vec_push(fb_inf_b, PRANI_POS_INF);
+vec_push(fb_inf_b, f64_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_inf_b, F64_ONE), PRANI_ERR_SVARA,
+  "blend: an infinite target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.3)");
+var fb_after3 = crtract_synthesize(fb_tract, T_220, 16, opts);
+assert_eq(t_all_finite(fb_after3), 1, "blend: still finite after a refused infinite bandwidth");
 
 var rc = assert_summary();
 syscall(60, rc);
