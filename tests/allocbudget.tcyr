@@ -143,11 +143,18 @@ ab_m0 = alloc_used();
 ab_i = 0;
 while (ab_i < 10) { stream_fill_buffer(ab_st, ab_buf); ab_i = ab_i + 1; }
 var ab_fill = (alloc_used() - ab_m0) / 10;
-# 8,800 B at 2.0.6 -> 512 at 2.0.10. The residual is ONE svara_glottal_new per
-# block inside crtract_synthesize_laryngeal. Closing it means caching the
-# glottal source, which carries its phase across blocks and CHANGES THE AUDIO --
-# a behaviour decision, not a perf one. See roadmap 2.0.9.
-assert_lte(ab_fill, 512, "stream_fill_buffer: <= 512 B/call (was 8,800 at 2.0.6)");
+# 8,800 B at 2.0.6 -> 512 at 2.0.10 -> 488 at 2.1.1 -> 560 since svara 3.13.0. The
+# residual is ONE svara_glottal_new per block inside crtract_synthesize_laryngeal.
+# Closing it means caching the glottal source, which carries its phase across
+# blocks and CHANGES THE AUDIO -- a behaviour decision, not a perf one. See roadmap
+# 2.0.9. The bar is that one source, measured here: prani's own share is 0 B, so
+# any byte prani adds fails, while svara resizing its source moves the bar.
+ab_m0 = alloc_used();
+var ab_gs = svara_glottal_new(f64_from(400), AB_SR);
+var ab_glottal = alloc_used() - ab_m0;
+assert_eq(svara_is_err(ab_gs), 0, "control: the reference svara_glottal_new built a source");
+assert_gt(ab_glottal, 0, "control: and it allocated, so the bar below is not 0");
+assert_lte(ab_fill, ab_glottal, "stream_fill_buffer: <= one svara_glottal_new per call (was 8,800 B at 2.0.6)");
 assert_eq(stream_samples_rendered(ab_st) > 512, 1, "control: the fills actually rendered audio");
 
 # ================================================================

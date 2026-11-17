@@ -38,5 +38,6 @@ species tag rendered audio and reported success (fixed in 2.0.6, pinned as F13 i
 `tests/hardening.tcyr`), and `stream_fill_buffer` retained **8,800 bytes per
 call** on the path advertised for audio callbacks — ~757 KB/s at 44100 Hz with
 512-sample blocks, retained for the life of the process (fixed in 2.0.10, down to
-≤512 B and budgeted in `tests/allocbudget.tcyr`). That is the argument for
+one `svara_glottal_new` per fill, prani's own share 0 B, and budgeted in
+`tests/allocbudget.tcyr`). That is the argument for
 examples as a gate rather than a nicety.

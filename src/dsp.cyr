@@ -84,7 +84,6 @@ fn dcblocker_new() {
 #      function has no error channel to report it through anyway (returning a
 #      negative code is impossible -- every f64 bit pattern is a legal sample).
 # What this module does instead is detect the latch once, in process_buffer.
-#inline
 fn dcblocker_process(b, x) {
     # y = x - x_prev + r * y_prev
     var y = f64_add(f64_sub(x, DcBlocker_x_prev(b)), f64_mul(DcBlocker_r(b), DcBlocker_y_prev(b)));

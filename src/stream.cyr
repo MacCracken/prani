@@ -293,7 +293,8 @@ fn stream_samples_rendered(self) {
 #                                              grows 16->512 slots: 128+256+
 #                                              512+1024+2048+4096)
 #   svara_glottal_new, per block      512 B   (inside crtract_synthesize_
-#                                              laryngeal)
+#                                              laryngeal; 488 B at 2.1.1,
+#                                              560 B since svara 3.13.0)
 #   stream_pitch_contour_at's vec     152 B   <- removed here
 #   prani_intent_modifiers             32 B   <- removed here
 #   crtract_options_new                16 B   <- removed here

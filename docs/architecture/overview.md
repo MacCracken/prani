@@ -77,11 +77,12 @@ vec of f64 output samples   (or a negative PRANI_ERR_* on failure)
 
 > Tags are volatile; `cyrius.cyml` is the source of truth and
 > [`development/state.md`](../development/state.md) carries the live set. Listed
-> here for the shape of the stack, current as of 2.1.1.
+> here for the shape of the stack, current as of 2.1.2.
 
-- **svara** 3.6.3 — glottal source, formant filter, vocal tract, vowel target
-- **naad** 2.3.3 — biquad filters (NoiseOnly bandpass shaping;
+- **svara** 3.14.0 — glottal source, formant filter, vocal tract, vowel target
+- **naad** 2.3.5 — biquad filters (NoiseOnly bandpass shaping;
   `NAAD_FILTER_BANDPASS`)
-- **hisab** 3.4.1 — `ease_in_out_smooth` (envelope curves)
-- **goonj** 2.3.1, **sakshi** 2.5.10 — goonj referenced transitively by
-  svara/naad; sakshi also called directly by `src/logging.cyr`
+- **hisab** 3.5.0 — `ease_in_out_smooth` (envelope curves)
+- **goonj** 2.3.2 — referenced transitively by svara/naad
+- **sakshi** 2.5.10, a stdlib leaf since 2.1.2 — called by svara, goonj and
+  directly by `src/logging.cyr`

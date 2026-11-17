@@ -193,7 +193,7 @@ gate.** What it buys is a gate nobody will be tempted to switch off.
 | `dcblocker_process`, `prani_rng_next_f32` | **0 B** | per-sample; one byte here is 44 KB/s retained |
 | `prani_ffi_voice_set_size` | **0 B** | an RTPC a host calls per frame, per creature (pins 2.0.3's F7) |
 | `emotion_evaluate` | ≤ **40 B/call** | one `PrEmotionOut`, which the caller receives — it is the result, not waste |
-| `stream_fill_buffer` | ≤ **512 B/call** | the audio-callback path; **was 8,800 B at 2.0.6** |
+| `stream_fill_buffer` | ≤ **one `svara_glottal_new`** (560 B today) | the audio-callback path; prani's own share is **0 B**. **Was 8,800 B at 2.0.6** |
 | `crvoice_vocalize` | **sub-linear in duration** | allocation may scale with the audio produced, never with the number of calls |
 
 Every budget carries a **control** — a `<= N` assertion passes trivially if the
@@ -203,8 +203,11 @@ fixed setup and survives any buffer-growth change while still catching per-block
 overhead being retained.
 
 ⚠ **`stream_fill_buffer`'s residual is a behaviour question, not a perf one.** It
-is one `svara_glottal_new` per block: 512 B through svara 3.6.0, and 488 B since
-svara 3.6.3 reused a 24 B scratch. Caching the source looks free, but
+is one `svara_glottal_new` per block: 512 B through svara 3.6.0, 488 B once svara
+3.6.3 reused a 24 B scratch, and 560 B since svara 3.13.0 added a tilt memo and a
+tone's state to the source. Since 2.1.2 the gate measures that one source in the
+suite rather than writing its size down, so prani's share is held at 0 B while
+svara's object may change size. Caching the source looks free, but
 a fresh source resets its phase and jitter/shimmer state where a cached one
 carries them forward — the audio changes. The oracle rebuilt per block too, so
 rebuilding is parity-correct; closing it needs a decision that the continuity

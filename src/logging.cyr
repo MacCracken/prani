@@ -7,8 +7,9 @@
 # These thin wrappers take a NUL-terminated cstring and forward (ptr, len) to
 # sakshi. They are called for their side effect (not #must_use); each returns 0.
 #
-# Requires the sakshi bundle (resolved from cyrius.cyml [deps.sakshi]) + strlen
-# (stdlib). The module file has no `include` lines.
+# Requires sakshi (the stdlib leaf declared in cyrius.cyml [deps].stdlib, a
+# [deps.sakshi] package through 2.1.1) + strlen (stdlib). The module file has no
+# `include` lines.
 #
 # Mapping from the Rust oracle's tracing calls:
 #   dsp.rs   tracing::error!("naad backend error")            -> prani_log_error

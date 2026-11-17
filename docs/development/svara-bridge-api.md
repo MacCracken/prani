@@ -6,9 +6,11 @@ call to the **ported Cyrius symbol names** in `lib/svara.cyr` / `lib/naad.cyr`
 (resolved via cyrius.cyml). Verify against `../svara/src/{glottal,formant,tract}.cyr`
 and `../naad/src/filter.cyr` if a signature looks off.
 
-**Checked against svara 3.6.3 / naad 2.3.3** — the tags pinned in `cyrius.cyml`.
-At 2.1.1 no entry point below changed what its return means. One refuses an input
-more, noted on its row.
+**Checked against svara 3.14.0 / naad 2.3.5** — the tags pinned in `cyrius.cyml`.
+At 2.1.2 no entry point below changed what its return means. Two things moved, noted
+on their rows: `svara_glottal_next_sample`'s pulse now peaks at
+`SV_G_ROSENBERG_GAIN`, not 1, and the formant setter refuses a finite bandwidth
+whose coefficients overflow.
 Written as a porting map, kept as the standing description of the surface prani
 consumes: **re-verify it on every svara or naad bump.** 2.0.3's CRITICAL was a
 return value whose name and arity did not change while its *meaning* did.
@@ -25,18 +27,18 @@ where the Rust used `PraniError::SynthesisFailed`, to `PRANI_ERR_SYNTHESIS_FAILE
 
 | Rust | Cyrius |
 |---|---|
-| `GlottalSource::new(f0, sr)? ` | `svara_glottal_new(f0, sr)` → ptr or `SVARA_ERR_INVALID_PITCH`/`_FORMANT` (valid f0 ∈ [20,2000], sr>0 finite) |
+| `GlottalSource::new(f0, sr)? ` | `svara_glottal_new(f0, sr)` → ptr or `SVARA_ERR_INVALID_PITCH`/`_FORMANT` (valid f0 ∈ [20,2000], sr>0 finite), or `SVARA_ERR_COMPUTATION` if naad refuses an allocation (svara 3.6.4) |
 | `g.set_breathiness(a)` | `svara_glottal_set_breathiness(g, a)` |
 | `g.set_jitter(j)` | `svara_glottal_set_jitter(g, j)` |
 | `g.set_shimmer(s)` | `svara_glottal_set_shimmer(g, s)` |
-| `g.next_sample()` | `svara_glottal_next_sample(g)` |
+| `g.next_sample()` | `svara_glottal_next_sample(g)`. Since svara 3.11.0 (its ADR-0014) the Rosenberg pulse is the full B, peaking at `SV_G_ROSENBERG_GAIN` (7.13) where the oracle's peaked at 1, and the aspiration noise is not scaled with it. prani does not feed this to its tract raw: `crtract_glottal_new` and `crtract_excitation_scale` put it back at the oracle's peak and breathiness balance, then apply prani's own level gain (`src/tract.cyr`, THE EXCITATION LEVEL) |
 
 ## VocalTract  (svara::tract::VocalTract)
 
 | Rust | Cyrius |
 |---|---|
 | `VocalTract::new(sr)` | `svara_tract_new(sr)` → ptr **or a negative `SVARA_ERR_*`** — `_INVALID_FORMANT` if no formant bank builds, `_COMPUTATION` (via `svara_map_naad_error`) if a fixed biquad does not. **Check it.** Rust returned `Self` infallibly; svara 3.x made it checkable, and the port using the return as a pointer regardless is the SIGSEGV 2.0.3 repaired ([ADR-0001](../adr/0001-check-svara-tract-constructor.md)). |
-| `t.set_formants_from_target(&target)?` | `svara_tract_set_formants_from_target(t, target)` → `SVARA_ERR_NONE`(0) or negative. Since svara 3.6.3 an infinite bandwidth is negative too; a finite but huge one (`f64::MAX`) is still accepted and renders NaN |
+| `t.set_formants_from_target(&target)?` | `svara_tract_set_formants_from_target(t, target)` → `SVARA_ERR_NONE`(0) or negative. Since svara 3.6.3 an infinite bandwidth is negative too, and since svara 3.6.5 (its ADR-0010) so is a finite one whose coefficients overflow `sinh`, such as `f64::MAX` |
 | `t.process_sample(x)` | `svara_tract_process_sample(t, x)` |
 | `t.synthesize(&mut g, n)` → Vec | `svara_tract_synthesize(t, g, n)` → **raw `alloc(n*8)` buffer, or `0`** if `n` is not an allocatable sample count (NOT a stdlib vec; read with `load64(buf+i*8)`). Internals = per-sample loop `store64(out+i*8, process_sample(t, glottal_next_sample(g)))`. **Prefer inlining that loop to push into a `vec` directly**, avoiding the raw-buffer/vec mismatch when you then DC-block. |
 | `t.reset()` | `svara_tract_reset(t)` |

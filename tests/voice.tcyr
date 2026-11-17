@@ -1148,5 +1148,138 @@ assert_eq(prani_is_err(g_rout), 0, "a roundtripped wolf still synthesizes");
 assert_eq(vec_len(g_rout), 2205, "roundtripped wolf howl length == 2205");
 assert_eq(t_all_finite(g_rout), 1, "roundtripped wolf howl all finite");
 
+# ================================================================
+test_group("2.1.2 the excitation level: svara 3.11's pulse at 2.1.1's loudness");
+# svara 3.11.0 corrected the glottal pulse to Rosenberg's full B and scaled it by
+# 7.13 so a human /a/ keeps its loudness. Through 2.1.1's gain stage that made
+# prani's creatures up to 17 dB louder and a wolf howl+bark phrase peak at 2.24.
+# tract.cyr's THE EXCITATION LEVEL block puts the corrected pulse back into the
+# oracle's gain stage, with one gain solved so that the median level of these 56
+# renders is 2.1.1's. The references below are 2.1.1's RMS for each, measured on
+# the 2.1.1 tree: every species x vocalization through crvoice_vocalize at 44.1 kHz
+# for 0.1 s whose glottal part carries more than half the RMS. Around the median
+# they spread from -6.9 to +7.1 dB: the darker closure, which no gain undoes.
+#
+# This group fails if prani's gain stage drifts from the oracle's, either way:
+# 2.1.1's code on svara 3.14.0 puts the median at +7.4 dB, and the excitation fix
+# without its gain at -7.4. It also fails if svara recalibrates its pulse, which is
+# the point: then the gain is re-solved, by the method above, not nudged.
+var VL_LN10 = 0x40026bb1bbb55516;   # ln(10)
+var VL_TOL  = 0x3fa999999999999a;   # 0.05 dB on the median
+var VL_HI   = 0x401e000000000000;   # +7.5 dB, the spread's bound
+var VL_LO   = 0xc01e000000000000;   # -7.5 dB
+var vl_db = vec_new();
+var vl_bad = 0;
+var vl_peak = 0;
+
+# vl_ref(sp, voc, rms_211) -- render sp's voc at 44.1 kHz for 0.1 s and record its
+# level change in dB against 2.1.1's RMS, and its peak. A render that errors is
+# counted in vl_bad rather than recorded, so the length control below catches it.
+fn vl_ref(sp, voc, rms_211) {
+    var s = crvoice_vocalize(crvoice_new(sp), voc, T_SR, T_0_1);
+    if (prani_is_err(s) == 1) { vl_bad = vl_bad + 1; return 0; }
+    var n = vec_len(s);
+    var acc = 0;
+    var i = 0;
+    while (i < n) {
+        var x = vec_get(s, i);
+        acc = f64_add(acc, f64_mul(x, x));
+        i = i + 1;
+    }
+    var rms = f64_sqrt(f64_div(acc, f64_from(n)));
+    vec_push(vl_db, f64_div(f64_mul(f64_from(20), f64_ln(f64_div(rms, rms_211))), VL_LN10));
+    var pk = t_max_abs(s);
+    if (f64_gt(pk, vl_peak) == 1) { vl_peak = pk; }
+    return 0;
+}
+
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_BARK, 0x3f5cbd9c504d668b);   # 0.001754, now +4.06 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_GROWL, 0x3f629bcaf3a71938);   # 0.002272, now +4.91 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_ROAR, 0x3f64a1ccfc5d375c);   # 0.002519, now +5.09 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_HISS, 0x3f6148ff9777712d);   # 0.002110, now +4.71 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_CHIRP, 0x3f638c7180c5cba8);   # 0.002386, now +4.59 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_TRILL, 0x3f63b9c4c591b6dd);   # 0.002408, now +7.05 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_RUMBLE, 0x3f6504b27879bed7);   # 0.002566, now +5.32 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_PURR, 0x3f6319a9f011e85c);   # 0.002332, now +4.72 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_YELP, 0x3f5cbd9c504d668b);   # 0.001754, now +4.06 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_SCREECH, 0x3f62b8a1b16c786a);   # 0.002285, now +5.54 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_BARK, 0x3f60d5552ca3da80);   # 0.002055, now +4.04 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_GROWL, 0x3f5c7092b3dacf94);   # 0.001736, now -2.26 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_ROAR, 0x3f60f8b6ebff10ca);   # 0.002072, now +4.22 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_HISS, 0x3f5b2c469d33c05a);   # 0.001659, now -2.90 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_CHIRP, 0x3f5eeca5a2915364);   # 0.001887, now -2.68 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_TRILL, 0x3f55c548118bf85c);   # 0.001329, now +0.98 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_RUMBLE, 0x3f613d663bc92e47);   # 0.002104, now +4.33 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_PURR, 0x3f5dd32ac5b4f2aa);   # 0.001820, now -2.58 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_YELP, 0x3f60d5552ca3da80);   # 0.002055, now +4.04 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_SCREECH, 0x3f61f47cdf8879db);   # 0.002192, now -0.38 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_HOWL, 0x3f68c4a494746c17);   # 0.003023, now -2.08 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_BARK, 0x3f6b32465c840e9e);   # 0.003320, now +1.71 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_GROWL, 0x3f6f3c6cacdb98ef);   # 0.003813, now -2.18 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_ROAR, 0x3f681fb172c88702);   # 0.002945, now +1.00 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_HISS, 0x3f6e354a98fe855a);   # 0.003688, now -2.56 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_CHIRP, 0x3f712e87ac1c9b88);   # 0.004195, now -2.55 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_TRILL, 0x3f6430ca7fcfe520);   # 0.002465, now -1.18 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_WHINE, 0x3f708a869c30374a);   # 0.004038, now +2.86 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_RUMBLE, 0x3f67ba1f7e13073a);   # 0.002896, now +1.28 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_YELP, 0x3f6b32465c840e9e);   # 0.003320, now +1.71 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_SCREECH, 0x3f68a212dafa6e58);   # 0.003007, now +0.79 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_HOWL, 0x3f7e23a25f970a0f);   # 0.007358, now +0.00 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_BARK, 0x3f7e485052cbf8b6);   # 0.007393, now -1.53 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_GROWL, 0x3f79d25c4e961e2d);   # 0.006304, now -1.37 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_ROAR, 0x3f7d44a2225b52de);   # 0.007146, now -1.32 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_HISS, 0x3f7de148141b70cb);   # 0.007295, now -2.05 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_CHIRP, 0x3f809bccf48b0db6);   # 0.008110, now -1.98 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_TRILL, 0x3f76ba1345626272);   # 0.005549, now -1.67 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_WHINE, 0x3f81ac0598ac2458);   # 0.008629, now +1.71 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_RUMBLE, 0x3f7b941c08d5bb8b);   # 0.006733, now -1.08 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_PURR, 0x3f7e020487a2cabd);   # 0.007326, now -1.80 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_YELP, 0x3f7e485052cbf8b6);   # 0.007393, now -1.53 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_SCREECH, 0x3f83298f23cf6ae5);   # 0.009357, now +0.68 dB
+vl_ref(PRANI_SP_RAPTOR, PRANI_VOC_HOWL, 0x3f89e47c7e05c0f0);   # 0.012643, now +5.22 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_HOWL, 0x3f59482508b7fbe0);   # 0.001543, now +3.93 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_BARK, 0x3f58829ada2549ff);   # 0.001496, now -0.28 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_GROWL, 0x3f4e220651323553);   # 0.000920, now -6.38 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_ROAR, 0x3f568152df51c7ba);   # 0.001374, now -2.21 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_HISS, 0x3f4d69df60f1f51f);   # 0.000898, now -6.86 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_CHIRP, 0x3f50b8fca3fd2090);   # 0.001021, now -6.83 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_TRILL, 0x3f4a6f3875f253bb);   # 0.000807, now -1.48 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_WHINE, 0x3f5552115934deea);   # 0.001301, now +1.89 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_RUMBLE, 0x3f56d30dbea542c6);   # 0.001393, now -2.24 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_PURR, 0x3f4ff15ef61212ec);   # 0.000975, now -6.73 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_YELP, 0x3f58829ada2549ff);   # 0.001496, now -0.28 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_SCREECH, 0x3f5b6bcb0ab8a89b);   # 0.001674, now +0.71 dB
+
+assert_eq(vl_bad, 0, "control: every reference render synthesized");
+assert_eq(vec_len(vl_db), 56, "control: all 56 reference renders were measured");
+# insertion sort, then the median is element 28 of 56 (the solve's own choice)
+var vl_i = 1;
+while (vl_i < vec_len(vl_db)) {
+    var vl_x = vec_get(vl_db, vl_i);
+    var vl_j = vl_i - 1;
+    while (vl_j >= 0) {
+        if (f64_le(vec_get(vl_db, vl_j), vl_x) == 1) { break; }
+        vec_set(vl_db, vl_j + 1, vec_get(vl_db, vl_j));
+        vl_j = vl_j - 1;
+    }
+    vec_set(vl_db, vl_j + 1, vl_x);
+    vl_i = vl_i + 1;
+}
+var vl_med = vec_get(vl_db, 28);
+assert_eq(prani_is_finite(vl_med), 1, "control: the median level change is a number");
+assert_eq(f64_le(f64_abs(vl_med), VL_TOL), 1, "the median of the 56 is 2.1.1's level, within 0.05 dB");
+assert_eq(f64_ge(vec_get(vl_db, 0), VL_LO), 1, "no reference render is more than 7.5 dB quieter than 2.1.1");
+assert_eq(f64_le(vec_get(vl_db, 55), VL_HI), 1, "no reference render is more than 7.5 dB louder than 2.1.1");
+assert_eq(f64_lt(vl_peak, T_1_0), 1, "no reference render reaches full scale");
+assert_eq(f64_gt(vl_peak, T_0_01), 1, "control: and they are not silent");
+# The case that showed it: 2.1.1's gain stage on svara 3.14.0 peaked here at 2.24.
+var vl_els = vec_new();
+vec_push(vl_els, sequence_call_element_new(PRANI_VOC_HOWL, T_0_1, T_DUR_005));
+vec_push(vl_els, sequence_call_element_new(PRANI_VOC_BARK, T_DUR_005, 0));
+var vl_ph = sequence_call_phrase_synthesize(sequence_call_phrase_new(vl_els, PRANI_INTENT_TERRITORIAL),
+  crvoice_new(PRANI_SP_WOLF), T_8000);
+assert_eq(prani_is_err(vl_ph), 0, "control: the wolf howl+bark phrase synthesized");
+assert_eq(f64_lt(t_max_abs(vl_ph), T_1_0), 1, "the wolf howl+bark phrase stays under full scale (2.24 before)");
+
 var rc = assert_summary();
 syscall(60, rc);

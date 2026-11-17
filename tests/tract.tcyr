@@ -641,8 +641,9 @@ assert_eq(DcBlocker_r(CreatureTract_dc_blocker(j_rng)), PRANI_DCBLOCK_R, "json: 
 # ================================================================
 test_group("2.0.5 set_formant_blend -- NOT guarded here: svara already rejects it");
 # MEASURED, and the reason this function has no guard of its own: svara refuses a
-# NaN blend, a NaN target formant and, since svara 3.6.3, an infinite target
-# bandwidth, and the tract is left synthesizing finite audio afterwards.
+# NaN blend, a NaN target formant, an infinite target bandwidth (since svara 3.6.3)
+# and a finite one whose coefficients overflow (since svara 3.6.5), and the tract is
+# left synthesizing finite audio afterwards.
 # Restating a dependency's rule in prani is what ADR-0001 declined to do for the
 # sample rate -- the duplicate is the thing that goes stale. If svara ever stops
 # refusing, these assertions fail and prani learns it needs its own guard, which
@@ -682,6 +683,109 @@ assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_inf_b, F64_ONE), PRANI_ER
   "blend: an infinite target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.3)");
 var fb_after3 = crtract_synthesize(fb_tract, T_220, 16, opts);
 assert_eq(t_all_finite(fb_after3), 1, "blend: still finite after a refused infinite bandwidth");
+# svara 3.6.5 (its ADR-0010) refuses a FINITE bandwidth whose coefficients overflow
+# sinh, which prani filed (svara issue 2026-11-07). Through svara 3.6.3 both of these
+# returned PRANI_ERR_NONE and every sample after them was NaN: 2205 of 2205 at
+# 44.1 kHz, measured on 2.1.1. The bound itself is svara's and is not restated
+# here; these two are far past it at any sample rate.
+var fb_max_b = vec_new();
+vec_push(fb_max_b, f64_from(80));
+vec_push(fb_max_b, 0x7FEFFFFFFFFFFFFF);   # f64::MAX
+vec_push(fb_max_b, f64_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_max_b, F64_ONE), PRANI_ERR_SVARA,
+  "blend: an f64::MAX target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.5)");
+var fb_f32_b = vec_new();
+vec_push(fb_f32_b, f64_from(80));
+vec_push(fb_f32_b, 0x47EFFFFFE0000000);   # f32::MAX as an f64
+vec_push(fb_f32_b, f64_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_f32_b, F64_ONE), PRANI_ERR_SVARA,
+  "blend: an f32::MAX target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.5)");
+var fb_after4 = crtract_synthesize(fb_tract, T_220, 2205, opts);
+assert_eq(t_all_finite(fb_after4), 1, "blend: still finite after a refused huge finite bandwidth (2205 samples)");
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_b, T_0_5), PRANI_ERR_NONE,
+  "control: the same tract still takes an ordinary blend after the refusals");
+
+# ================================================================
+test_group("2.1.2 the excitation level rests on two svara facts, and the helpers solve it");
+# tract.cyr's THE EXCITATION LEVEL block divides svara's pulse peak back out and
+# converts the breathiness so the tract hears the oracle's excitation. It rests on
+# two facts about svara's glottal source, pinned here so that a svara release that
+# changes either fails this group rather than silently mis-scaling every voice:
+#   1. a Rosenberg source's voiced pulse peaks at SV_G_ROSENBERG_GAIN;
+#   2. its sample is linear in breathiness: s(b) = s(0)*(1-b) + s(1)*b.
+var XL_TOL  = 0x3d719799812dea11;   # 1e-12
+var XL_0999 = 0x3feff7ced916872b;   # 0.999
+var XL_037  = 0x3fd7ae147ae147ae;   # 0.37
+var XL_F0   = 0x4059000000000000;   # 100.0 Hz: a 441-sample period at 44.1 kHz
+
+# xl_source(b) -- a fresh svara source at 100 Hz / 44.1 kHz with breathiness b and
+# svara's default jitter and shimmer.
+fn xl_source(b) {
+    var g = svara_glottal_new(XL_F0, T_SR);
+    svara_glottal_set_breathiness(g, b);
+    return g;
+}
+
+# fact 1: the peak. Jitter and shimmer off, so every period peaks at the gain.
+var xl_p = xl_source(0);
+svara_glottal_set_jitter(xl_p, 0);
+svara_glottal_set_shimmer(xl_p, 0);
+var xl_peak = 0;
+var xl_i = 0;
+while (xl_i < 2000) {
+    var xl_s = f64_abs(svara_glottal_next_sample(xl_p));
+    if (f64_gt(xl_s, xl_peak) == 1) { xl_peak = xl_s; }
+    xl_i = xl_i + 1;
+}
+assert_eq(svara_glottal_model(xl_p), SVARA_GLOTTAL_ROSENBERG, "svara_glottal_new builds a Rosenberg source");
+assert_eq(crtract_pulse_peak(xl_p), SV_G_ROSENBERG_GAIN, "crtract_pulse_peak reads svara's gain for it");
+assert_eq(f64_le(xl_peak, SV_G_ROSENBERG_GAIN), 1, "fact 1: the pulse never exceeds SV_G_ROSENBERG_GAIN");
+assert_eq(f64_ge(xl_peak, f64_mul(SV_G_ROSENBERG_GAIN, XL_0999)), 1, "fact 1: and reaches it (within 0.1%)");
+assert_eq(f64_gt(SV_G_ROSENBERG_GAIN, F64_ONE), 1, "control: the gain is not 1, so the division is not vacuous");
+
+# fact 2: linearity in breathiness, at svara's default jitter and shimmer. Each
+# source seeds its rng and noise generator identically, so the three see the same
+# pulse and the same noise.
+var xl_s0 = xl_source(0);
+var xl_s1 = xl_source(F64_ONE);
+var xl_sb = xl_source(XL_037);
+var xl_worst = 0;
+var xl_noise = 0;
+xl_i = 0;
+while (xl_i < 2000) {
+    var xl_a = svara_glottal_next_sample(xl_s0);
+    var xl_n = svara_glottal_next_sample(xl_s1);
+    var xl_m = svara_glottal_next_sample(xl_sb);
+    var xl_want = f64_add(f64_mul(xl_a, f64_sub(F64_ONE, XL_037)), f64_mul(xl_n, XL_037));
+    var xl_d = f64_abs(f64_sub(xl_m, xl_want));
+    if (f64_gt(xl_d, xl_worst) == 1) { xl_worst = xl_d; }
+    if (f64_gt(f64_abs(xl_n), xl_noise) == 1) { xl_noise = f64_abs(xl_n); }
+    xl_i = xl_i + 1;
+}
+assert_eq(f64_le(xl_worst, XL_TOL), 1, "fact 2: s(0.37) == s(0)*0.63 + s(1)*0.37, within 1e-12");
+assert_eq(f64_gt(xl_noise, T_1EM3), 1, "control: the b = 1 source is noise, not silence");
+
+# The helpers: with b' and k as tract.cyr computes them, svara's mix scaled by k is
+# the oracle's mix times PR_TR_EXC_GAIN -- pulse weight (1-b), noise weight b.
+var xl_g = SV_G_ROSENBERG_GAIN;
+var xl_bp = crtract_svara_breathiness(XL_037, xl_g);
+var xl_k = crtract_excitation_scale(XL_037, xl_g);
+var xl_pw = f64_mul(f64_mul(xl_k, xl_g), f64_sub(F64_ONE, xl_bp));
+var xl_nw = f64_mul(xl_k, xl_bp);
+assert_eq(f64_le(f64_abs(f64_sub(xl_pw, f64_mul(f64_sub(F64_ONE, XL_037), PR_TR_EXC_GAIN))), XL_TOL), 1,
+  "helpers: the unit-peak pulse is weighted (1 - b) x PR_TR_EXC_GAIN");
+assert_eq(f64_le(f64_abs(f64_sub(xl_nw, f64_mul(XL_037, PR_TR_EXC_GAIN))), XL_TOL), 1,
+  "helpers: the noise is weighted b x PR_TR_EXC_GAIN, the oracle's balance");
+assert_eq(crtract_svara_breathiness(0, xl_g), 0, "helpers: b = 0 stays 0");
+assert_eq(crtract_svara_breathiness(F64_ONE, xl_g), F64_ONE, "helpers: b = 1 stays 1");
+assert_eq(crtract_excitation_scale(F64_ONE, xl_g), PR_TR_EXC_GAIN, "helpers: noise alone is scaled by the gain only");
+assert_eq(crtract_excitation_scale(0, F64_ONE), PR_TR_EXC_GAIN, "helpers: a unit-peak model needs no division");
+# and crtract_glottal_new hands svara the converted breathiness, not the species'.
+var xl_gl = crtract_glottal_new(T_220, T_SR, wolf, F64_ONE);
+var xl_wb = SpeciesParams_breathiness(wolf);
+assert_eq(f64_gt(xl_wb, 0), 1, "control: the wolf is breathy at all, so the conversion is visible");
+assert_eq(SvGlottalSource_breathiness(xl_gl), crtract_svara_breathiness(xl_wb, SV_G_ROSENBERG_GAIN),
+  "crtract_glottal_new gives svara g*b / (1 - b + g*b), not b");
 
 var rc = assert_summary();
 syscall(60, rc);

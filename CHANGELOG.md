@@ -20,6 +20,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.1.2] - svara's corrected pulse, at prani's level
+
+Dependency release, and the repair the new svara needed in prani. `svara` 3.6.3 ->
+**3.14.0**, `naad` 2.3.3 -> **2.3.5**, `hisab` 3.4.1 -> **3.5.0**, `goonj` 2.3.1 ->
+**2.3.2**. sakshi stays **2.5.10**, now a stdlib leaf rather than a package. cyrius
+stays **6.7.18**, still its newest tag, with bayan 1.11.1 and ganita 1.2.15. Each dep
+is its project's newest tag, and they agree: each pins cyrius 6.7.18, and svara, naad
+and goonj all pin hisab 3.5.0.
+
+No API change, and the consumer floor stays cyrius 6.7.2. **The audio changes on
+purpose.** svara 3.11.0 corrected its glottal pulse, and prani now feeds that pulse
+into the oracle's gain stage
+([ADR-0007](docs/adr/0007-the-corrected-pulse-at-the-oracles-level.md)). The
+huge-finite-bandwidth NaN that 2.1.1 found is gone, because svara now refuses that
+bandwidth.
+
+### Fixed
+
+- ⚠ **prani's gain stage on svara's corrected pulse**
+  ([ADR-0007](docs/adr/0007-the-corrected-pulse-at-the-oracles-level.md)). svara
+  3.11.0 made its Rosenberg pulse the full B, with a closing phase. It scales the
+  pulse by 7.13 so that a human /a/ keeps its loudness, and leaves the aspiration
+  noise unscaled. A creature tract's energy sits in the lowest harmonics, which
+  carry the whole gain. Measured through 2.1.1's code on svara 3.14.0:
+  - wolf came out 14.4 dB louder at the median, up to 16.7, and dog, cat, crow and
+    fantasy 3 to 14 dB louder;
+  - a wolf howl+bark phrase peaked at **2.24**, where 2.1.1 peaked at 0.40, and three
+    more renders passed full scale;
+  - every species came out 17 dB less breathy than its params say.
+
+  `src/tract.cyr` now converts the breathiness it hands svara and scales the sample,
+  so the tract hears the oracle's mix, `pulse*(1-b) + noise*b*0.3*gate`, with the
+  corrected pulse at the oracle's unit peak. One gain, `PR_TR_EXC_GAIN` (+7.37 dB),
+  is solved as svara solved its own. With it, the median level of the 56
+  glottal-dominated renders (every species × vocalization at 44.1 kHz) is 2.1.1's.
+  - **Levels against 2.1.1, now:** wolf +0 to +7 dB, dog −3 to +4, cat −3 to +3,
+    crow −2 to +2, fantasy −7 to +4. Lion, crocodilian, dragon, songbird, snake,
+    cricket and bee are unchanged.
+  - **The spread around the median is timbre, not error.** The 56 run from −6.9 to
+    +7.1 dB, because the corrected closure is darker, and more so for a tract whose
+    energy sits higher. No single gain undoes that, and none should.
+  - **Nothing passes full scale.** The loudest render in the sweep peaks at 0.786,
+    and 2.1.1's peaked at 0.810.
+
+  svara is unchanged. Two new test groups pin all of this:
+  - `tests/tract.tcyr` pins the two svara facts the maths rests on (the pulse peaks
+    at `SV_G_ROSENBERG_GAIN`, and the mix is linear in breathiness), the helper
+    algebra, and that `crtract_glottal_new` hands svara the converted breathiness.
+  - `tests/voice.tcyr` pins the calibration against 2.1.1's recorded RMS for all 56:
+    the median within 0.05 dB, every render within ±7.5 dB, no render at full scale,
+    and the phrase under it.
+
+  2.1.1's code on svara 3.14.0 fails three of those assertions. The fix without its
+  gain fails two, plus the oracle's own audibility bar for fantasy.
+
+### Changed
+
+- **Every render that voices through svara's glottal source moves.** That is 530,008
+  of 709,301 sweep values, in 242 of 404 renders, from the pulse above. Lengths,
+  error codes and finiteness are unchanged in every render, and all 26 JSON documents
+  prani writes are byte-identical. Of 953 hostile cases, 5 change outcome, all of
+  them the bandwidth refusals below. The rest keep their error code, length and
+  non-finite count.
+- **`crtract_set_formant_blend` refuses a finite bandwidth whose coefficients
+  overflow.** svara 3.6.5 (its ADR-0010) bounds it, which answers the issue prani
+  filed at 2.1.1.
+  - At 44.1 kHz `f64::MAX`, `f32::MAX`, 1e300, 9,973,281 Hz and 1e7 Hz used to return
+    `PRANI_ERR_NONE` and render 2,205 of 2,205 samples as NaN. They now return
+    `PRANI_ERR_SVARA`, and the tract keeps rendering finite audio.
+  - 9,973,280 Hz is still accepted, which is svara's bound.
+
+  The blend group in `tests/tract.tcyr` gains the case, as the roadmap's watch item
+  said it should: four assertions, three of which fail on 2.1.1. prani adds no guard
+  of its own, and the bound is not restated.
+- **A steady-state stream fill retains 560 B, up from 488.** It is still exactly one
+  `svara_glottal_new`, whose source gained nine fields: a tilt memo (svara 3.9.0) and
+  a tone's state (3.13.0). The two fill budgets in `tests/allocbudget.tcyr` and
+  `tests/stream.tcyr` now measure one source in the suite and hold prani's own share
+  at 0 B. They no longer write svara's object size down as `<= 512`.
+- **sakshi is a stdlib leaf, not a `[deps.sakshi]` package.** hisab 3.4.2 dropped
+  its package, and a package of that name now draws `refusing to overwrite stdlib
+  leaf 'sakshi'`. `lib/sakshi.cyr` has the same bytes as before. `cyrius.lock` has 4
+  commit rows, down from 5.
+- **`lib/` and `cyrius.lock` are a clean resolve at the pins.** There are 50 files.
+  46 are byte-identical to the 6.7.18 snapshot and 4 to their tag's `dist/`.
+  `cyrius deps --verify` passes all 50, and `cyrius deps --locked` confirms them.
+- **`build/prani` grows from 4.23 MB to 4.59 MB**, mostly from svara's and hisab's
+  larger bundles.
+
+### Removed
+
+- **The six `#inline` markers the compiler ignored**, in `dsp.cyr`, `rng.cyr` (two),
+  `tract.cyr` (two) and `voice.cyr`. They were the build's only warnings, so the
+  build is now warning-free. The sweep's output is byte-identical with and without
+  them. This closes the roadmap watch item.
+
+### Verified
+
+- **The reachable-function walk.** prani calls 43 dep functions directly, which
+  reach 278 svara, naad and hisab functions.
+  - The 21 that prani consumes by name keep their signatures. Along the call trees,
+    23 svara functions changed body and 16 were added.
+  - naad's 4 changes are allocation results (naad's ADR-0010), and hisab's 2 are
+    allocation routing.
+  - Two return values changed meaning:
+    - `svara_glottal_next_sample`'s pulse now peaks at 7.13, repaired above.
+    - `svara_glottal_new` and `filter_biquad_new` can now return an allocation error.
+      prani already treats every negative return from both as a failure.
+- **Gates.** 18 suites with **2,058 assertions** (2,025 at 2.1.1), and `cyrius audit`
+  exits 0 (fmt, lint, docs, tests and bench). The suite also passes for aarch64 under
+  qemu (`cyrius test --aarch64 tests`). The five examples build and run, and
+  `cyrius distlib` is current.
+- **The consumer floor**, re-measured with a from-scratch consumer of
+  `dist/prani.cyr`. 6.7.2, 6.7.5, 6.7.9, 6.7.12, 6.7.17 and 6.7.18 build with no
+  warning and run the smoke. 6.7.0 and 6.7.1 fail at compile time, now inside naad's
+  bundle.
+
 ## [2.1.1] - cyrius 6.7.18, and the newest deps
 
 Toolchain and dependency release. `cyrius` 6.7.9 -> **6.7.18**, `svara` 3.6.0 ->
@@ -103,7 +220,11 @@ prani's four hand-written JSON decoders.
   success and every sample after it is NaN. A probe of svara alone reproduces it,
   with `svara_tract_set_formants_from_target` and then `svara_tract_process_sample`,
   and 2.0.14 and 2.1.0 do the same through `crtract_set_formant_blend`. The rule is
-  svara's, so it is on the roadmap's watch list rather than guarded here.
+  svara's, so it is on the roadmap's watch list rather than guarded here. svara's
+  ADR-0009 leaves it open on purpose, on the grounds that any finite ceiling would be
+  invented. prani filed an issue in svara arguing that the formula defines the
+  ceiling: `sinh` overflows past about 226 x the sample rate, 9.97 MHz at 44.1 kHz.
+  The issue is `docs/development/issues/2026-11-07-finite-bandwidth-past-sinh-overflow-renders-nan.md`.
 - **prani's derived decoders still take the last of two equal keys, and accept
   `05`.** They are the compiler's `#derive(Serialize)` scanner, not bayan, so their
   behaviour is unchanged. This covers `PrRng`, `DcBlocker`, the fatigue and emotion

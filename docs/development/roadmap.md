@@ -123,6 +123,15 @@ allocated per frame and per block (`prani_ffi_voice_set_size`, the synthesis
 block loop), so the arena is under less pressure than it was — but that reduces
 the odds of exhaustion, it does not handle it.
 
+**The dependencies have since picked a shape.** naad 2.3.4 (its ADR-0010) made the
+constructors a synth builds per voice return `NAAD_ERR_ALLOCATION` on a refused
+allocation, and svara 3.6.4 passes that on: `svara_glottal_new` returns
+`SVARA_ERR_COMPUTATION`, as `svara_tract_new` already did. prani reaches both and
+already treats any negative return from them as a failure (`crtract_new`, the two
+voiced paths, the NoiseOnly bandpass), so they need no change. naad's
+`tests/alloc_refused.tcyr` and svara's `tests/allocrefused.tcyr`, which replace the
+stdlib `alloc` to refuse chosen requests, are the test pattern to copy.
+
 ### Consumer-green — kiran and joshua
 
 **Source**: the 2.0.0 criteria carried this unmet, and it is the one criterion
@@ -169,21 +178,15 @@ Things deliberately left alone, with the condition that would change that.
   nyquist above 600. `tests/hardening.tcyr`'s **F12** group pins the 1200/1201
   and 7500/7501 boundaries with controls. **If those controls fail, the floor
   moved again — re-measure it, do not hardcode a new number in prani.**
-- **Six `#inline` markers that do not inline.** `src/dsp.cyr:87`, `src/rng.cyr:42`
-  and `:70`, `src/voice.cyr:804`, `src/tract.cyr:620` and `:710` are over the
-  directive's limits, so the compiler ignores them and says so on every build. They
-  are the only warnings left: 136 on 2.0.13, 6 now that naad and svara dropped
-  theirs. Removing them changes no output. **Drop them the next time those files are
-  touched, or sooner if a warning-free build becomes a gate here**, as it is in svara.
-- **svara accepts a finite bandwidth that turns its filter to NaN.** Since svara
-  3.6.3 an infinite target bandwidth is refused, and `tests/tract.tcyr` pins that
-  through `crtract_set_formant_blend`. `f64::MAX`, or `f32::MAX` as an f64, still
-  passes svara's check: the call returns success and every sample after it is NaN.
-  A probe of svara alone reproduces it (measured at 2.1.1). prani's own blends cannot
-  reach it, because species bandwidths are capped at `PR_SP_BW_MAX`. Only a direct
-  caller can, and prani does not guard it, for ADR-0001's reason. **If svara bounds
-  the bandwidth, add the case to the blend group. If a consumer hits it first, raise
-  it with svara rather than restating a bound here.**
+- **prani's excitation gain is solved against svara's pulse.** `PR_TR_EXC_GAIN`
+  (`src/tract.cyr`, THE EXCITATION LEVEL) puts svara 3.11.0's corrected Rosenberg
+  pulse back at the oracle's loudness: +7.37 dB, solved so the median of 56
+  reference renders matches 2.1.1. It divides svara's own `SV_G_ROSENBERG_GAIN`
+  back out, so a recalibration of that constant flows through. A change to the
+  pulse's shape does not. `tests/voice.tcyr`'s excitation-level group pins the
+  median, the ±7.5 dB spread and full scale, and `tests/tract.tcyr` pins the two
+  svara facts the maths rests on. **If either group fails on a svara bump,
+  re-solve the gain by the method in that block. Do not nudge it.**
 - **Re-running the Rust comparison depends on crates.io, not on this repo.**
   The oracle at tag `2.0.3` builds against `svara 1.0.0` / `naad 1.0.0` /
   `hisab 1.2.0`, checksums pinned in its `Cargo.lock`. **The risk that mattered

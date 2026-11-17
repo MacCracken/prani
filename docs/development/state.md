@@ -5,15 +5,17 @@
 
 ## Version
 
-**2.1.1** — cyrius 6.7.18 and the newest tag of every dep, which is also the matched
-set for that toolchain. No API change and no logic change: every sample value, JSON
-document prani writes and hostile-input result is identical to 2.1.0. Two contracts move,
-each because a dependency refuses more: `crtract_set_formant_blend` refuses an
-infinite bandwidth (svara 3.6.3), and the four hand-written JSON decoders refuse a
-duplicate key or a leading zero (bayan 1.11.1). Consumers still need **cyrius 6.7.2 or
-later** (re-measured with a from-scratch consumer: 6.7.2 through 6.7.18 build and
-run, 6.7.1 fails at compile time). **2025 assertions / 18 suites**, audit exit 0,
-and the suite also passes for aarch64 under qemu.
+**2.1.2** — cyrius 6.7.18 and the newest tag of every dep (svara **3.14.0**), which
+is also the matched set for that toolchain. No API change. The audio changes on
+purpose: svara 3.11.0 corrected its glottal pulse and re-levelled it for human
+speech, and prani feeds the corrected pulse into the oracle's gain stage, with one
+gain solved so that its voiced repertoire keeps 2.1.1's median level
+([ADR-0007](../adr/0007-the-corrected-pulse-at-the-oracles-level.md)). Nothing
+passes full scale. `crtract_set_formant_blend` now refuses a finite bandwidth whose
+coefficients overflow (svara 3.6.5). Consumers still need **cyrius 6.7.2 or later**
+(re-measured with a from-scratch consumer: 6.7.2 through 6.7.18 build and run, 6.7.1
+fails at compile time). **2058 assertions / 18 suites**, audit exit 0, the build is
+warning-free, and the suite also passes for aarch64 under qemu.
 
 Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
 cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
@@ -60,20 +62,21 @@ that builds one buffer refuses such a count first (`prani_buffer_count_ok`).
 
 Consumed as Cyrius distlib bundles (git+tag in `cyrius.cyml`):
 
-- **svara** 3.6.3 — glottal source, formant filter, vocal tract (the excitation
-  + resonance engine tract/voice bridge to).
-- **naad** 2.3.3 — biquad filters (noise-only bandpass shaping).
-- **hisab** 3.4.1 — `ease_in_out_smooth` (envelope curves) + transitive math.
-- **goonj** 2.3.1, **sakshi** 2.5.10 — goonj referenced transitively by the
-  svara/naad bundles; sakshi both transitive and called directly by
-  `src/logging.cyr`.
+- **svara** 3.14.0 — glottal source, formant filter, vocal tract (the excitation
+  + resonance engine tract/voice bridge to). Its pulse peaks at
+  `SV_G_ROSENBERG_GAIN`, which `src/tract.cyr` divides back out (ADR-0007).
+- **naad** 2.3.5 — biquad filters (noise-only bandpass shaping).
+- **hisab** 3.5.0 — `ease_in_out_smooth` (envelope curves) + transitive math.
+- **goonj** 2.3.2 — referenced transitively by the svara/naad bundles.
 - stdlib: syscalls, string, alloc, str, fmt, vec, io, args, assert, math, ganita,
-  hashmap, bayan, tagged, fnptr, callback, bench.
+  hashmap, bayan, tagged, fnptr, callback, bench, **sakshi**. sakshi (2.5.10, the
+  snapshot's copy) is called by svara, goonj and `src/logging.cyr`. It is a leaf
+  since 2.1.2; through 2.1.1 it was a `[deps.sakshi]` package.
 
-This is the matched set for cyrius 6.7.18, and it moves together. svara 3.6.3, naad
-2.3.3, hisab 3.4.1 and goonj 2.3.1 each pin 6.7.18 exactly, and svara pins the other
-three at these tags. sakshi 2.5.10 is the copy the snapshot bundles and hisab
-declares. As of 2.1.1 each is also its project's newest tag.
+This is the matched set for cyrius 6.7.18, and it moves together. svara 3.14.0, naad
+2.3.5, hisab 3.5.0 and goonj 2.3.2 each pin 6.7.18 exactly, svara pins the other
+three at these tags, and naad and goonj both pin hisab 3.5.0. As of 2.1.2 each is
+also its project's newest tag.
 
 ## Port progress
 
@@ -97,8 +100,8 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.1.1: fmt · lint · docs · tests · bench,
-**exit 0**. 18 suites / **2025 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
+`cyrius audit` is green end to end as of 2.1.2: fmt · lint · docs · tests · bench,
+**exit 0**. 18 suites / **2058 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
 `scripts/run-examples.sh` (2.0.6) and `scripts/bench-check.sh` (2.0.11); before
@@ -149,5 +152,5 @@ condition that 2.0.6's `streaming.cyr` drives the full FFI lifecycle. The arc no
 has an end date rather than being blocked on kiran/joshua ports with no date.
 
 **2.x** carries what changes the public surface (the allocation-failure contract
-from audit F9) or is blocked outside this repo (consumer-green). Six watch items
+from audit F9) or is blocked outside this repo (consumer-green). Five watch items
 are recorded there too, with the condition that would schedule each.

@@ -39,7 +39,6 @@ struct PrRng {
 # next_u32 -- PCG32 output function. Defined before its callers (single-pass).
 # NOT #must_use: it advances internal state, and prani_rng_new intentionally
 # discards two warm-up draws during seeding.
-#inline
 fn prani_rng_next_u32(self) {
     var old_state = PrRng_state(self);
     # state = old * MULT + inc  (u64 wrapping via i64 wrap)
@@ -67,7 +66,6 @@ fn prani_rng_new(seed) {
 
 # next_f32 -- value in [0.0, 1.0). bits = (next_u32() >> 1) in [0, 2^31-1],
 # scaled by 2^-31. Matches the Rust code (not its [-1,1] doc comment).
-#inline
 #must_use
 fn prani_rng_next_f32(self) {
     var bits = prani_rng_next_u32(self) >> 1;

@@ -801,7 +801,6 @@ fn crvoice_apply_am_pattern(samples, voc, sample_rate) {
 # apply_vocalization_envelope(samples, voc, sample_rate) -- per-vocalization
 # attack/release amplitude ramps (ease_in_out_smooth). sample_rate unused (kept
 # for signature parity). Mutates in place.
-#inline
 fn crvoice_apply_vocalization_envelope(samples, voc, sample_rate) {
     var len = vec_len(samples);
     if (len == 0) { return 0; }
