@@ -181,5 +181,51 @@ assert_lte(ab_c10, ab_c5 * 2 + 4096, "0.10 s costs at most 2x the 0.05 s call (+
 assert_gt(ab_c5, 0, "control: synthesis does allocate its returned buffer");
 assert_gt(ab_c10, ab_c5, "control: more audio does cost more, so the ratio is meaningful");
 
+# ================================================================
+# 2.2.0 (ADR-0008): three more paths that allocate nothing. Each fails on 2.1.2.
+# ================================================================
+test_group("budget: 2.2.0's allocation-free paths");
+
+# A cat-purr stream rendered each fill through the ALLOCATING crtract_synthesize_purr:
+# a fresh vec per callback, 8,088 B at 512 samples, measured on 2.1.2.
+var ab_cp = stream_new(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
+stream_fill_buffer(ab_cp, ab_buf);          # warm: builds the tract
+ab_m0 = alloc_used();
+ab_i = 0;
+while (ab_i < 10) { stream_fill_buffer(ab_cp, ab_buf); ab_i = ab_i + 1; }
+assert_eq((alloc_used() - ab_m0) / 10, 0, "a cat-purr stream fill: 0 B/call (8,088 at 2.1.2)");
+assert_gt(stream_samples_rendered(ab_cp), 5000, "control: the fills rendered purr");
+
+# species_supports_vocalization allocated a SpeciesParams per call (128 B), and
+# every vocalize calls it.
+ab_m0 = alloc_used();
+ab_i = 0;
+var ab_sv = 0;
+while (ab_i < 100) {
+    ab_sv = ab_sv + species_supports_vocalization(PRANI_SP_WOLF, PRANI_VOC_HOWL);
+    ab_i = ab_i + 1;
+}
+assert_eq(alloc_used() - ab_m0, 0, "species_supports_vocalization: 0 B/call (128 at 2.1.2)");
+assert_eq(ab_sv, 100, "control: and it answered every call");
+
+# A howl's formant transition allocated a FormantBlend, two 3-slot vecs and an
+# unchecked svara target on every 20 ms block. Measured over 1 s at 44.1 kHz:
+# 1,117,600 B at 2.1.2, 1,095,752 here. The howl and the growl run the same
+# block loop, the growl without a transition, so their costs now differ by the
+# one-off contour and its storage, not by a per-block term.
+var ab_hw = crvoice_new(PRANI_SP_WOLF);
+var ab_gw = crvoice_new(PRANI_SP_WOLF);
+crvoice_vocalize(ab_hw, PRANI_VOC_HOWL, AB_SR, F64_ONE);
+crvoice_vocalize(ab_gw, PRANI_VOC_GROWL, AB_SR, F64_ONE);
+ab_m0 = alloc_used();
+var ab_howl_out = crvoice_vocalize(ab_hw, PRANI_VOC_HOWL, AB_SR, F64_ONE);
+var ab_howl = alloc_used() - ab_m0;
+ab_m0 = alloc_used();
+var ab_growl_out = crvoice_vocalize(ab_gw, PRANI_VOC_GROWL, AB_SR, F64_ONE);
+var ab_growl = alloc_used() - ab_m0;
+assert_lte(ab_howl - ab_growl, 2048, "a 1 s howl costs at most 2 KB more than a growl (22,416 more at 2.1.2; 776 now)");
+assert_eq(vec_len(ab_howl_out), 44100, "control: the howl rendered a second");
+assert_eq(vec_len(ab_growl_out), 44100, "control: and so did the growl");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -94,7 +94,8 @@ struct FatigueState {
 # new() -- fresh (non-fatigued) state. Also serves as Default::default().
 #must_use
 fn fatigue_new() {
-    var self = alloc(sizeof(FatigueState));
+    var self = prani_alloc(sizeof(FatigueState));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     FatigueState_set_fatigue(self, 0);
     FatigueState_set_alarm_habituation(self, 0);
     FatigueState_set_bout_calling_time(self, 0);
@@ -121,8 +122,8 @@ fn fatigue_alarm_habituation(self) {
 # Fatigue accumulates by duration*rate (clamped to [0,1]). Alarm calls bump the
 # unreinforced-alarm count and, when not reinforced, raise habituation by 0.1.
 # 2.0.5: `duration` must be in [0, 1e9] seconds (see PR_FAT_MAX_DURATION_S).
-# record_call has NO error channel -- it returns nothing and adding one would
-# be a signature change (roadmap 2.2.0's constructor/mutator-contract work) --
+# record_call has NO error channel -- it returns nothing, and 2.2.0's contract
+# (ADR-0008) covers constructors, not mutators --
 # so a bad duration is REPORTED through prani_log_error and the whole call
 # event is dropped, leaving the accumulators exactly as they were. Refusing one
 # call is strictly less lossy than admitting a NaN that makes every field, and
@@ -234,11 +235,10 @@ struct FatigueModifiers {
 #
 # 2.0.5: this is the single choke point through which every FatigueModifiers
 # prani builds passes, including the one modifiers() derives -- so a non-finite
-# field here is the F11 symptom wherever it originated. It CANNOT reject: it
-# returns a pointer with no error channel, and giving it one would change the
-# return contract (roadmap 2.2.0). It therefore reports and returns the values
-# it was given, unaltered: substituting the identity modifiers (0, 0, 1, 1)
-# would be precisely the plausible fabrication ADR-0001 rules out. The one
+# field here is the F11 symptom wherever it originated. Since 2.2.0 it REJECTS one
+# (PRANI_ERR_INVALID_VOCALIZATION, logged too); through 2.1.2 it had no error
+# channel and returned the values unaltered. It never substitutes the identity
+# modifiers (0, 0, 1, 1): that would be the plausible fabrication ADR-0001 rules out. The one
 # reachable producer of a non-finite field left in this module is a FatigueState
 # rebuilt by the derive-generated FatigueState_from_json_str from a document
 # prani did not write -- record_call and rest now refuse to create one.
@@ -246,9 +246,15 @@ struct FatigueModifiers {
 fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) {
     var ok = prani_finite2(pitch_offset, breathiness_delta);
     if (ok == 1) { ok = prani_finite2(amplitude_scale, jitter_scale); }
-    if (ok == 0) { prani_log_error("prani: fatigue modifiers built from a non-finite value"); }
+    # 2.2.0: refused, now that the constructor can report it. Through 2.1.2 the
+    # values went back unaltered with only this log line to say so.
+    if (ok == 0) {
+        prani_log_error("prani: fatigue modifiers built from a non-finite value");
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
 
-    var m = alloc(sizeof(FatigueModifiers));
+    var m = prani_alloc(sizeof(FatigueModifiers));
+    if (m < 0) { return m; }   # PRANI_ERR_ALLOC (2.2.0)
     FatigueModifiers_set_pitch_offset(m, pitch_offset);
     FatigueModifiers_set_breathiness_delta(m, breathiness_delta);
     FatigueModifiers_set_amplitude_scale(m, amplitude_scale);

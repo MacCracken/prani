@@ -208,10 +208,18 @@ struct SpeciesParams {
 fn species_params_make(apparatus, f0_min, f0_max, f0_default, tract_scale,
   formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
   breathiness, jitter, shimmer, spectral_tilt, resonance_seed) {
-    return species_params_make_into(alloc(sizeof(SpeciesParams)),
+    var p = prani_alloc(sizeof(SpeciesParams));
+    if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
+    species_params_make_into(p,
       apparatus, f0_min, f0_max, f0_default, tract_scale,
       formant0, formant1, formant2, bandwidth0, bandwidth1, bandwidth2,
       breathiness, jitter, shimmer, spectral_tilt, resonance_seed);
+    # 2.2.0: the allocating builder ranges what it built, with the same predicate
+    # the decoders and the point-of-use guards use. species_params_make_into, which
+    # the 13-row table writes through, stays unchecked: its rows are in range by
+    # construction, and tests/species.tcyr asserts every one of them is.
+    if (species_params_in_range(p) == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    return p;
 }
 
 # species_params_make_into(p, ...) -- the field writes, into a SpeciesParams the
@@ -244,7 +252,9 @@ fn species_params_make_into(p, apparatus, f0_min, f0_max, f0_default, tract_scal
 # from the per-species table. The table itself lives in species_params_into.
 #must_use
 fn species_params(species) {
-    return species_params_into(alloc(sizeof(SpeciesParams)), species);
+    var p = prani_alloc(sizeof(SpeciesParams));
+    if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
+    return species_params_into(p, species);
 }
 
 # species_params_into(dst, species) -- the big per-species lookup, transcribed
@@ -364,7 +374,13 @@ fn species_params_resonance_seed(params) {
 # cricket cannot roar). Dispatches on the species' apparatus. Returns 1/0.
 #must_use
 fn species_supports_vocalization(species, voc) {
-    var apparatus = SpeciesParams_apparatus(species_params(species));
+    # 2.2.0: the species' row goes into a stack buffer, not the arena. This used to
+    # allocate a whole SpeciesParams on every call -- every vocalize -- to read one
+    # field, and a 1/0 answer has no channel for a refused allocation.
+    # 128 is sizeof(SpeciesParams), sixteen i64 fields; tests/species.tcyr pins it,
+    # because a field added without growing this buffer would write past it.
+    var row[128];
+    var apparatus = SpeciesParams_apparatus(species_params_into(&row, species));
     if (apparatus == PRANI_APP_NOISE_ONLY) {
         if (voc == PRANI_VOC_HISS) { return 1; }
         if (voc == PRANI_VOC_GROWL) { return 1; }
@@ -528,7 +544,8 @@ fn species_params_validate(p) {
 # so validating the result again is also safe.
 #must_use
 fn species_params_from_node(node) {
-    var p = alloc(sizeof(SpeciesParams));
+    var p = prani_alloc(sizeof(SpeciesParams));
+    if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
     SpeciesParams_set_apparatus(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "apparatus")));
     SpeciesParams_set_f0_min(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "f0_min")));
     SpeciesParams_set_f0_max(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "f0_max")));

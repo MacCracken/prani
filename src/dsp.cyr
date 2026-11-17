@@ -55,7 +55,8 @@ struct DcBlocker {
 # new() -- zeroed state, standard pole radius.
 #must_use
 fn dcblocker_new() {
-    var b = alloc(sizeof(DcBlocker));
+    var b = prani_alloc(sizeof(DcBlocker));
+    if (b < 0) { return b; }   # PRANI_ERR_ALLOC (2.2.0)
     DcBlocker_set_x_prev(b, 0);
     DcBlocker_set_y_prev(b, 0);
     DcBlocker_set_r(b, PRANI_DCBLOCK_R);
@@ -150,7 +151,7 @@ fn prani_vec_extend(dst, src) {
     var n = vec_len(src);
     var i = 0;
     while (i < n) {
-        vec_push(dst, vec_get(src, i));
+        if (prani_vec_push(dst, vec_get(src, i)) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     return 0;
@@ -193,7 +194,7 @@ fn prani_vec_push_zeros(v, n) {
     if (prani_buffer_len_ok(vec_len(v) + n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var i = 0;
     while (i < n) {
-        vec_push(v, 0);
+        if (prani_vec_push(v, 0) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     return 0;

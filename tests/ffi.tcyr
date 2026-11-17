@@ -305,5 +305,17 @@ assert_eq(stream_samples_rendered(st_bl), 0, "rejected fill did not advance the 
 assert_eq(prani_ffi_stream_is_finished(st_bl), 0, "caller mistake does not retire the stream (ADR-0003)");
 assert_eq(prani_ffi_stream_fill(st_bl, blbuf, 2205), 2205, "a corrected buffer_len still drains it");
 
+# ================================================================
+test_group("2.2.0 prani_ffi_stream_last_error names why a fill wrote nothing");
+var fle_v = prani_ffi_voice_create(0);
+var fle_st = prani_ffi_stream_start(fle_v, 0, 4, f64_from(1000), F64_ONE);
+assert_neq(fle_st, 0, "control: a 1000 Hz stream starts (svara's rule is applied at the first fill)");
+assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_NONE, "before a fill: no error");
+var fle_buf = vec_new();
+prani_vec_push_zeros(fle_buf, 64);
+assert_eq(prani_ffi_stream_fill(fle_st, fle_buf, 64), 0, "the fill writes nothing");
+assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_SVARA, "and last_error says svara rejected the rate");
+assert_eq(prani_ffi_stream_last_error(0), PRANI_ERR_INVALID_VOCALIZATION, "a null handle is answered, not read");
+
 var rc = assert_summary();
 syscall(60, rc);

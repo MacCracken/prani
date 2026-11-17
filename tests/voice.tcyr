@@ -885,40 +885,71 @@ assert_eq(prani_is_err(g_z), 0, "duration 0 still accepted (oracle: empty buffer
 assert_eq(vec_len(g_z), 0, "duration 0 still yields an empty buffer");
 
 # ================================================================
-# The point-of-use guard the builders cannot carry themselves: crvoice_with_*
-# return `self` with no error channel, and f64_clamp(NaN, lo, hi) == NaN, so a
-# NaN handed to any of them is STORED. Measured before the guard: with_size(NaN)
-# on a Songbird produced a full 2205-sample ALL-NaN buffer returned as SUCCESS.
-test_group("2.0.5 guards -- a NaN smuggled through a builder is reported");
-var g_bird = crvoice_with_size(crvoice_new(PRANI_SP_SONGBIRD), T_NAN);
+# 2.2.0: the builders refuse a NaN themselves (it passes every f64_clamp) and leave
+# the voice as it was. Through 2.1.2 they stored it, and only the point-of-use
+# guards below reported it. Those guards stay: a raw setter or a document can
+# still deliver a NaN, so they are now driven that way. Measured before 2.0.5's
+# guard: with_size(NaN) on a Songbird produced a full ALL-NaN buffer as SUCCESS.
+test_group("2.2.0 the builders refuse a NaN, and leave the voice as it was");
+var g_b = crvoice_new(PRANI_SP_WOLF);
+var g_b_br = SpeciesParams_breathiness(CreatureVoice_params(g_b));
+assert_eq(crvoice_with_size(g_b, T_NAN), PRANI_ERR_INVALID_SPECIES, "with_size(NaN) -> PRANI_ERR_INVALID_SPECIES");
+assert_eq(crvoice_with_f0_offset(g_b, T_NAN), PRANI_ERR_INVALID_SPECIES, "with_f0_offset(NaN) refused");
+assert_eq(crvoice_with_breathiness(g_b, T_NAN), PRANI_ERR_INVALID_SPECIES, "with_breathiness(NaN) refused");
+assert_eq(crvoice_with_jitter(g_b, T_NAN), PRANI_ERR_INVALID_SPECIES, "with_jitter(NaN) refused");
+assert_eq(crvoice_with_shimmer(g_b, T_NAN), PRANI_ERR_INVALID_SPECIES, "with_shimmer(NaN) refused");
+assert_eq(crvoice_with_vocal_effort(g_b, T_NAN), PRANI_ERR_INVALID_SPECIES, "with_vocal_effort(NaN) refused");
+assert_eq(CreatureVoice_size_scale(g_b), T_1_0, "the refused calls left size_scale at 1.0");
+assert_eq(CreatureVoice_f0_offset(g_b), 0, "and f0_offset at 0");
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(g_b)), g_b_br, "and breathiness at the species default");
+assert_eq(CreatureVoice_vocal_effort(g_b), T_0_5, "and vocal_effort at 0.5");
+assert_eq(prani_is_err(crvoice_vocalize(g_b, PRANI_VOC_HOWL, T_SR, T_DUR_005)), 0,
+  "control: the voice still renders");
+# An infinity is not the hazard at a clamp site: it clamps to the rail, as 2.0.5 decided.
+assert_eq(CreatureVoice_size_scale(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), PRANI_POS_INF)), f64_from(10),
+  "with_size(+inf) still clamps to 10");
+assert_eq(crvoice_with_size(PRANI_ERR_ALLOC, T_0_5), PRANI_ERR_ALLOC, "an error handle passes through a builder");
+assert_eq(crvoice_new(PRANI_SP_COUNT), PRANI_ERR_INVALID_SPECIES, "crvoice_new refuses an unknown species tag (2.2.0)");
+assert_eq(crvoice_new(0 - 1), PRANI_ERR_INVALID_SPECIES, "and a negative one");
+
+test_group("2.0.5 guards -- a NaN set directly on a voice is reported at the point of use");
+var g_bird = crvoice_new(PRANI_SP_SONGBIRD);
+CreatureVoice_set_size_scale(g_bird, T_NAN);
 assert_eq(prani_is_finite(crvoice_effective_f0(g_bird)), 0,
   "NaN size_scale makes effective_f0 non-finite (the precondition)");
 assert_eq(crvoice_vocalize(g_bird, PRANI_VOC_TRILL, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
-  "songbird with_size(NaN) -> PRANI_ERR_INVALID_TRACT (was an ALL-NaN success)");
-var g_cri = crvoice_with_size(crvoice_new(PRANI_SP_CRICKET), T_NAN);
+  "songbird size_scale NaN -> PRANI_ERR_INVALID_TRACT (was an ALL-NaN success)");
+var g_cri = crvoice_new(PRANI_SP_CRICKET);
+CreatureVoice_set_size_scale(g_cri, T_NAN);
 assert_eq(crvoice_vocalize(g_cri, PRANI_VOC_STRIDULATE, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
-  "cricket with_size(NaN) -> PRANI_ERR_INVALID_TRACT");
-var g_bee = crvoice_with_size(crvoice_new(PRANI_SP_BEE), T_NAN);
+  "cricket size_scale NaN -> PRANI_ERR_INVALID_TRACT");
+var g_bee = crvoice_new(PRANI_SP_BEE);
+CreatureVoice_set_size_scale(g_bee, T_NAN);
 assert_eq(crvoice_vocalize(g_bee, PRANI_VOC_BUZZ, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
-  "bee with_size(NaN) -> PRANI_ERR_INVALID_TRACT");
-var g_pcat = crvoice_with_size(crvoice_new(PRANI_SP_CAT), T_NAN);
+  "bee size_scale NaN -> PRANI_ERR_INVALID_TRACT");
+var g_pcat = crvoice_new(PRANI_SP_CAT);
+CreatureVoice_set_size_scale(g_pcat, T_NAN);
 assert_eq(crvoice_vocalize(g_pcat, PRANI_VOC_PURR, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
-  "cat purr with_size(NaN) -> PRANI_ERR_INVALID_TRACT");
-var g_foff = crvoice_with_f0_offset(crvoice_new(PRANI_SP_WOLF), T_NAN);
+  "cat purr size_scale NaN -> PRANI_ERR_INVALID_TRACT");
+var g_foff = crvoice_new(PRANI_SP_WOLF);
+CreatureVoice_set_f0_offset(g_foff, T_NAN);
 assert_eq(crvoice_vocalize(g_foff, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_TRACT,
-  "wolf with_f0_offset(NaN) -> PRANI_ERR_INVALID_TRACT");
+  "wolf f0_offset NaN -> PRANI_ERR_INVALID_TRACT");
 # breathiness/jitter/shimmer live in params, not in either derived value, so they
-# need the params gate: with_breathiness(NaN) on a WOLF -- a laryngeal species
-# whose other NaN paths svara already rejects -- was a 2205-sample ALL-NaN success.
-var g_nbr = crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), T_NAN);
+# need the params gate: a NaN breathiness on a WOLF -- a laryngeal species whose
+# other NaN paths svara already rejects -- was a 2205-sample ALL-NaN success.
+var g_nbr = crvoice_new(PRANI_SP_WOLF);
+SpeciesParams_set_breathiness(CreatureVoice_params(g_nbr), T_NAN);
 assert_eq(crvoice_vocalize(g_nbr, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
-  "wolf with_breathiness(NaN) -> PRANI_ERR_INVALID_SPECIES (was an ALL-NaN success)");
-var g_nji = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), T_NAN);
+  "wolf breathiness NaN -> PRANI_ERR_INVALID_SPECIES (was an ALL-NaN success)");
+var g_nji = crvoice_new(PRANI_SP_WOLF);
+SpeciesParams_set_jitter(CreatureVoice_params(g_nji), T_NAN);
 assert_eq(crvoice_vocalize(g_nji, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
-  "wolf with_jitter(NaN) -> PRANI_ERR_INVALID_SPECIES");
-var g_nsh = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), T_NAN);
+  "wolf jitter NaN -> PRANI_ERR_INVALID_SPECIES");
+var g_nsh = crvoice_new(PRANI_SP_WOLF);
+SpeciesParams_set_shimmer(CreatureVoice_params(g_nsh), T_NAN);
 assert_eq(crvoice_vocalize(g_nsh, PRANI_VOC_HOWL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
-  "wolf with_shimmer(NaN) -> PRANI_ERR_INVALID_SPECIES");
+  "wolf shimmer NaN -> PRANI_ERR_INVALID_SPECIES");
 # CONTROLS: the builders' own RAILS are in range and must still synthesize. This
 # is the "clamped extremes still synthesize" group's assertion re-run against the
 # params gate specifically -- breathiness 1.0, jitter 0.05, shimmer 0.1 all sit
@@ -946,8 +977,9 @@ assert_eq(crvoice_synthesize_cat_purr(g_cat, T_SR, (0 - 1), g_mods), PRANI_ERR_I
   "cat purr num_samples -1 -> PRANI_ERR_INVALID_VOCALIZATION");
 # size_scale DIVIDES 27.0 to make purr_f0, and f64_clamp(NaN, 20, 35) is NaN --
 # the [20,35] rails do not catch it.
-assert_eq(crvoice_synthesize_cat_purr(crvoice_with_size(crvoice_new(PRANI_SP_CAT), T_NAN), T_SR, 100, g_mods),
-  PRANI_ERR_INVALID_SPECIES,
+var g_pnan = crvoice_new(PRANI_SP_CAT);
+CreatureVoice_set_size_scale(g_pnan, T_NAN);   # with_size refuses a NaN since 2.2.0
+assert_eq(crvoice_synthesize_cat_purr(g_pnan, T_SR, 100, g_mods), PRANI_ERR_INVALID_SPECIES,
   "cat purr NaN size_scale -> PRANI_ERR_INVALID_SPECIES");
 # CONTROLS: num_samples 0 is VALID (empty buffer, same rule as duration 0).
 var g_p0 = crvoice_synthesize_cat_purr(g_cat, T_SR, 0, g_mods);

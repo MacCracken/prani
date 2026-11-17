@@ -210,14 +210,14 @@ fn main() {
     println("    var out = crvoice_vocalize(voice, voc, sample_rate, duration);");
     println("    if (prani_is_err(out) == 1) { ... prani_err_name(out) ... }");
     println("");
-    println("There are exactly five codes. prani_err_name turns any i64 into a");
+    println("There are exactly six codes. prani_err_name turns any i64 into a");
     println("static string, so a caller never has to keep its own table:");
     println("");
 
     # Printed from the constants rather than transcribed, so this table cannot
     # drift from src/error.cyr.
     var code = 0;
-    while (code >= PRANI_ERR_SVARA) {
+    while (code >= PRANI_ERR_ALLOC) {
         ex_put("     ");
         if (code == 0) { ex_put(" "); }   # keep the digit column aligned
         fmt_int(code);
@@ -226,11 +226,13 @@ fn main() {
         code = code - 1;
     }
     println("");
-    println("Four of the five appear below. -4 is the odd one out: it is raised");
-    println("when a synthesis step fails part-way through a render -- a filter");
-    println("the tract could not build, say -- rather than by anything a caller");
-    println("passes in. It arrives through the same return value as the rest,");
-    println("which is the point: no separate handling is needed for it.");
+    println("Four of the six appear below. -4 is the first odd one out: it is");
+    println("raised when a synthesis step fails part-way through a render -- a");
+    println("filter the tract could not build, say -- rather than by anything a");
+    println("caller passes in. -6 is the other: since 2.2.0, every constructor and");
+    println("render reports an allocation the arena refused, where prani used to");
+    println("fault or exit. Neither needs separate handling: each arrives through");
+    println("the same return value as the rest, which is the point.");
     println("");
     println("Failures raised inside the synthesis chain are ALSO written to");
     println("sakshi: the two ERROR lines and one WARN you will see on STDERR,");

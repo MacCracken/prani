@@ -84,10 +84,13 @@ benchmark warning below.
   serialize as exact bit patterns — the derive's 6-digit float writer is lossy.
   Deserializers must reject input that does not parse
   ([ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)).
-- **No panics, no unchecked dereferences.** `alloc()` returns 0 on exhaustion and
-  `vec_push` exits the process on failure (`vec_push_a` is the form that returns
-  -1); the library-wide contract for that is roadmap 2.2.0, but do not add new
-  unchecked sites in the meantime.
+- **No panics, no unchecked dereferences, no raw allocation.** Allocate only through
+  `prani_alloc` / `prani_vec_new` / `prani_vec_push` (`src/error.cyr`), check the
+  result, and pass `PRANI_ERR_ALLOC` on
+  ([ADR-0008](docs/adr/0008-a-refused-allocation-is-reported.md)). Raw `alloc()`
+  returns 0 on exhaustion and `vec_push` exits the process, and
+  `scripts/check-alloc.sh` fails CI on either. A new allocating path also needs a
+  case in `tests/allocrefused.tcyr`.
 - **Structured logging via `src/logging.cyr`** (`prani_log_info` / `_warn` /
   `_error` / `_debug` / `_fatal`, sakshi-backed) — never a raw write.
 - **Float literals**: integers via `f64_from(n)`; non-integers as a module-top

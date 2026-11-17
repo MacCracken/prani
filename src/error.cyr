@@ -26,6 +26,10 @@ var PRANI_ERR_INVALID_VOCALIZATION = (0 - 2);   # vocalization parameter invalid
 var PRANI_ERR_INVALID_SPECIES      = (0 - 3);   # species configuration invalid
 var PRANI_ERR_SYNTHESIS_FAILED     = (0 - 4);   # a synthesis step failed
 var PRANI_ERR_SVARA                = (0 - 5);   # underlying svara operation failed
+# 2.2.0, ADR-0008: not a Rust variant. The oracle's allocator aborted, so it had no
+# way to report this; prani's bump arena returns 0, and every prani constructor
+# and entry point reports that here instead of storing through it.
+var PRANI_ERR_ALLOC                = (0 - 6);   # an allocation prani made was refused
 
 # ================================================================
 # Shared f64 tolerances / sentinels (IEEE-754 bit patterns). Exported for
@@ -51,7 +55,103 @@ fn prani_err_name(code) {
     if (code == PRANI_ERR_INVALID_SPECIES) { return "invalid species"; }
     if (code == PRANI_ERR_SYNTHESIS_FAILED) { return "synthesis failed"; }
     if (code == PRANI_ERR_SVARA) { return "svara error"; }
+    if (code == PRANI_ERR_ALLOC) { return "allocation refused"; }
     return "unknown error";
+}
+
+# ================================================================
+# Allocation (2.2.0, ADR-0008). EVERY allocation prani makes goes through the
+# three helpers below, and each reports a refusal as PRANI_ERR_ALLOC. Before
+# 2.2.0 a refused `alloc` returned 0 and prani stored through it (a fault at the
+# null page), a refused `vec_new` returned 0 and prani used it as a vec, and a
+# refused `vec_push` grow exited the process ("vec: alloc failed"). No host can
+# handle any of the three. scripts/check-alloc.sh fails the build if src/ calls
+# `alloc`, `vec_new` or `vec_push` anywhere else.
+#
+# The helpers draw from prani's OWN Allocator, a stdlib vtable (lib/alloc.cyr's
+# 40-byte layout) whose alloc slot is prani_alloc_raw. It serves exactly what the
+# stdlib's default allocator serves -- the same global bump arena, through
+# `alloc` -- so nothing about where memory comes from changes. What it buys is a
+# seam: tests/allocrefused.tcyr redefines prani_alloc_raw to refuse chosen
+# requests, and so refuses prani's allocations and nobody else's. svara's own
+# allocations do not pass through it, and stop where svara's ADR-0009 says (at
+# the null page) when refused; the ones svara reports, prani passes on.
+# ================================================================
+var _prani_alloc_vt: i64[5];
+var _prani_alloc_ready = 0;
+
+# prani_alloc_raw(state, size) -- the vtable's alloc slot, and the only place
+# prani's memory comes from: the global bump arena. Returns a pointer, or 0 when
+# `alloc` refuses. `state` is the vtable's (always 0; the arena is global).
+fn prani_alloc_raw(state, size) {
+    return alloc(size);
+}
+
+# prani_alloc_no_realloc(state, ptr, old_size, new_size) -- the realloc slot.
+# Nothing prani calls reallocates through an Allocator; 0 is "refused".
+fn prani_alloc_no_realloc(state, ptr, old_size, new_size) {
+    return 0;
+}
+
+# prani_alloc_no_free(state, ptr) -- the free slot. A bump arena frees nothing.
+fn prani_alloc_no_free(state, ptr) {
+    return 0;
+}
+
+# prani_alloc_no_reset(state) -- the reset slot. prani never resets the arena:
+# that would invalidate every pointer the stdlib holds too (lib/alloc.cyr).
+fn prani_alloc_no_reset(state) {
+    return 0;
+}
+
+# prani_allocator() -- prani's Allocator, built once in static storage. As with
+# the stdlib's default_alloc(), a race between two first callers writes identical
+# bytes to the identical buffer, so the publish is idempotent.
+#must_use
+fn prani_allocator() {
+    if (_prani_alloc_ready == 0) {
+        var s = &_prani_alloc_vt;
+        store64(s, &prani_alloc_raw);
+        store64(s + 8, &prani_alloc_no_realloc);
+        store64(s + 16, &prani_alloc_no_free);
+        store64(s + 24, &prani_alloc_no_reset);
+        store64(s + 32, 0);
+        _prani_alloc_ready = 1;
+    }
+    return &_prani_alloc_vt;
+}
+
+# prani_alloc(size) -- `size` bytes from prani's allocator, or PRANI_ERR_ALLOC.
+# It calls the vtable's alloc slot directly rather than through alloc_via: the
+# indirect call cost emotion_evaluate, which allocates its result on every frame,
+# 16 ns (72 -> 88), measured over six alternating rounds. A direct call reaches the
+# same prani_alloc_raw, a test's redefinition included.
+#must_use
+fn prani_alloc(size) {
+    var p = prani_alloc_raw(0, size);
+    if (p == 0) { return PRANI_ERR_ALLOC; }
+    return p;
+}
+
+# prani_vec_new() -- an empty vec (capacity 16) from prani's allocator, or
+# PRANI_ERR_ALLOC. stdlib vec_new would return 0 and leave the check to a caller
+# who could not tell it from a handle.
+#must_use
+fn prani_vec_new() {
+    var v = vec_new_a(prani_allocator());
+    if (v == 0) { return PRANI_ERR_ALLOC; }
+    return v;
+}
+
+# prani_vec_push(v, x) -- append x, growing through prani's allocator.
+# PRANI_ERR_NONE, or PRANI_ERR_ALLOC when the grow is refused (stdlib vec_push
+# exits the process there). `v` is unchanged on a refusal. A count past
+# VEC_CAP_MAX still ends the process inside the stdlib, so every caller that
+# builds a buffer ranges its count first (prani_buffer_count_ok / _len_ok).
+#must_use
+fn prani_vec_push(v, x) {
+    if (vec_push_a(prani_allocator(), v, x) < 0) { return PRANI_ERR_ALLOC; }
+    return PRANI_ERR_NONE;
 }
 
 # Map a svara error code (svara's own SVARA_ERR_* are negative) to
@@ -98,6 +198,15 @@ fn prani_is_finite(x) {
 # the range meaning by category (PraniError::InvalidTract is documented as
 # "a vocal tract parameter is out of valid range").
 # ================================================================
+
+# 1 iff x is NaN: the one value that fails x <= x. The hazard at a CLAMP site
+# (2.2.0's builders): f64_clamp bounds an infinity to a legal endpoint, which
+# 2.0.5 decided to accept, but passes NaN through every clamp unchanged.
+#must_use
+fn prani_is_nan(x) {
+    if (f64_le(x, x) == 1) { return 0; }
+    return 1;
+}
 
 # 1 iff both are finite.
 #must_use
@@ -161,8 +270,9 @@ fn prani_sample_count_ok(raw) {
 #
 # The limit is lib/vec.cyr's own constant, not a copy of it, so this refuses
 # exactly what could never have succeeded. It is not a memory estimate: a buffer
-# at the limit costs ~4 GiB of bump arena, and an allocation refused below it is
-# still a process exit (roadmap 2.2.0 Lane B).
+# at the limit costs ~4 GiB of bump arena. An allocation refused below it is
+# reported as PRANI_ERR_ALLOC since 2.2.0 (ADR-0008); past it, the stdlib still
+# ends the process, which is why this check comes first.
 #must_use
 fn prani_buffer_count_ok(raw) {
     return prani_in_range(raw, 0, f64_from(VEC_CAP_MAX));

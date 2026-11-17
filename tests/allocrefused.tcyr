@@ -1,0 +1,608 @@
+# allocrefused.tcyr -- 2.2.0, ADR-0008. A refused allocation is reported as
+# PRANI_ERR_ALLOC, by every prani constructor and entry point, for every
+# allocation prani makes.
+#
+# Through 2.1.2 prani called `alloc`, `vec_new` and `vec_push` directly. A refused
+# `alloc` returned 0 and prani stored through it (a fault at the null page); a
+# refused `vec_new` returned 0 and prani used it as a vec; a refused `vec_push` grow
+# exited the process ("vec: alloc failed"). Since 2.2.0 every allocation goes
+# through src/error.cyr's funnel (prani_alloc / prani_vec_new / prani_vec_push),
+# whose memory comes from prani_alloc_raw, and scripts/check-alloc.sh fails the
+# build if src/ allocates any other way.
+#
+# THE MECHANISM. cycc keeps the last definition of a function, so this suite
+# redefines two:
+#   prani_alloc_raw  -- prani's allocator. Refusing here refuses prani's requests
+#                       and nobody else's: svara's own allocations do not pass
+#                       through it, and stop at the null page when refused
+#                       (svara ADR-0009), which would end the run, not fail it.
+#   alloc            -- the stdlib's, as svara's and naad's suites replace it: a
+#                       bump arena on one private mapping. Refusing HERE reaches
+#                       naad's constructors, which report a refusal (naad
+#                       ADR-0010), and the two places prani passes that on.
+# While armed each counts requests and refuses one:
+#   FI_ONE   the Nth request only
+#   FI_FROM  the Nth request and every later one (a heap that stays exhausted)
+#
+# Every count is measured here, not written down, so a toolchain or dependency
+# that allocates differently moves the indices, not the expectations. Every sweep
+# has a floor, so it cannot pass by refusing nothing, and a control refuses one
+# past the last request and requires the unrefused result, bit for bit.
+#
+# ⚠ This build warns twice, on purpose:
+#   duplicate fn 'prani_alloc_raw' / 'alloc' (last definition wins)
+# The overrides are the mechanism. svara's and naad's suites carry the same.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/spatial.cyr"
+include "src/vocalization.cyr"
+include "src/fatigue.cyr"
+include "src/emotion.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+include "src/preset.cyr"
+include "src/stream.cyr"
+include "src/ffi.cyr"
+
+var FI_OFF = 0;
+var FI_ONE = 1;
+var FI_FROM = 2;
+
+# prani's allocator, scoped to prani's requests
+var FI_MODE = 0;
+var FI_COUNT = 0;
+var FI_N = 0;
+# the stdlib's, every request in the unit
+var GA_MODE = 0;
+var GA_COUNT = 0;
+var GA_N = 0;
+var GA_BASE = 0;
+var GA_PTR = 0;
+var GA_END = 0;
+var GA_ARENA = 0x40000000;   # 1 GiB, reserved lazily (NORESERVE)
+
+# The stand-in for prani's allocator: count and refuse while armed, then take the
+# memory from `alloc` exactly as src/error.cyr does.
+fn prani_alloc_raw(state, size) {
+    if (FI_MODE != FI_OFF) {
+        FI_COUNT = FI_COUNT + 1;
+        if (FI_MODE == FI_ONE) {
+            if (FI_COUNT == FI_N) { return 0; }
+        }
+        if (FI_MODE == FI_FROM) {
+            if (FI_COUNT >= FI_N) { return 0; }
+        }
+    }
+    return alloc(size);
+}
+
+# The stand-in for the stdlib allocator: its refusals for a size it can never
+# serve, then the armed refusal, then zeroed memory bumped from one mapping.
+fn alloc(size): i64 {
+    if (size <= 0) { return 0; }
+    if (size > ALLOC_MAX) { return 0; }
+    if (GA_MODE != FI_OFF) {
+        GA_COUNT = GA_COUNT + 1;
+        if (GA_MODE == FI_ONE) {
+            if (GA_COUNT == GA_N) { return 0; }
+        }
+        if (GA_MODE == FI_FROM) {
+            if (GA_COUNT >= GA_N) { return 0; }
+        }
+    }
+    if (GA_BASE == 0) {
+        # PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS|NORESERVE
+        GA_BASE = syscall(9, 0, GA_ARENA, 3, 0x4022, 0 - 1, 0);
+        if (GA_BASE < 0) { GA_BASE = 0; return 0; }
+        GA_PTR = GA_BASE;
+        GA_END = GA_BASE + GA_ARENA;
+    }
+    size = (size + 7) & (0 - 8);
+    if (GA_PTR + size > GA_END) { return 0; }
+    var p = GA_PTR;
+    GA_PTR = p + size;
+    return p;
+}
+
+# Arm prani's allocator: count from 0, refuse request `n` the way `mode` says.
+# n = 0 counts without refusing.
+fn fi_arm(mode, n) {
+    FI_MODE = mode;
+    FI_N = n;
+    FI_COUNT = 0;
+    return 0;
+}
+
+# Disarm prani's allocator; the number of requests made while armed.
+fn fi_disarm() {
+    FI_MODE = FI_OFF;
+    return FI_COUNT;
+}
+
+# Arm the stdlib allocator, as fi_arm does prani's.
+fn ga_arm(mode, n) {
+    GA_MODE = mode;
+    GA_N = n;
+    GA_COUNT = 0;
+    return 0;
+}
+
+# Disarm the stdlib allocator; the number of requests made while armed.
+fn ga_disarm() {
+    GA_MODE = FI_OFF;
+    return GA_COUNT;
+}
+
+# fi_count(c) -- how many requests one call of case `c` makes of prani's allocator.
+fn fi_count(c) {
+    fi_arm(FI_ONE, 0);
+    var r = fncall0(c);
+    return fi_disarm();
+}
+
+# fi_sweep(c, n, want) -- refuse each of the n requests of case `c`, once singly
+# and once from then on. Returns how many of those 2n calls answered `want`.
+fn fi_sweep(c, n, want) {
+    var ok = 0;
+    var k = 1;
+    while (k <= n) {
+        fi_arm(FI_ONE, k);
+        var r1 = fncall0(c);
+        fi_disarm();
+        if (r1 == want) { ok = ok + 1; }
+        fi_arm(FI_FROM, k);
+        var r2 = fncall0(c);
+        fi_disarm();
+        if (r2 == want) { ok = ok + 1; }
+        k = k + 1;
+    }
+    return ok;
+}
+
+# fi_past(c, n) -- case `c` with request n + 1 refused: one past the last, so
+# nothing is refused. Its result.
+fn fi_past(c, n) {
+    fi_arm(FI_ONE, n + 1);
+    var r = fncall0(c);
+    fi_disarm();
+    return r;
+}
+
+# vecs_same(a, b) -- 1 iff both are vecs of the same length and bits.
+fn vecs_same(a, b) {
+    if (a <= 0) { return 0; }
+    if (b <= 0) { return 0; }
+    var n = vec_len(a);
+    if (vec_len(b) != n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (vec_get(a, i) != vec_get(b, i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+var SR8 = f64_from(8000);
+var D005 = 0x3FA999999999999A;    # 0.05 s
+var HALF = 0x3FE0000000000000;    # 0.5
+var F220 = f64_from(220);
+
+# ---- the cases: each makes every allocation of one public path, from scratch ----
+
+# A fresh PCG32 generator.
+fn case_rng() { return prani_rng_new(42); }
+# A fresh DC blocker.
+fn case_dcblocker() { return dcblocker_new(); }
+# The urgency -> perturbation pair.
+fn case_perturbation() { return bridge_perturbation_from_urgency(HALF); }
+# An intent's modifier set.
+fn case_intent_modifiers() { return prani_intent_modifiers(PRANI_INTENT_ALARM); }
+# A fatigue state.
+fn case_fatigue() { return fatigue_new(); }
+# A fatigue state's modifiers.
+fn case_fatigue_modifiers() {
+    var f = fatigue_new();
+    if (prani_is_err(f) == 1) { return f; }
+    return fatigue_modifiers(f);
+}
+# An emotion, through the builder chain, then its evaluation.
+fn case_emotion() {
+    var e = emotion_with_smoothing(emotion_with_values(HALF, HALF), HALF);
+    if (prani_is_err(e) == 1) { return e; }
+    return emotion_evaluate(e);
+}
+# A species' params, the allocating form.
+fn case_species_params() { return species_params(PRANI_SP_DOG); }
+# A species' bout template.
+fn case_bout_template() { return species_bout_template(PRANI_SP_WOLF); }
+# A phrase of two elements.
+fn case_phrase() {
+    var els = prani_vec_new();
+    if (els < 0) { return els; }
+    var e1 = sequence_call_element_new(PRANI_VOC_HOWL, D005, D005);
+    if (prani_is_err(e1) == 1) { return e1; }
+    if (prani_vec_push(els, e1) < 0) { return PRANI_ERR_ALLOC; }
+    return sequence_call_phrase_new(els, PRANI_INTENT_SOCIAL);
+}
+# Synthesis options.
+fn case_options() { return crtract_options_new(HALF, HALF); }
+# A laryngeal tract.
+fn case_tract_wolf() { return crtract_new(species_params(PRANI_SP_WOLF), SR8); }
+# A noise-only tract, which also builds naad's bandpass.
+fn case_tract_snake() { return crtract_new(species_params(PRANI_SP_SNAKE), SR8); }
+# A tract, then 400 samples through it -- for each of the five apparatus.
+fn case_synth(sp) {
+    var t = crtract_new(species_params(sp), SR8);
+    if (prani_is_err(t) == 1) { return t; }
+    var o = crtract_options_new(0, HALF);
+    if (prani_is_err(o) == 1) { return o; }
+    return crtract_synthesize(t, f64_from(species_params_f0(sp)), 400, o);
+}
+# species_params_f0(sp) is below; these bind case_synth to one species each.
+fn case_synth_wolf() { return case_synth(PRANI_SP_WOLF); }
+# Syringeal.
+fn case_synth_crow() { return case_synth(PRANI_SP_CROW); }
+# Noise-only.
+fn case_synth_snake() { return case_synth(PRANI_SP_SNAKE); }
+# Stridulatory.
+fn case_synth_cricket() { return case_synth(PRANI_SP_CRICKET); }
+# Vibratile.
+fn case_synth_bee() { return case_synth(PRANI_SP_BEE); }
+# The cat purr render.
+fn case_purr() {
+    var t = crtract_new(species_params(PRANI_SP_CAT), SR8);
+    if (prani_is_err(t) == 1) { return t; }
+    return crtract_synthesize_purr(t, 400, f64_from(27));
+}
+# species_params_f0(sp) -- the species' default f0 as an integer Hz, for case_synth.
+fn species_params_f0(sp) {
+    var row[128];
+    return f64_to(SpeciesParams_f0_default(species_params_into(&row, sp)));
+}
+# A voice, then one vocalization, from scratch: VOC_SP / VOC_V select it.
+var VOC_SP = 0;
+var VOC_V = 0;
+# The selected species' vocalization at 8 kHz for 0.05 s.
+fn case_vocalize() {
+    return crvoice_vocalize(crvoice_new(VOC_SP), VOC_V, SR8, D005);
+}
+# A voice built through the whole builder chain, then a vocalization with intent.
+fn case_vocalize_built() {
+    var v = crvoice_with_vocal_effort(crvoice_with_shimmer(crvoice_with_jitter(
+          crvoice_with_breathiness(crvoice_with_size(crvoice_new(PRANI_SP_DOG), HALF), HALF), 0), 0), HALF);
+    return crvoice_vocalize_with_intent(v, PRANI_VOC_BARK, PRANI_INTENT_THREAT, SR8, D005);
+}
+# A bout: three barks.
+fn case_bout() {
+    var b = sequence_call_bout_new(PRANI_VOC_BARK, 3, D005, D005, PRANI_INTENT_ALARM);
+    if (prani_is_err(b) == 1) { return b; }
+    return sequence_call_bout_synthesize(b, crvoice_new(PRANI_SP_DOG), SR8);
+}
+# A phrase, rendered.
+fn case_phrase_synth() {
+    var ph = case_phrase();
+    if (prani_is_err(ph) == 1) { return ph; }
+    return sequence_call_phrase_synthesize(ph, crvoice_new(PRANI_SP_WOLF), SR8);
+}
+# A chorus of two.
+fn case_chorus() {
+    var vs = prani_vec_new();
+    if (vs < 0) { return vs; }
+    var a = crvoice_new(PRANI_SP_WOLF);
+    if (prani_is_err(a) == 1) { return a; }
+    if (prani_vec_push(vs, a) < 0) { return PRANI_ERR_ALLOC; }
+    var b = crvoice_new(PRANI_SP_DOG);
+    if (prani_is_err(b) == 1) { return b; }
+    if (prani_vec_push(vs, b) < 0) { return PRANI_ERR_ALLOC; }
+    return sequence_synthesize_chorus(vs, PRANI_VOC_GROWL, PRANI_INTENT_SOCIAL, SR8, D005, 0x3F847AE147AE147B);
+}
+# Every preset, then one built and rendered.
+fn case_presets() {
+    var all = preset_all();
+    if (prani_is_err(all) == 1) { return all; }
+    return crvoice_vocalize(preset_build(vec_get(all, 0)), PRANI_VOC_HOWL, SR8, D005);
+}
+# A howl, then distance attenuation and a Doppler shift on it.
+fn case_spatial() {
+    var s = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, SR8, D005);
+    if (prani_is_err(s) == 1) { return s; }
+    var a = spatial_apply_distance_attenuation(s, f64_from(20), F64_ONE, SR8);
+    if (prani_is_err(a) == 1) { return a; }
+    return spatial_apply_doppler_shift(a, f64_from(10), SR8);
+}
+# The JSON documents the decoders read, written once, unarmed, below.
+var J_VOICE = 0;
+var J_TRACT = 0;
+var J_PRESET = 0;
+var J_PHRASE = 0;
+# A voice from JSON, then a vocalization from it.
+fn case_voice_json() {
+    return crvoice_vocalize(crvoice_from_json_str(J_VOICE), PRANI_VOC_HOWL, SR8, D005);
+}
+# A tract from JSON.
+fn case_tract_json() { return crtract_from_json_str(J_TRACT); }
+# A preset from JSON.
+fn case_preset_json() { return preset_from_json_str(J_PRESET); }
+# A phrase from JSON.
+fn case_phrase_json() { return sequence_call_phrase_from_json_str(J_PHRASE); }
+# The stream buffer every fill below writes into, built unarmed.
+var FILL_BUF = 0;
+# A stream, then two fills (the first builds its tract); a failed fill answers
+# with the stream's recorded cause.
+fn case_stream() {
+    var st = stream_new(crvoice_new(VOC_SP), VOC_V, PRANI_INTENT_IDLE, SR8, D005);
+    if (prani_is_err(st) == 1) { return st; }
+    var k = 0;
+    while (k < 2) {
+        var w = stream_fill_buffer(st, FILL_BUF);
+        if (w == 0) { return stream_last_error(st); }
+        k = k + 1;
+    }
+    return FILL_BUF;
+}
+# A stream drained by next_block, which reports a failed fill itself.
+fn case_stream_blocks() {
+    var st = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, SR8, D005);
+    if (prani_is_err(st) == 1) { return st; }
+    var last = 0;
+    while (stream_is_finished(st) == 0) {
+        last = stream_next_block(st, 128);
+        if (prani_is_err(last) == 1) { return last; }
+    }
+    return last;
+}
+# The FFI's voice, then its stream and one fill: the FFI answers 0 for a refusal.
+fn case_ffi() {
+    var v = prani_ffi_voice_create(0);
+    if (v == 0) { return 0; }
+    var st = prani_ffi_stream_start(v, 0, 4, SR8, D005);
+    if (st == 0) { return 0; }
+    var w = prani_ffi_stream_fill(st, FILL_BUF, vec_len(FILL_BUF));
+    if (w == 0) { return prani_ffi_stream_last_error(st); }
+    return w;
+}
+
+# fi_case(name, c, floor, want) -- the whole check for one case: it makes at least
+# `floor` requests, every refusal of each (singly and from then on) answers `want`,
+# and one past the last gives the unrefused result. vec results are compared bit
+# for bit; others need only not be an error. Records the assertions itself.
+fn fi_case(name, c, floor, want) {
+    var n = fi_count(c);
+    test_group(name);
+    assert_gte(n, floor, "it makes at least the floor of prani allocations (not vacuous)");
+    assert_eq(fi_sweep(c, n, want), 2 * n, "every refusal, singly and from then on, is reported");
+    var ref = fncall0(c);
+    var past = fi_past(c, n);
+    assert_eq(prani_is_err(past), 0, "control: refusing one past the last request refuses nothing");
+    assert_eq(prani_is_err(ref), 0, "control: and the unrefused call succeeds");
+    return n;
+}
+
+alloc_init();
+
+FILL_BUF = prani_vec_new();
+prani_vec_push_zeros(FILL_BUF, 256);
+var jsb = str_builder_new();
+crvoice_to_json(crvoice_new(PRANI_SP_CAT), jsb);
+J_VOICE = str_data(str_builder_build(jsb));
+jsb = str_builder_new();
+crtract_to_json(crtract_new(species_params(PRANI_SP_WOLF), SR8), jsb);
+J_TRACT = str_data(str_builder_build(jsb));
+jsb = str_builder_new();
+preset_to_json(preset_alpha_wolf(), jsb);
+J_PRESET = str_data(str_builder_build(jsb));
+jsb = str_builder_new();
+sequence_call_phrase_to_json(case_phrase(), jsb);
+J_PHRASE = str_data(str_builder_build(jsb));
+
+# ================================================================
+# The funnel itself.
+# ================================================================
+test_group("the funnel: prani_alloc / prani_vec_new / prani_vec_push");
+fi_arm(FI_ONE, 1);
+assert_eq(prani_alloc(64), PRANI_ERR_ALLOC, "prani_alloc reports a refusal");
+fi_arm(FI_ONE, 1);
+assert_eq(prani_vec_new(), PRANI_ERR_ALLOC, "prani_vec_new reports a refused header");
+fi_arm(FI_ONE, 2);
+assert_eq(prani_vec_new(), PRANI_ERR_ALLOC, "prani_vec_new reports refused data");
+fi_disarm();
+var fz_v = prani_vec_new();
+var fz_i = 0;
+while (fz_i < 16) { assert_eq(prani_vec_push(fz_v, fz_i), PRANI_ERR_NONE, "fill"); fz_i = fz_i + 1; }
+fi_arm(FI_ONE, 1);
+assert_eq(prani_vec_push(fz_v, 99), PRANI_ERR_ALLOC, "prani_vec_push reports a refused grow");
+fi_disarm();
+assert_eq(vec_len(fz_v), 16, "and leaves the vec as it was");
+assert_eq(vec_get(fz_v, 15), 15, "control: with its contents intact");
+assert_eq(prani_vec_push(fz_v, 99), PRANI_ERR_NONE, "control: the next push, unrefused, grows it");
+ga_arm(FI_ONE, 0);
+var fz_raw = svara_glottal_new(F220, SR8);
+var fz_svara = ga_disarm();
+fi_arm(FI_ONE, 0);
+var fz_raw2 = svara_glottal_new(F220, SR8);
+assert_eq(fi_disarm(), 0, "svara's allocations do not pass through prani's allocator");
+assert_gt(fz_svara, 0, "control: while the stdlib's does see them");
+assert_eq(streq(prani_err_name(PRANI_ERR_ALLOC), "allocation refused"), 1, "the code has its name");
+
+# ================================================================
+# Every public constructor and entry point.
+# ================================================================
+fi_case("refused: prani_rng_new", &case_rng, 1, PRANI_ERR_ALLOC);
+fi_case("refused: dcblocker_new", &case_dcblocker, 1, PRANI_ERR_ALLOC);
+fi_case("refused: bridge_perturbation_from_urgency", &case_perturbation, 1, PRANI_ERR_ALLOC);
+fi_case("refused: prani_intent_modifiers", &case_intent_modifiers, 1, PRANI_ERR_ALLOC);
+fi_case("refused: fatigue_new", &case_fatigue, 1, PRANI_ERR_ALLOC);
+fi_case("refused: fatigue_modifiers", &case_fatigue_modifiers, 2, PRANI_ERR_ALLOC);
+fi_case("refused: emotion builders + emotion_evaluate", &case_emotion, 2, PRANI_ERR_ALLOC);
+fi_case("refused: species_params", &case_species_params, 1, PRANI_ERR_ALLOC);
+fi_case("refused: species_bout_template", &case_bout_template, 1, PRANI_ERR_ALLOC);
+fi_case("refused: sequence elements and phrase", &case_phrase, 4, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_options_new", &case_options, 1, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_new (laryngeal)", &case_tract_wolf, 4, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_new (noise-only)", &case_tract_snake, 4, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_synthesize, laryngeal", &case_synth_wolf, 8, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_synthesize, syringeal", &case_synth_crow, 8, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_synthesize, noise-only", &case_synth_snake, 8, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_synthesize, stridulatory", &case_synth_cricket, 8, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_synthesize, vibratile", &case_synth_bee, 8, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_synthesize_purr", &case_purr, 8, PRANI_ERR_ALLOC);
+
+# crvoice_vocalize for every species, through each vocalization it supports that
+# takes a distinct path: formant transitions, syringeal coupling, subharmonics,
+# fire breath, biphonation, nasal notch, AM, the cat purr.
+var vz_sp = 0;
+var vz_cases = 0;
+var vz_reported = 0;
+var vz_requests = 0;
+var vz_controls = 0;
+while (vz_sp < PRANI_SP_COUNT) {
+    var vz_v = 0;
+    while (vz_v < PRANI_VOC_COUNT) {
+        if (species_supports_vocalization(vz_sp, vz_v) == 1) {
+            VOC_SP = vz_sp;
+            VOC_V = vz_v;
+            var vz_n = fi_count(&case_vocalize);
+            vz_requests = vz_requests + vz_n;
+            vz_reported = vz_reported + fi_sweep(&case_vocalize, vz_n, PRANI_ERR_ALLOC);
+            var vz_ref = case_vocalize();
+            if (vecs_same(vz_ref, fi_past(&case_vocalize, vz_n)) == 1) { vz_controls = vz_controls + 1; }
+            vz_cases = vz_cases + 1;
+        }
+        vz_v = vz_v + 1;
+    }
+    vz_sp = vz_sp + 1;
+}
+test_group("refused: crvoice_vocalize, every species x every vocalization it supports");
+assert_gte(vz_cases, 100, "control: the sweep covers every supported pair (127 at 2.2.0)");
+assert_gte(vz_requests, vz_cases * 8, "control: and each makes a real number of allocations");
+assert_eq(vz_reported, 2 * vz_requests, "every refusal in every pair is PRANI_ERR_ALLOC");
+assert_eq(vz_controls, vz_cases, "control: one past the last request gives the unrefused samples, bit for bit");
+
+fi_case("refused: the whole crvoice builder chain + vocalize_with_intent", &case_vocalize_built, 8, PRANI_ERR_ALLOC);
+fi_case("refused: sequence_call_bout_synthesize", &case_bout, 8, PRANI_ERR_ALLOC);
+fi_case("refused: sequence_call_phrase_synthesize", &case_phrase_synth, 8, PRANI_ERR_ALLOC);
+fi_case("refused: sequence_synthesize_chorus", &case_chorus, 8, PRANI_ERR_ALLOC);
+fi_case("refused: preset_all + preset_build", &case_presets, 12, PRANI_ERR_ALLOC);
+fi_case("refused: spatial attenuation + Doppler", &case_spatial, 8, PRANI_ERR_ALLOC);
+fi_case("refused: crvoice_from_json_str", &case_voice_json, 3, PRANI_ERR_ALLOC);
+fi_case("refused: crtract_from_json_str", &case_tract_json, 3, PRANI_ERR_ALLOC);
+fi_case("refused: preset_from_json_str", &case_preset_json, 1, PRANI_ERR_ALLOC);
+fi_case("refused: sequence_call_phrase_from_json_str", &case_phrase_json, 2, PRANI_ERR_ALLOC);
+
+# The stream: a refusal in stream_new is its return; one in a fill retires the
+# stream (ADR-0003) and stream_last_error names it.
+VOC_SP = PRANI_SP_WOLF;
+VOC_V = PRANI_VOC_HOWL;
+fi_case("refused: stream_new + stream_fill_buffer (laryngeal)", &case_stream, 6, PRANI_ERR_ALLOC);
+VOC_SP = PRANI_SP_CAT;
+VOC_V = PRANI_VOC_PURR;
+fi_case("refused: stream_new + stream_fill_buffer (cat purr)", &case_stream, 6, PRANI_ERR_ALLOC);
+fi_case("refused: stream_next_block reports the failed fill", &case_stream_blocks, 6, PRANI_ERR_ALLOC);
+
+# The FFI answers null (0) for every failure, a refusal among them, and its
+# last_error names a refusal inside a fill.
+test_group("refused: the FFI voice, stream and fill");
+var ffi_n = fi_count(&case_ffi);
+assert_gte(ffi_n, 6, "it makes at least the floor of prani allocations (not vacuous)");
+var ffi_k = 1;
+var ffi_bad = 0;
+while (ffi_k <= ffi_n) {
+    fi_arm(FI_ONE, ffi_k);
+    var ffi_r = case_ffi();
+    fi_disarm();
+    if (ffi_r != 0) {
+        if (ffi_r != PRANI_ERR_ALLOC) { ffi_bad = ffi_bad + 1; }
+    }
+    ffi_k = ffi_k + 1;
+}
+assert_eq(ffi_bad, 0, "every refusal is the FFI's null, or a fill's last_error of PRANI_ERR_ALLOC");
+assert_eq(fi_past(&case_ffi, ffi_n), vec_len(FILL_BUF), "control: unrefused, the fill writes the whole buffer");
+
+# ================================================================
+# What naad reports, prani passes on. naad 2.3.4+ returns NAAD_ERR_ALLOCATION
+# from filter_biquad_new, noise_new and modulation_lfo_new for any of their own
+# refused allocations (naad ADR-0010). Those are stdlib requests, so they are
+# refused through `alloc`, in the window each one occupies. The windows are
+# measured: the callee alone, then its offset inside the caller.
+# ================================================================
+test_group("naad's refusal in crtract_new's bandpass is PRANI_ERR_ALLOC");
+var nb_params = species_params(PRANI_SP_SNAKE);
+ga_arm(FI_ONE, 0);
+var nb_tr = svara_tract_new(SR8);
+var nb_svara = ga_disarm();
+ga_arm(FI_ONE, 0);
+var nb_f = filter_biquad_new(NAAD_FILTER_BANDPASS, SR8, SpeciesParams_formant0(nb_params), f64_from(2));
+var nb_naad = ga_disarm();
+assert_gt(nb_naad, 0, "control: naad's bandpass allocates");
+assert_gt(nb_svara, 0, "control: and svara's tract does, first");
+# crtract_new's order: svara_tract_new, the (stack) target, then the bandpass.
+var nb_k = 1;
+var nb_ok = 0;
+while (nb_k <= nb_naad) {
+    ga_arm(FI_ONE, nb_svara + nb_k);
+    var nb_r = crtract_new(nb_params, SR8);
+    ga_disarm();
+    if (nb_r == PRANI_ERR_ALLOC) { nb_ok = nb_ok + 1; }
+    nb_k = nb_k + 1;
+}
+assert_eq(nb_ok, nb_naad, "each of the bandpass's refusals comes back as PRANI_ERR_ALLOC");
+ga_arm(FI_ONE, 0);
+var nb_ref = crtract_new(nb_params, SR8);
+var nb_total = ga_disarm();
+assert_gte(nb_total, nb_svara + nb_naad + 1, "control: crtract_new makes svara's, then naad's, then its own requests");
+ga_arm(FI_ONE, nb_svara + nb_naad + 1);
+assert_eq(crtract_new(nb_params, SR8), PRANI_ERR_ALLOC, "control: the request after the window is prani's own");
+ga_disarm();
+ga_arm(FI_ONE, nb_total + 1);
+var nb_past = crtract_new(nb_params, SR8);
+ga_disarm();
+assert_eq(prani_is_err(nb_past), 0, "control: refusing one past the last request, crtract_new builds");
+
+test_group("naad's refusal in svara's glottal source is reported, not rendered");
+# svara_glottal_new: its source and rng (svara's own), then noise_new and
+# modulation_lfo_new (naad's), which svara 3.6.4+ reports as SVARA_ERR_COMPUTATION.
+ga_arm(FI_ONE, 0);
+var ng_g = svara_glottal_new(F220, SR8);
+var ng_all = ga_disarm();
+ga_arm(FI_ONE, 0);
+var ng_nz = noise_new(NOISE_WHITE, 42);
+var ng_noise = ga_disarm();
+ga_arm(FI_ONE, 0);
+var ng_lf = modulation_lfo_new(MODULATION_LFO_SINE, 0x3F50624DD2F1A9FC, SR8);
+var ng_lfo = ga_disarm();
+var ng_own = ng_all - ng_noise - ng_lfo;
+assert_gt(ng_noise + ng_lfo, 0, "control: naad's two constructors allocate");
+assert_gte(ng_own, 1, "control: svara's own requests come first");
+var ng_tract = crtract_new(species_params(PRANI_SP_WOLF), SR8);
+var ng_opts = crtract_options_new(0, HALF);
+var ng_out = prani_vec_new();
+prani_vec_push_zeros(ng_out, 400);
+vec_truncate(ng_out, 0);
+# the _into form allocates nothing of prani's before svara_glottal_new, so the
+# source's requests are this call's first.
+var ng_k = ng_own + 1;
+var ng_ok = 0;
+while (ng_k <= ng_all) {
+    ga_arm(FI_ONE, ng_k);
+    var ng_r = crtract_synthesize_laryngeal_into(ng_tract, F220, 400, ng_opts, ng_out);
+    ga_disarm();
+    if (ng_r == PRANI_ERR_SVARA) { ng_ok = ng_ok + 1; }
+    ng_k = ng_k + 1;
+}
+assert_eq(ng_ok, ng_noise + ng_lfo, "each naad refusal in the source is PRANI_ERR_SVARA, never audio");
+var ng_good = crtract_synthesize_laryngeal_into(ng_tract, F220, 400, ng_opts, ng_out);
+assert_eq(prani_is_err(ng_good), 0, "control: unrefused, the same call renders");
+assert_eq(vec_len(ng_out), 400, "control: all 400 samples");
+
+var rc = assert_summary();
+syscall(60, rc);

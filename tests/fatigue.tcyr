@@ -412,23 +412,27 @@ assert_eq(prani_is_finite(FatigueModifiers_jitter_scale(mpm)), 1, "jitter_scale 
 assert_eq(FatigueModifiers_pitch_offset(mpm), 0xc008000000000000, "pitch == -3.0, exactly the clean-state value");
 
 # ================================================================
-# What 2.0.5 could NOT close in this module, pinned so it is not believed fixed.
-# modifiers_make returns a POINTER and has no error channel; giving it one is a
-# return-contract change (roadmap 2.2.0). It therefore REPORTS a non-finite
-# field through prani_log_error and hands back what it was given, unaltered --
-# substituting the identity modifiers (0, 0, 1, 1) would be exactly the
-# plausible fabrication ADR-0001 rules out.
-test_group("2.0.5 -- modifiers_make reports but cannot reject");
-var mk = fatigue_modifiers_make(G_NAN, 0, F64_ONE, F64_ONE);
-assert_gt(mk, 0, "modifiers_make still returns a pointer, never a PRANI_ERR_* code");
-assert_eq(FatigueModifiers_pitch_offset(mk), G_NAN, "the non-finite field is returned unaltered, not substituted");
-assert_eq(FatigueModifiers_amplitude_scale(mk), F64_ONE, "the finite fields are untouched");
+# What 2.0.5 could NOT close in this module, closed in 2.2.0. modifiers_make
+# returned a POINTER with no error channel, so it only REPORTED a non-finite field
+# (prani_log_error) and handed back what it was given; 2.2.0 gave every
+# constructor a negative return (ADR-0008), so it now refuses. It still never
+# substitutes the identity modifiers (0, 0, 1, 1): that would be the plausible
+# fabrication ADR-0001 rules out.
+test_group("2.2.0 -- modifiers_make refuses a non-finite field");
+assert_eq(fatigue_modifiers_make(G_NAN, 0, F64_ONE, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "a NaN pitch_offset -> PRANI_ERR_INVALID_VOCALIZATION (2.1.2 returned it unaltered)");
+assert_eq(fatigue_modifiers_make(0, 0, PRANI_POS_INF, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "an infinite amplitude_scale too: these are computed values, not clamp inputs");
+var mk = fatigue_modifiers_make(0, 0, F64_ONE, F64_ONE);
+assert_gt(mk, 0, "control: finite fields still build modifiers");
+assert_eq(FatigueModifiers_amplitude_scale(mk), F64_ONE, "control: with the values given");
 
 # The one remaining producer of a poisoned state: FatigueState_from_json_str is
 # derive-generated and takes any i64 per field, so a document prani did not
 # write can still carry a NaN bit pattern. That is the deserializer-field-range
-# half of 2.0.5 and it belongs with the derive, not with this module -- the log
-# line from modifiers_make is the only report available here.
+# half of 2.0.5 and it belongs with the derive, not with this module. Through 2.1.2
+# the log line from modifiers_make was the only report; since 2.2.0 modifiers()
+# off such a state is refused, so the gap stops at the state itself.
 var jb = str_builder_new();
 str_builder_add_cstr(jb, "{\"fatigue\":9221120237041090560,\"alarm_habituation\":0,");
 str_builder_add_cstr(jb, "\"bout_calling_time\":0,\"alarm_count\":0,\"alarm_reinforced\":0}");
@@ -436,8 +440,8 @@ var jbad = str_data(str_builder_build(jb));
 var sbad = FatigueState_from_json_str(jbad);
 assert_gt(sbad, 0, "the hand-written document still parses (it is well-formed)");
 assert_eq(FatigueState_fatigue(sbad), G_NAN, "and still carries a NaN fatigue -- known gap");
-var mbad = fatigue_modifiers(sbad);
-assert_eq(prani_is_finite(FatigueModifiers_pitch_offset(mbad)), 0, "so modifiers() off it is still NaN -- known gap");
+assert_eq(fatigue_modifiers(sbad), PRANI_ERR_INVALID_VOCALIZATION,
+  "but modifiers() off it is refused (2.2.0; it was NaN modifiers through 2.1.2)");
 
 var rc = assert_summary();
 syscall(60, rc);

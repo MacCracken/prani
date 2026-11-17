@@ -552,17 +552,25 @@ while (ri < 11) {
 assert_eq(rt_ok, 11, "all 11 built-in presets are ACCEPTED by their own codec");
 assert_eq(rt_eq, 11, "all 11 roundtrip with every scalar bit-identical");
 
-test_group("preset_make / preset_build -- constructor contract unchanged (2.2.0)");
-# Measured, not wished for. preset_make hands back a VoicePreset and nothing
-# else -- the same shape as the crvoice_with_* builders it feeds -- so it has no
-# channel to report a bad field on, and preset_build is the same. 2.0.5 puts the
-# range check where a failure CAN be reported (the codec above) and leaves the
-# constructor contract to roadmap 2.2.0; the NaN's remaining path to svara is
-# closed downstream at the fallible point of use (crvoice_vocalize / the tract
-# constructor). Pinned here so 2.2.0 has to notice it is changing this.
-var nanp = preset_make("NaN Probe", PRANI_SP_WOLF, T_NAN, 0, 0);
-assert_eq(prani_is_err(nanp), 0, "preset_make still returns a preset for a NaN size");
-assert_eq(VoicePreset_size(nanp), T_NAN, "preset_make stores the NaN size verbatim (no clamp, no guard)");
+test_group("preset_make / preset_build -- the constructor contract (2.2.0)");
+# This was pinned so that 2.2.0 had to notice it was changing it, and it is. Through
+# 2.1.2 preset_make handed back a VoicePreset and nothing else, so a NaN size was
+# stored verbatim and caught only downstream. 2.2.0 gave constructors a negative
+# return (ADR-0008), so preset_make refuses what the builder chain would store
+# unclamped: a NaN, or an unknown species. A FINITE out-of-range size is still the
+# builders' to clamp, as before; only the codec ranges every field.
+assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, T_NAN, 0, 0), PRANI_ERR_INVALID_SPECIES,
+  "preset_make refuses a NaN size (2.1.2 stored it verbatim)");
+assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, F64_ONE, T_NAN, 0), PRANI_ERR_INVALID_SPECIES,
+  "and a NaN f0_offset");
+assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, F64_ONE, 0, T_NAN), PRANI_ERR_INVALID_SPECIES,
+  "and a NaN breathiness");
+assert_eq(preset_make("Bad Tag", PRANI_SP_COUNT, F64_ONE, 0, 0), PRANI_ERR_INVALID_SPECIES,
+  "and an unknown species tag");
+var bigp = preset_make("Huge", PRANI_SP_WOLF, f64_from(100), 0, 0);
+assert_eq(prani_is_err(bigp), 0, "control: a finite out-of-range size still builds a preset");
+assert_eq(CreatureVoice_size_scale(preset_build(bigp)), f64_from(10), "control: and preset_build clamps it to 10");
+assert_eq(preset_build(PRANI_ERR_ALLOC), PRANI_ERR_ALLOC, "an error handle passes through preset_build");
 # ...and the codec refuses to produce that same preset from a document.
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_NAN, 0, 0), 1, "the codec will not build that preset from JSON");
 

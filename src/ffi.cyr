@@ -87,7 +87,10 @@ fn prani_ffi_intent_from_index(index) {
 fn prani_ffi_voice_create(species_index) {
     var species = prani_ffi_species_from_index(species_index);
     if (species < 0) { return 0; }
-    return crvoice_new(species);
+    var voice = crvoice_new(species);
+    # 2.2.0: a refused allocation is the FFI's null, like every other failure here.
+    if (prani_is_err(voice) == 1) { return 0; }
+    return voice;
 }
 
 # voice_destroy(handle) -- no-op (arena allocator: no per-object free). Kept for
@@ -127,8 +130,8 @@ fn prani_ffi_voice_destroy(handle) {
 #     that hides the caller's bug is the defect class ADR-0001 named.
 # A FINITE out-of-range value still clamps, unchanged: that is the oracle's
 # documented RTPC saturation (`voice.set_vocal_effort(effort)` clamps), it is
-# pinned by tests/ffi.tcyr's "finite 1.5 still clamps to 1.0". Rejecting it
-# instead is the builder-contract question in roadmap 2.2.0, not this milestone.
+# pinned by tests/ffi.tcyr's "finite 1.5 still clamps to 1.0". 2.2.0 kept it:
+# its builders refuse only a NaN, which no clamp can bound.
 # ================================================================
 
 # voice_set_effort(handle, effort) -- real-time vocal-effort update
@@ -264,6 +267,17 @@ fn prani_ffi_stream_fill(stream_handle, buffer, buffer_len) {
     if (buffer == 0) { return 0; }
     if (buffer_len <= 0) { return 0; }
     return stream_fill_buffer(stream_handle, buffer);
+}
+
+# stream_last_error(stream_handle) -- 0 while the stream is healthy, or the
+# negative PRANI_ERR_* that retired it (2.2.0). prani_ffi_stream_fill reports a
+# failure as 0 samples written; this says why, PRANI_ERR_ALLOC (-6) for a refused
+# allocation among them. A null handle answers PRANI_ERR_INVALID_VOCALIZATION, the
+# code stream_last_error gives for one. Not in the oracle, which had no failing
+# fill to explain.
+#must_use
+fn prani_ffi_stream_last_error(stream_handle) {
+    return stream_last_error(stream_handle);
 }
 
 # stream_is_finished(stream_handle) -- 1 if finished (or null handle), else 0.

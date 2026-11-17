@@ -13,7 +13,8 @@
 
 ```text
 prani/ src/
-  L0  error.cyr        — PRANI_ERR_* codes, prani_from_svara, tolerances, is_finite
+  L0  error.cyr        — PRANI_ERR_* codes, prani_from_svara, tolerances, is_finite,
+                         the allocation funnel (prani_alloc / _vec_new / _vec_push, ADR-0008)
       logging.cyr      — prani_log_* wrappers over sakshi (the `tracing` replacement)
       rng.cyr          — PrRng: PCG32 PRNG (stochastic synthesis)
       dsp.cyr          — DcBlocker (applied to every synthesis buffer)

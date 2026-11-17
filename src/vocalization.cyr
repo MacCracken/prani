@@ -90,7 +90,8 @@ struct IntentModifiers {
 # from an intent; this is the constructor it and the tests build with.
 #must_use
 fn prani_intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urgency) {
-    var m = alloc(sizeof(IntentModifiers));
+    var m = prani_alloc(sizeof(IntentModifiers));
+    if (m < 0) { return m; }   # PRANI_ERR_ALLOC (2.2.0)
     IntentModifiers_set_pitch_scale(m, pitch_scale);
     IntentModifiers_set_amplitude_scale(m, amplitude_scale);
     IntentModifiers_set_duration_scale(m, duration_scale);

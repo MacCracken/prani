@@ -1,6 +1,6 @@
 # 0003 — A failed stream fill reports 0 written and retires the stream
 
-**Status**: Accepted
+**Status**: Accepted (revisited by [0008](0008-a-refused-allocation-is-reported.md): retirement stands; the cause is now recorded)
 **Date**: 2026-08-30
 
 ## Context

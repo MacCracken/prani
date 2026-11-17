@@ -787,5 +787,17 @@ assert_eq(f64_gt(xl_wb, 0), 1, "control: the wolf is breathy at all, so the conv
 assert_eq(SvGlottalSource_breathiness(xl_gl), crtract_svara_breathiness(xl_wb, SV_G_ROSENBERG_GAIN),
   "crtract_glottal_new gives svara g*b / (1 - b + g*b), not b");
 
+# ================================================================
+test_group("2.2.0 SvVowelTarget is 80 bytes, the stack target crtract_new and the blend fill");
+# crtract_new and crtract_set_formant_blend build their svara target in a stack
+# `var vt[80]` with svara_vowel_target_set, where they used to have svara allocate
+# one (unchecked) per call. If svara grows the struct, those writes overrun.
+assert_eq(sizeof(SvVowelTarget), 80, "sizeof(SvVowelTarget) == 80: ten f64s, f1..f5 and b1..b5");
+var vt_t = crtract_new(wolf, T_SR);
+var vt_m0 = alloc_used();
+var vt_rc = crtract_set_formant_blend(vt_t, fb_t, fb_b, T_0_5);
+assert_eq(alloc_used() - vt_m0, 0, "a formant blend allocates nothing (80 B per call through 2.1.2)");
+assert_eq(vt_rc, PRANI_ERR_NONE, "control: and it was a real, accepted blend");
+
 var rc = assert_summary();
 syscall(60, rc);

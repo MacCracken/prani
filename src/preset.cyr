@@ -29,8 +29,9 @@
 # that can report a failure, and it validates every field of an untrusted
 # document — see its comment for the range per field and why that range. The 11
 # built-ins are trusted input and sit inside every range; the codec is not
-# trusted. preset_make / preset_build hand back a struct with no error channel
-# and are deliberately left unguarded (roadmap 2.2.0's constructor contract).
+# trusted. Since 2.2.0 preset_make refuses an unknown species or a NaN (which no
+# clamp in preset_build's chain can bound), and preset_build passes an error on;
+# a finite out-of-range field is still the builders' to clamp.
 
 # ================================================================
 # Non-integer literal constants (IEEE-754 hex; decimals in comments).
@@ -80,7 +81,18 @@ struct VoicePreset {
 # preset_build (see there).
 #must_use
 fn preset_make(name, species, size, f0_offset, breathiness) {
-    var self = alloc(sizeof(VoicePreset));
+    # 2.2.0: the constructor refuses what the builder chain in preset_build would
+    # store unclamped. An unknown species tag (crvoice_new refuses it), and a NaN
+    # in any number (it passes every clamp). A finite out-of-range number is the
+    # builders' to clamp, as through 2.1.2; preset_from_json_str, which reads an
+    # untrusted document, ranges every field on top of this.
+    if (species < 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (species >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
+    if (prani_is_nan(size) == 1) { return PRANI_ERR_INVALID_SPECIES; }
+    if (prani_is_nan(f0_offset) == 1) { return PRANI_ERR_INVALID_SPECIES; }
+    if (prani_is_nan(breathiness) == 1) { return PRANI_ERR_INVALID_SPECIES; }
+    var self = prani_alloc(sizeof(VoicePreset));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     VoicePreset_set_name(self, name);
     VoicePreset_set_species(self, species);
     VoicePreset_set_size(self, size);
@@ -168,7 +180,10 @@ fn preset_from_json_str(json) {
     var size = bayan_json_v_int(n_size);
     if (prani_in_range(size, PR_P_0_1, f64_from(10)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     # f0_offset's bound is species-dependent because with_f0_offset's clamp is.
-    var params = species_params(species);
+    # 2.2.0: read from a stack row (sizeof SpeciesParams, pinned in
+    # tests/species.tcyr), not a SpeciesParams the arena keeps for one range check.
+    var row[128];
+    var params = species_params_into(&row, species);
     var f0_span = f64_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
     var f0_offset = bayan_json_v_int(n_f0);
     if (prani_in_range(f0_offset, f64_neg(f0_span), f0_span) == 0) { return PRANI_ERR_INVALID_SPECIES; }
@@ -181,17 +196,19 @@ fn preset_from_json_str(json) {
 # the crvoice_* builder chain, matching the oracle order:
 #   new(species).with_size(size).with_f0_offset(f0_offset).with_breathiness(br)
 #
-# NOT a validation point (2.0.5). It returns a CreatureVoice and nothing else --
-# the same shape as the three builders it chains -- so it has no channel to
-# report a bad field on, and giving it one is the 2.2.0 constructor-contract
-# work, not this milestone. A preset built by preset_from_json_str cannot carry
-# an out-of-range field (that codec rejects them); a preset assembled by hand
-# through preset_make can, and a NaN there passes every f64_clamp in the chain
-# (audit F11). It is caught at the fallible point of use downstream --
+# NOT a validation point (2.0.5), but since 2.2.0 an error passes through it: an
+# error handle, and any refusal from the builders it chains. A preset built by
+# preset_from_json_str cannot carry an out-of-range field (that codec rejects
+# them), and since 2.2.0 preset_make refuses a NaN; a preset whose fields were
+# set raw afterwards can still carry one past every f64_clamp (audit F11). It is
+# caught at the fallible point of use downstream --
 # crvoice_vocalize and the tract constructor, which return PRANI_ERR_* -- which
 # covers every path to svara without changing this signature.
 #must_use
 fn preset_build(self) {
+    # 2.2.0: an error handle passes through, and so does a refused crvoice_new:
+    # the with_* builders below hand an error straight back.
+    if (prani_is_err(self) == 1) { return self; }
     return crvoice_with_breathiness(
       crvoice_with_f0_offset(
         crvoice_with_size(
@@ -272,20 +289,30 @@ fn preset_alligator() {
     return preset_make("American Alligator", PRANI_SP_CROCODILIAN, PR_P_1_5, f64_neg(f64_from(10)), PR_P_0_18);
 }
 
+# preset_all_push(v, preset) -- append one preset to preset_all's vec. A preset
+# that came back as an error (a refused allocation, 2.2.0) is reported, never
+# stored as if it were a preset. PRANI_ERR_NONE or PRANI_ERR_ALLOC.
+#must_use
+fn preset_all_push(v, preset) {
+    if (prani_is_err(preset) == 1) { return preset; }
+    return prani_vec_push(v, preset);
+}
+
 # all() -- returns a vec of all 11 built-in presets, in oracle order.
 #must_use
 fn preset_all() {
-    var v = vec_new();
-    vec_push(v, preset_alpha_wolf());
-    vec_push(v, preset_wolf_pup());
-    vec_push(v, preset_house_cat());
-    vec_push(v, preset_kitten());
-    vec_push(v, preset_male_lion());
-    vec_push(v, preset_ancient_dragon());
-    vec_push(v, preset_young_dragon());
-    vec_push(v, preset_bald_eagle());
-    vec_push(v, preset_raven());
-    vec_push(v, preset_field_cricket());
-    vec_push(v, preset_alligator());
+    var v = prani_vec_new();
+    if (v < 0) { return v; }   # PRANI_ERR_ALLOC (2.2.0)
+    if (preset_all_push(v, preset_alpha_wolf()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_wolf_pup()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_house_cat()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_kitten()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_male_lion()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_ancient_dragon()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_young_dragon()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_bald_eagle()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_raven()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_field_cricket()) < 0) { return PRANI_ERR_ALLOC; }
+    if (preset_all_push(v, preset_alligator()) < 0) { return PRANI_ERR_ALLOC; }
     return v;
 }

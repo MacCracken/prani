@@ -173,7 +173,8 @@ struct PrPerturbation { jitter_scale; shimmer_scale; }
 #must_use
 fn bridge_perturbation_from_urgency(urgency) {
     var u = f64_clamp(urgency, PR_B_0_0, PR_B_1_0);
-    var p = alloc(sizeof(PrPerturbation));
+    var p = prani_alloc(sizeof(PrPerturbation));
+    if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
     PrPerturbation_set_jitter_scale(p, f64_add(PR_B_1_0, f64_mul(u, PR_B_1_5)));
     PrPerturbation_set_shimmer_scale(p, f64_add(PR_B_1_0, f64_mul(u, PR_B_1_0)));
     return p;

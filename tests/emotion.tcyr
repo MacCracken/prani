@@ -399,9 +399,17 @@ assert_eq(g_a_lo, T_0_0, "sweep min arousal is exactly 0.0");
 # valence NaN, arrived via with_values' clamp. Each zone classifier validates
 # only the field it reads, so arousal_zone still answers -- the reject is not
 # a blanket "this handle is poisoned".
-test_group("input-range guards -- NaN valence is stored, then rejected");
-var gn = emotion_with_values(f64_div(0, 0), T_0_5);
-assert_eq(prani_is_finite(emotion_valence(gn)), 0, "f64_clamp passed the NaN through (F11)");
+test_group("input-range guards -- NaN valence is refused, or stored and then rejected");
+# 2.2.0: with_values refuses a NaN itself (it passes every clamp). Through 2.1.2 it
+# stored one, and the guards below were the only report.
+assert_eq(emotion_with_values(f64_div(0, 0), T_0_5), PRANI_ERR_INVALID_VOCALIZATION,
+  "with_values refuses a NaN valence (2.2.0; it stored it before)");
+assert_eq(emotion_with_values(T_0_5, f64_div(0, 0)), PRANI_ERR_INVALID_VOCALIZATION,
+  "and a NaN arousal");
+# The point-of-use guards stay: a raw setter (or a document, below) still delivers one.
+var gn = emotion_with_values(T_0_0, T_0_5);
+PrEmotion_set_valence(gn, f64_div(0, 0));
+assert_eq(prani_is_finite(emotion_valence(gn)), 0, "a raw setter stores the NaN (the door the builder does not guard)");
 assert_eq(emotion_arousal(gn), T_0_5, "arousal unaffected");
 assert_eq(emotion_valence_zone(gn), PRANI_ERR_INVALID_VOCALIZATION, "valence_zone rejects NaN");
 assert_eq(emotion_arousal_zone(gn), PRE_AZ_MID, "arousal_zone still classifies its own field");
@@ -428,8 +436,12 @@ assert_eq(emotion_evaluate(ga), PRANI_ERR_INVALID_VOCALIZATION, "evaluate reject
 # reach an out-of-contract value through with_smoothing (which clamps), and it
 # corrupts valence/arousal on the very next tick.
 test_group("input-range guards -- NaN smoothing corrupts the state on update");
-var gs = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), f64_div(0, 0));
-assert_eq(prani_is_finite(PrEmotion_smoothing(gs)), 0, "with_smoothing's clamp passed the NaN through");
+var gs = emotion_with_values(T_0_0, T_0_5);
+assert_eq(emotion_with_smoothing(gs, f64_div(0, 0)), PRANI_ERR_INVALID_VOCALIZATION,
+  "with_smoothing refuses a NaN (2.2.0; its clamp passed it through before)");
+assert_eq(PrEmotion_smoothing(gs), PRE_0_1, "and leaves the emotion's smoothing as it was");
+PrEmotion_set_smoothing(gs, f64_div(0, 0));
+assert_eq(prani_is_finite(PrEmotion_smoothing(gs)), 0, "a raw setter still stores one");
 assert_eq(emotion_valence_zone(gs), PRE_VZ_NEUTRAL, "valence_zone unaffected -- it checks only what it reads");
 assert_eq(emotion_evaluate(gs), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects it (it checks all three fields)");
 emotion_update(gs, T_1_0, T_1_0);
@@ -542,7 +554,8 @@ assert_eq(u_si, 0, "select_intent == _unchecked on every valid state");
 # `_unchecked` function must only ever be called below a validation of the
 # fields it reads, and it is what the public wrappers below it still prevent.
 test_group("checked/unchecked split -- the unchecked core is genuinely unchecked");
-var un = emotion_with_values(f64_div(0, 0), T_0_5);
+var un = emotion_with_values(T_0_0, T_0_5);
+PrEmotion_set_valence(un, f64_div(0, 0));   # with_values refuses a NaN since 2.2.0
 assert_eq(prani_is_finite(emotion_valence(un)), 0, "state carries a NaN valence");
 assert_eq(emotion_valence_zone_unchecked(un), PRE_VZ_NEUTRAL, "unchecked core fabricates Neutral on NaN");
 assert_eq(emotion_select_vocalization_unchecked(un), PRANI_VOC_WHINE, "unchecked selector fabricates Whine");

@@ -124,7 +124,8 @@ struct CallElement {
 fn sequence_call_element_new(vocalization, duration, gap) {
     if (prani_seq_seconds_ok(duration) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_seq_seconds_ok(gap) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var e = alloc(sizeof(CallElement));
+    var e = prani_alloc(sizeof(CallElement));
+    if (e < 0) { return e; }   # PRANI_ERR_ALLOC (2.2.0)
     CallElement_set_vocalization(e, vocalization);
     CallElement_set_duration(e, duration);
     CallElement_set_gap(e, gap);
@@ -168,7 +169,8 @@ fn sequence_call_bout_new(vocalization, count, call_duration, interval, intent) 
     if (prani_seq_count_ok(count) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_seq_seconds_ok(call_duration) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_seq_seconds_ok(interval) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var b = alloc(sizeof(CallBout));
+    var b = prani_alloc(sizeof(CallBout));
+    if (b < 0) { return b; }   # PRANI_ERR_ALLOC (2.2.0)
     CallBout_set_vocalization(b, vocalization);
     CallBout_set_count(b, count);
     CallBout_set_call_duration(b, call_duration);
@@ -187,6 +189,8 @@ fn sequence_call_bout_new(vocalization, count, call_duration, interval, intent) 
 # sequence_call_bout_new. `sample_rate` is INVALID_TRACT (a rate is a tract
 # parameter, ADR-0001's category); the rest are INVALID_VOCALIZATION.
 fn sequence_call_bout_synthesize(self, voice, sample_rate) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (prani_is_err(voice) == 1) { return voice; }   # an error handle passes through (2.2.0)
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var count = CallBout_count(self);
     if (prani_seq_count_ok(count) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -202,13 +206,15 @@ fn sequence_call_bout_synthesize(self, voice, sample_rate) {
     if (prani_seq_samples_ok(want) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     var gap_samples = f64_to(f64_mul(interval, sample_rate));
-    var output = vec_new();
+    var output = prani_vec_new();
+    if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
     var i = 0;
     while (i < count) {
         var call = crvoice_vocalize_with_intent(voice, CallBout_vocalization(self),
           CallBout_intent(self), sample_rate, call_duration);
         if (prani_is_err(call) == 1) { return call; }
-        prani_vec_extend(output, call);
+        var ext_rc = prani_vec_extend(output, call);
+        if (prani_is_err(ext_rc) == 1) { return ext_rc; }
         if (i < (count - 1)) {
             # Unreachable after the guards above (interval >= 0 and sample_rate
             # > 0 make gap_samples >= 0); checked anyway so a future path into
@@ -242,7 +248,8 @@ struct CallPhrase { elements; intent; }
 # where the document came from outside prani.
 #must_use
 fn sequence_call_phrase_new(elements, intent) {
-    var p = alloc(sizeof(CallPhrase));
+    var p = prani_alloc(sizeof(CallPhrase));
+    if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
     CallPhrase_set_elements(p, elements);
     CallPhrase_set_intent(p, intent);
     return p;
@@ -293,7 +300,8 @@ fn sequence_call_phrase_from_json_str(json) {
     var elems_val = bayan_json_v_obj_get_by_cstr(root, "elements");
     var n = bayan_json_v_arr_len(elems_val);
     if (prani_seq_count_ok(n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var elems = vec_new();
+    var elems = prani_vec_new();
+    if (elems < 0) { return elems; }   # PRANI_ERR_ALLOC (2.2.0)
     var i = 0;
     while (i < n) {
         # Read each element's fields DIRECTLY from the parsed array-element node
@@ -307,8 +315,10 @@ fn sequence_call_phrase_from_json_str(json) {
         var e = sequence_call_element_new(voc,
           bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "duration")),
           bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "gap")));
+        # A refused allocation is not a bad document: report it as itself.
+        if (e == PRANI_ERR_ALLOC) { return e; }
         if (prani_is_err(e) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
-        vec_push(elems, e);
+        if (prani_vec_push(elems, e) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     return sequence_call_phrase_new(elems, intent);
@@ -322,6 +332,8 @@ fn sequence_call_phrase_from_json_str(json) {
 # to completion BEFORE the first synthesis, so a bad element at the end of the
 # phrase is reported instead of being reached after most of the buffer is built.
 fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (prani_is_err(voice) == 1) { return voice; }   # an error handle passes through (2.2.0)
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var elements = CallPhrase_elements(self);
     var n = vec_len(elements);
@@ -337,14 +349,16 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
     }
     if (prani_seq_samples_ok(f64_mul(want, sample_rate)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
-    var output = vec_new();
+    var output = prani_vec_new();
+    if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
     var i = 0;
     while (i < n) {
         var element = vec_get(elements, i);
         var call = crvoice_vocalize_with_intent(voice, CallElement_vocalization(element),
           CallPhrase_intent(self), sample_rate, CallElement_duration(element));
         if (prani_is_err(call) == 1) { return call; }
-        prani_vec_extend(output, call);
+        var ext_rc = prani_vec_extend(output, call);
+        if (prani_is_err(ext_rc) == 1) { return ext_rc; }
         # Unreachable after the pre-pass (gap >= 0, sample_rate > 0); checked so
         # a future path in reports rather than appending nothing in silence.
         var gap_rc = prani_vec_push_zeros(output, f64_to(f64_mul(CallElement_gap(element), sample_rate)));
@@ -360,14 +374,15 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
 # negative error (empty vec if `voices` is empty).
 # ================================================================
 fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duration, timing_spread) {
+    if (prani_is_err(voices) == 1) { return voices; }   # an error handle passes through (2.2.0)
     var voice_count = vec_len(voices);
     # The empty-voices short circuit stays FIRST: the oracle returns Ok(vec![])
     # before it reads any number, and no number is used on that path.
-    if (voice_count == 0) { return vec_new(); }
+    if (voice_count == 0) { return prani_vec_new(); }   # or PRANI_ERR_ALLOC (2.2.0)
 
-    # 2.0.5 / audit F10. Every guard here runs BEFORE the mix is allocated,
-    # which is the whole point: prani_vec_push_zeros cannot report a failed
-    # alloc, lib/vec.cyr aborts the process instead.
+    # 2.0.5 / audit F10. Every guard here runs BEFORE the mix is allocated: past
+    # one vec's limit lib/vec.cyr ends the process. A REFUSED allocation below that
+    # limit is reported, since 2.2.0, as PRANI_ERR_ALLOC.
     if (prani_seq_count_ok(voice_count) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_seq_seconds_ok(duration) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -389,11 +404,13 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
     var total_len = base_samples + max_offset_samples * 2;
 
     # mix = vec of total_len zeros
-    var mix = vec_new();
+    var mix = prani_vec_new();
+    if (mix < 0) { return mix; }   # PRANI_ERR_ALLOC (2.2.0)
     var mix_rc = prani_vec_push_zeros(mix, total_len);
     if (prani_is_err(mix_rc) == 1) { return mix_rc; }
 
     var rng = prani_rng_new(voice_count * PRANI_CHORUS_PRIME);
+    if (prani_is_err(rng) == 1) { return rng; }   # PRANI_ERR_ALLOC (2.2.0)
 
     # modulo divisor: max(max_offset_samples, 1) * 2
     var mo = max_offset_samples;

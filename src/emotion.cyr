@@ -70,7 +70,8 @@ struct PrEmotion {
 # Also serves as Default (impl Default -> Self::new()).
 #must_use
 fn emotion_new() {
-    var self = alloc(sizeof(PrEmotion));
+    var self = prani_alloc(sizeof(PrEmotion));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     PrEmotion_set_valence(self, PRE_0_0);
     PrEmotion_set_arousal(self, PRE_0_2);
     PrEmotion_set_smoothing(self, PRE_0_1);
@@ -80,7 +81,12 @@ fn emotion_new() {
 # with_values(valence, arousal) -- specific initial values, clamped; smoothing 0.1.
 #must_use
 fn emotion_with_values(valence, arousal) {
-    var self = alloc(sizeof(PrEmotion));
+    # 2.2.0: a NaN passes the clamps below unchanged, so it is refused here. An
+    # infinity is clamped to a legal endpoint and accepted, as 2.0.5 decided.
+    if (prani_is_nan(valence) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_is_nan(arousal) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var self = prani_alloc(sizeof(PrEmotion));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     PrEmotion_set_valence(self, f64_clamp(valence, PRE_NEG_1_0, PRE_1_0));
     PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
     PrEmotion_set_smoothing(self, PRE_0_1);
@@ -92,6 +98,8 @@ fn emotion_with_values(valence, arousal) {
 # returns the same handle.
 #must_use
 fn emotion_with_smoothing(self, smoothing) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (prani_is_nan(smoothing) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }   # NaN passes the clamp (2.2.0)
     PrEmotion_set_smoothing(self, f64_clamp(smoothing, PRE_0_0, PRE_0_95));
     return self;
 }
@@ -138,9 +146,9 @@ fn emotion_set(self, valence, arousal) {
 # synthesis. That is a fabricated plausible answer -- exactly what ADR-0001
 # rejected -- with no way for the caller to tell.
 #
-# with_values / with_smoothing / set / update return the struct or nothing, so
-# they have no error channel and are left alone (the constructor contract is
-# roadmap 2.2.0). The guard therefore sits at the point of USE: every function
+# Since 2.2.0 with_values / with_smoothing refuse a NaN themselves (an infinity
+# still clamps to a legal endpoint). set / update return nothing and stay as they
+# are. The guard therefore also sits at the point of USE: every function
 # here that already returns "value or negative code" -- the two zone
 # classifiers, the two selectors, evaluate -- checks the state before deriving
 # anything from it. That covers every way a bad value can arrive (a clamped
@@ -390,6 +398,7 @@ struct PrEmotionOut {
 # nothing to propagate and no prani_is_err test on their results.
 #must_use
 fn emotion_evaluate(self) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
     if (prani_in_range(PrEmotion_smoothing(self), PRE_0_0, PRE_0_95) == 0) {
         return PRANI_ERR_INVALID_VOCALIZATION;
     }
@@ -397,7 +406,8 @@ fn emotion_evaluate(self) {
     var voc = emotion_select_vocalization_unchecked(self);
     var intent = emotion_select_intent_unchecked(self);
 
-    var out = alloc(sizeof(PrEmotionOut));
+    var out = prani_alloc(sizeof(PrEmotionOut));
+    if (out < 0) { return out; }   # PRANI_ERR_ALLOC (2.2.0)
     PrEmotionOut_set_vocalization(out, voc);
     PrEmotionOut_set_intent(out, intent);
 

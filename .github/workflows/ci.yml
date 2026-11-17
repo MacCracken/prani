@@ -74,6 +74,15 @@ jobs:
             exit 1
           fi
 
+      - name: Allocation funnel — every prani allocation is checked
+        # 2.2.0, ADR-0008. prani reports a refused allocation as PRANI_ERR_ALLOC,
+        # and tests/allocrefused.tcyr proves it for every allocation made through
+        # src/error.cyr's prani_alloc / prani_vec_new / prani_vec_push. That proof
+        # covers only what passes through them, so this fails on any raw `alloc`,
+        # `vec_new` or `vec_push` elsewhere in src/: a raw one stores through a
+        # refusal or exits the process, and the suite would never see it.
+        run: sh scripts/check-alloc.sh
+
       - name: Audit — fmt · lint · docs · tests · bench
         # THE gate. CONTRIBUTING.md names this as the single command a PR
         # must pass, and until 2.0.4 it ran only on contributors' machines —

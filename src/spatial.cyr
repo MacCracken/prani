@@ -133,7 +133,8 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
     if (prani_is_finite(dt) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var alpha = f64_div(dt, f64_add(rc, dt));
 
-    var output = vec_new();
+    var output = prani_vec_new();
+    if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
     var prev = 0;
     var n = vec_len(samples);
     var i = 0;
@@ -142,7 +143,7 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
         # filtered = prev + alpha * (s*gain - prev)
         var filtered = f64_add(prev, f64_mul(alpha, f64_sub(f64_mul(s, gain), prev)));
         prev = filtered;
-        vec_push(output, filtered);
+        if (prani_vec_push(output, filtered) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     return output;
@@ -210,7 +211,8 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     # outgrow a vec. Refused before the first push, which would be a process exit.
     if (prani_buffer_len_ok(out_len) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
-    var output = vec_new();
+    var output = prani_vec_new();
+    if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
     var i = 0;
     while (i < out_len) {
         # src = i * ratio;  idx = trunc(src);  frac = src - idx
@@ -224,7 +226,7 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
         if ((idx + 1) < len) { s1 = vec_get(samples, idx + 1); }
 
         # s0 + (s1 - s0) * frac
-        vec_push(output, f64_add(s0, f64_mul(f64_sub(s1, s0), frac)));
+        if (prani_vec_push(output, f64_add(s0, f64_mul(f64_sub(s1, s0), frac))) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     return output;

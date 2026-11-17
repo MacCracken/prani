@@ -28,6 +28,7 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0005](0005-serialized-tract-rebuilds-dsp-state.md) | A serialized `CreatureTract` restores prani's state and rebuilds svara's | Accepted |
 | [0006](0006-reject-non-finite-numeric-input.md) | prani rejects non-finite numeric input the oracle accepted | Accepted |
 | [0007](0007-the-corrected-pulse-at-the-oracles-level.md) | svara's corrected pulse, at the oracle's level | Accepted |
+| [0008](0008-a-refused-allocation-is-reported.md) | A refused allocation is reported | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
@@ -52,3 +53,8 @@ the first divergence from the oracle that a dependency did not force.
 and re-levelled it for human speech. prani keeps the corrected shape and puts it
 back into the oracle's gain stage, so this is a divergence a dependency forced, as
 with 0001, but the response is a calibration rather than a check.
+
+0008 is roadmap 2.2.0's Lane B, the audit's F9 finally repaired. It is the first
+public-surface change since the port: every constructor can now return
+`PRANI_ERR_ALLOC`, a code the oracle's enum never had. It also revisits ADR-0003,
+whose retirement rule it keeps while adding a way to ask why a stream retired.

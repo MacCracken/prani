@@ -5,17 +5,16 @@
 
 ## Version
 
-**2.1.2** — cyrius 6.7.18 and the newest tag of every dep (svara **3.14.0**), which
-is also the matched set for that toolchain. No API change. The audio changes on
-purpose: svara 3.11.0 corrected its glottal pulse and re-levelled it for human
-speech, and prani feeds the corrected pulse into the oracle's gain stage, with one
-gain solved so that its voiced repertoire keeps 2.1.1's median level
-([ADR-0007](../adr/0007-the-corrected-pulse-at-the-oracles-level.md)). Nothing
-passes full scale. `crtract_set_formant_blend` now refuses a finite bandwidth whose
-coefficients overflow (svara 3.6.5). Consumers still need **cyrius 6.7.2 or later**
-(re-measured with a from-scratch consumer: 6.7.2 through 6.7.18 build and run, 6.7.1
-fails at compile time). **2058 assertions / 18 suites**, audit exit 0, the build is
-warning-free, and the suite also passes for aarch64 under qemu.
+**2.2.0** — the allocation-failure contract
+([ADR-0008](../adr/0008-a-refused-allocation-is-reported.md)), roadmap Lane B and the
+2.0.3 audit's F9. Every constructor and entry point that allocates reports a refused
+allocation as `PRANI_ERR_ALLOC` (−6), every allocation goes through `src/error.cyr`'s
+funnel (`scripts/check-alloc.sh` enforces it), and every renderer passes an error
+handle straight back. The builders refuse a NaN, which 2.0.5 deferred here. A stream
+records why it retired (`stream_last_error`). No dependency moved since 2.1.2 (cyrius
+6.7.18, svara **3.14.0**), and output on valid input is byte-identical to it.
+Consumers still need **cyrius 6.7.2 or later**. **2287 assertions / 19 suites**,
+audit exit 0, and the build is warning-free.
 
 Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
 cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
@@ -100,18 +99,25 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.1.2: fmt · lint · docs · tests · bench,
-**exit 0**. 18 suites / **2058 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
+`cyrius audit` is green end to end as of 2.2.0: fmt · lint · docs · tests · bench,
+**exit 0**. 19 suites / **2287 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
 the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
 `scripts/run-examples.sh` (2.0.6) and `scripts/bench-check.sh` (2.0.11); before
 2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
 
-`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **130** today) is the
+`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **131** today) is the
 P(-1) sweep's regression suite — one group per repaired finding, each written so it FAILS on
 the 2.0.2 tree (the memory-safety groups crash the process there). Every group
 carries controls so it cannot pass vacuously. It also holds the two allocation
 budgets, measured with `alloc_used()` rather than asserted as wall-clock.
+
+`tests/allocrefused.tcyr` (2.2.0, **172** assertions) is the allocation contract's
+proof. It redefines `prani_alloc_raw` to refuse each of prani's own requests in
+every public path, singly and from then on, and requires exactly `PRANI_ERR_ALLOC`
+back. It redefines the stdlib `alloc` too, to reach naad's reporting constructors
+in measured windows. Eight mutants each fail it. `scripts/check-alloc.sh` (CI)
+keeps every allocation where the suite can see it.
 
 One `tests/<module>.tcyr` per module, cross-checked against the Rust oracle
 serde roundtrip tests INCLUDED (serde restored in 2.0.1 via `#derive(Serialize)`
@@ -151,6 +157,7 @@ used — nothing the oracle still held could be lost:
 condition that 2.0.6's `streaming.cyr` drives the full FFI lifecycle. The arc now
 has an end date rather than being blocked on kiran/joshua ports with no date.
 
-**2.x** carries what changes the public surface (the allocation-failure contract
-from audit F9) or is blocked outside this repo (consumer-green). Five watch items
+**2.x** carries what changes the public surface (2.3.0's f32 lane; 2.2.0's
+allocation-failure contract has shipped) or is blocked outside this repo
+(consumer-green). Five watch items
 are recorded there too, with the condition that would schedule each.

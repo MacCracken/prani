@@ -55,7 +55,8 @@ fn prani_rng_next_u32(self) {
 # new(seed) -- PCG32 seeding (prani's exact sequence). Calls next_u32 twice.
 #must_use
 fn prani_rng_new(seed) {
-    var self = alloc(sizeof(PrRng));
+    var self = prani_alloc(sizeof(PrRng));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     PrRng_set_state(self, 0);
     PrRng_set_inc(self, (seed << 1) | 1);
     prani_rng_next_u32(self);

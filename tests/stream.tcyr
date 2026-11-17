@@ -413,15 +413,21 @@ assert_eq(stream_total_samples(g_hr), 158760000, "3600 s * 44100 == 158760000 sa
 
 # ================================================================
 test_group("2.0.5 stream_new -- a NaN voice config is rejected at the snapshot (F11)");
-# The builders clamp, and f64_clamp(NaN, lo, hi) is NaN (measured), so a NaN
-# reaches the voice intact. crvoice_with_* return `self` and have no error
-# channel (roadmap 2.2.0), so the guard lands where the stream SNAPSHOTS them.
-var g_vn = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_NAN);
+# f64_clamp(NaN, lo, hi) is NaN (measured). Since 2.2.0 the builders refuse a NaN
+# themselves; a raw setter (or a document) still delivers one, so the guard where
+# the stream SNAPSHOTS the voice stays, driven that way here.
+assert_eq(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_NAN), PRANI_ERR_INVALID_SPECIES,
+  "with_size(NaN) is refused at the builder (2.2.0)");
+assert_eq(stream_new(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_NAN), PRANI_VOC_HOWL,
+    PRANI_INTENT_SOCIAL, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES, "and stream_new passes that error through");
+var g_vn = crvoice_new(PRANI_SP_WOLF);
+CreatureVoice_set_size_scale(g_vn, T_NAN);
 assert_eq(prani_is_finite(crvoice_effective_f0(g_vn)), 0,
   "measured: a NaN size_scale survives every clamp into effective_f0");
 assert_eq(stream_new(g_vn, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005),
   PRANI_ERR_INVALID_SPECIES, "NaN f0 snapshot -> PRANI_ERR_INVALID_SPECIES");
-var g_ve = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), T_NAN);
+var g_ve = crvoice_new(PRANI_SP_WOLF);
+CreatureVoice_set_vocal_effort(g_ve, T_NAN);   # with_vocal_effort refuses a NaN since 2.2.0
 assert_eq(prani_is_finite(crvoice_vocal_effort(g_ve)), 0,
   "measured: a NaN vocal_effort survives its clamp too");
 assert_eq(stream_new(g_ve, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_005),
@@ -664,6 +670,35 @@ var a_w1 = alloc_used();
 assert_gt(a_w1 - a_w0, 0, "the allocating wrapper still allocates -- the split kept both entry points");
 assert_eq(a_wv, stream_pitch_contour_at_into(a_reuse, PRANI_VOC_TRILL, T_400, T_0_1),
   "and the two entry points still agree on the value they return");
+
+# ================================================================
+test_group("2.2.0 a failed fill names its cause, and next_block reports it");
+# ADR-0003: a failed fill returns 0 and retires the stream. The count cannot say
+# why, so 2.2.0 records it: stream_last_error. stream_next_block, which has an
+# error channel, now uses it. Through 2.1.2 it handed back the zero-filled block
+# as a rendered one -- here for a sample rate svara rejects (<= 1200 Hz).
+var le_ok = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
+assert_eq(stream_last_error(le_ok), PRANI_ERR_NONE, "a healthy stream has no last error");
+var le_obuf = vec_new();
+prani_vec_push_zeros(le_obuf, 256);
+while (stream_is_finished(le_ok) == 0) { stream_fill_buffer(le_ok, le_obuf); }
+assert_eq(stream_last_error(le_ok), PRANI_ERR_NONE, "control: nor does one that finished by rendering");
+var le_bad = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(1000), F64_ONE);
+assert_eq(prani_is_err(le_bad), 0, "control: 1000 Hz constructs (svara's rule is applied at the first fill)");
+var le_buf = vec_new();
+prani_vec_push_zeros(le_buf, 64);
+assert_eq(stream_fill_buffer(le_bad, le_buf), 0, "the first fill fails and writes nothing (ADR-0003)");
+assert_eq(stream_is_finished(le_bad), 1, "and retires the stream (ADR-0003)");
+assert_eq(stream_last_error(le_bad), PRANI_ERR_SVARA, "stream_last_error names svara's rejection");
+var le_bad2 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(1000), F64_ONE);
+assert_eq(stream_next_block(le_bad2, 64), PRANI_ERR_SVARA,
+  "stream_next_block reports the failed fill (2.1.2 returned 64 zeros as a block)");
+assert_eq(stream_is_finished(le_bad2), 1, "control: it retired the stream too");
+var le_after = stream_next_block(le_bad2, 64);
+assert_eq(le_after > 0, 1, "control: a retired stream then answers a block handle, as a finished one does");
+assert_eq(vec_len(le_after), 0, "control: and it is empty");
+assert_eq(stream_last_error(0), PRANI_ERR_INVALID_VOCALIZATION, "a null handle has an answer, not a read");
+assert_eq(stream_last_error(PRANI_ERR_ALLOC), PRANI_ERR_ALLOC, "an error handle passes through");
 
 var rc = assert_summary();
 syscall(60, rc);

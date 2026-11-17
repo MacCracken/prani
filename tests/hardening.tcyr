@@ -471,11 +471,14 @@ assert_eq(prani_is_err(preset_from_json_str(hd_zero_bad)), 1, "preset: a leading
 # success. Found by 2.0.6's error_handling example, which is precisely the job
 # a worked example is supposed to do.
 #
-# crvoice_new returns a pointer with no error channel, so the guard is at the
-# POINT OF USE, as ADR-0006 describes for the builders.
+# crvoice_new returned a pointer with no error channel, so the guard went at the
+# POINT OF USE, as ADR-0006 describes for the builders. Since 2.2.0 crvoice_new
+# refuses an unknown tag itself; the point-of-use guards stay, for a tag set raw.
 # ================================================================
 test_group("F13 an out-of-range species tag is refused on every synthesis path");
-var hbadsp = crvoice_new(99);
+assert_eq(crvoice_new(99), PRANI_ERR_INVALID_SPECIES, "crvoice_new(99) is refused at construction (2.2.0)");
+var hbadsp = crvoice_new(PRANI_SP_WOLF);
+CreatureVoice_set_species(hbadsp, 99);   # the door crvoice_new no longer opens
 assert_eq(prani_is_err(crvoice_vocalize(hbadsp, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 1,
   "species 99 -> vocalize refuses (rendered 2205 samples before)");
 assert_eq(prani_is_err(

@@ -36,6 +36,17 @@ silently *empty* buffer rather than a crash.
 > f64, **before** the cast (`prani_sample_count_ok`), because after the cast nothing
 > is left to check. `tests/error.tcyr` pins all three conversions.
 
+> **Note, 2.2.0 (2026-11-17) — the builders refuse a NaN at the source.** This
+> decision put the guard at the point of use because the builders and constructors had
+> no error channel. [ADR-0008](0008-a-refused-allocation-is-reported.md) gave every
+> constructor a negative return, so 2.2.0 also refuses at the source. The six
+> `crvoice_with_*` builders and `emotion_with_values` / `_with_smoothing` refuse a
+> **NaN**. `preset_make` refuses a NaN or an unknown species, and `crvoice_new` an
+> unknown tag. `species_params_make` ranges what it built, and `fatigue_modifiers_make`
+> refuses a non-finite field. The clamp rule above is unchanged: an infinity, or any
+> finite value, still clamps to the rail. The point-of-use guards all stay, because a
+> raw setter or a document can still deliver a NaN.
+
 > **Note, 2.0.14 (2026-11-07) — one buffer is a real limit, and this is a further
 > divergence.** A vec cannot grow past `VEC_CAP_MAX`, 2^28 samples: the next push is a
 > process exit with no return value to check. 3e9 s at 44.1 kHz rendered for minutes and

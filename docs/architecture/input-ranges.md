@@ -22,6 +22,10 @@ them and the port does not diverge from the oracle's enum:
 | `PRANI_ERR_INVALID_VOCALIZATION` | durations, sample counts, vocalization parameters |
 | `PRANI_ERR_INVALID_SPECIES` | species tags, voice configuration, deserialized documents |
 
+Since 2.2.0 there is a sixth code that is not about range: `PRANI_ERR_ALLOC`, an
+allocation the arena refused ([ADR-0008](../adr/0008-a-refused-allocation-is-reported.md)).
+Every function in this table can return it, before or after its range checks.
+
 ## What was actually wrong (measured, not assumed)
 
 ```
@@ -49,8 +53,10 @@ One buffer has a hard limit of its own. A vec cannot grow past `VEC_CAP_MAX` (2^
 samples, ~101 minutes at 44.1 kHz): the next push is `vec: capacity overflow` and a
 process exit with no return value to check, so a count that cannot fit is refused before
 the first push. The limit is `lib/vec.cyr`'s constant, not a copy, so it refuses exactly
-what could never have succeeded. It is not a memory estimate: an allocation refused below
-it is also a process exit, which is roadmap 2.2.0 Lane B's.
+what could never have succeeded. It is not a memory estimate. An allocation refused below
+it is reported as `PRANI_ERR_ALLOC` since 2.2.0
+([ADR-0008](../adr/0008-a-refused-allocation-is-reported.md)); past it, the stdlib still
+ends the process, which is why the count is checked first.
 
 ## Guards
 
@@ -356,6 +362,25 @@ records), plus the two species point-of-use guards 2.0.6 added to `voice.cyr` an
 `stream.cyr`, marked ADDED 2.0.6 in the tables above.
 
 ## Not guarded, and why
+
+> **2.2.0 (ADR-0008) closed most of what this section deferred.** It was written at
+> 2.0.5, when the builders and constructors had no error channel. 2.2.0 gave every
+> constructor a negative return, so the rows below that say "roadmap 2.2.0" are now
+> settled:
+> - **Settled.** The six `crvoice_with_*` builders, `emotion_with_values` and
+>   `emotion_with_smoothing` refuse a **NaN**. An infinity still clamps to the rail, and
+>   so does a finite out-of-range value, as decided here.
+> - **Settled.** `preset_make` refuses a NaN or an unknown species, and
+>   `crvoice_new` refuses an unknown tag.
+> - **Settled.** `species_params_make` ranges what it built, and `fatigue_modifiers_make`
+>   refuses a non-finite field.
+> - **Settled.** `stream_is_finished` answers 1 for a null or error handle; the two
+>   stream counters pass an error on.
+> - **Unchanged.** The mutators (`set_vocal_effort`, `apply_lombard_effect`,
+>   `emotion_set`, `emotion_update`, `fatigue_record_call`) still return nothing.
+>
+> The point-of-use guards all stay, for a NaN that arrives through a raw setter or a
+> document. The rows below are left as the 2.0.5 record.
 
 The 7 `crvoice_with_*` builders return `self` with no error channel, so rejecting a NaN
 there means making them fallible — an API break every consumer must handle. Roadmap

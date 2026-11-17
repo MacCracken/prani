@@ -20,6 +20,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.2.0] - a refused allocation is reported
+
+Minor release, and the first public-surface change since the port. Roadmap 2.2.0's
+Lane B (the 2.0.3 audit's F9) ships here, alone: Lane A, f32 throughout, becomes
+2.3.0 by the roadmap's own rule. **Every prani constructor and entry point that
+allocates now reports a refused allocation as the new `PRANI_ERR_ALLOC` (−6)**
+([ADR-0008](docs/adr/0008-a-refused-allocation-is-reported.md)). The builders that
+had no error channel until now also refuse a NaN, which 2.0.5 deferred to this
+release.
+
+No dependency moves: cyrius 6.7.18, svara 3.14.0, naad 2.3.5, hisab 3.5.0, goonj
+2.3.2, sakshi 2.5.10. **Valid-input output is byte-identical to 2.1.2.** What changes
+is what happens on a refusal, and three hostile inputs that a builder now refuses
+itself. The consumer floor stays cyrius 6.7.2. **2,287 assertions / 19 suites.**
+
+### Breaking
+
+- ⚠ **Every constructor can return a negative code.** This includes those that
+  could not fail before:
+  - `crvoice_new`, `dcblocker_new`, `prani_rng_new`, `species_params`,
+    `species_params_make`, `crtract_options_new` and `crtract_options_default`;
+  - the sequence and preset constructors, `preset_all`;
+  - `emotion_new`, `emotion_with_values`, `fatigue_new`, `fatigue_modifiers`,
+    `prani_intent_modifiers` and `bridge_perturbation_from_urgency`.
+
+  Test every result with `prani_is_err`. The renderers pass an error handle
+  straight back, so checking a chain's final result is enough.
+- ⚠ **The builders refuse a NaN.** A NaN passes every `f64_clamp`, so through 2.1.2
+  it was stored, and caught only where the voice was used.
+  - `crvoice_with_size`, `_f0_offset`, `_breathiness`, `_jitter`, `_shimmer` and
+    `_vocal_effort` return `PRANI_ERR_INVALID_SPECIES`; `emotion_with_values` and
+    `emotion_with_smoothing` return `PRANI_ERR_INVALID_VOCALIZATION`. Each leaves
+    its object as it was.
+  - An infinity still clamps to the rail, as 2.0.5 decided, and so does any finite
+    value.
+- ⚠ **`crvoice_new` refuses an unknown species tag**, with `PRANI_ERR_INVALID_SPECIES`.
+  `crvoice_new(99)` used to return a voice that only vocalize refused.
+- ⚠ **More constructors check their input.**
+  - `preset_make` refuses a NaN or an unknown species.
+  - `species_params_make` ranges what it built.
+  - `fatigue_modifiers_make` refuses a non-finite field, where it used to log it
+    and return it unaltered.
+- ⚠ **`stream_next_block` reports a failed fill.** When the fill failed, it used to
+  return the zero-filled block as if it were rendered audio. Through 2.1.2 a sample
+  rate svara rejects did exactly that. It now returns the failure's code.
+
+### Added
+
+- **`PRANI_ERR_ALLOC`** (−6), named `"allocation refused"` by `prani_err_name`.
+- **The allocation funnel** in `src/error.cyr`: `prani_alloc`, `prani_vec_new` and
+  `prani_vec_push`, drawing from prani's own Allocator (`prani_allocator`,
+  `prani_alloc_raw`). It serves the same global arena, through `alloc`.
+- **`stream_last_error`** and **`prani_ffi_stream_last_error`**. A failed fill
+  still returns 0 and retires the stream (ADR-0003, revisited and kept); these say
+  why, as `PRANI_ERR_ALLOC`, `PRANI_ERR_SVARA` and so on.
+- `prani_is_nan`, `crvoice_formant_transition_at_into`.
+- **`tests/allocrefused.tcyr`, a 19th suite (172 assertions).** It redefines
+  `prani_alloc_raw` to refuse prani's requests and no one else's. Each of those
+  requests is refused singly, then from that request on, in every public path:
+  - every constructor;
+  - all five apparatus, and every species × every vocalization it supports;
+  - the builder chain, bouts, phrases and the chorus;
+  - presets, spatial rendering and the four decoders;
+  - the stream (laryngeal and purr), `next_block` and the FFI.
+
+  Every refusal must answer exactly `PRANI_ERR_ALLOC` (the FFI: null, or a fill's
+  `last_error`). Each case has a floor, and a control refuses one request past the
+  last and requires the unrefused samples, bit for bit.
+
+  It also redefines the stdlib's `alloc` to reach naad's two reporting
+  constructors, in the windows it measures:
+  - a refused bandpass in `crtract_new` is `PRANI_ERR_ALLOC`;
+  - a refused noise or LFO in svara's glottal source is `PRANI_ERR_SVARA`, never
+    audio.
+- **`scripts/check-alloc.sh`** and its CI step. It fails on any raw `alloc`,
+  `vec_new` or `vec_push` in `src/` outside the funnel: the suite can only see
+  allocations that go through it. Against the 2.1.2 tree it lists 105.
+- [ADR-0008](docs/adr/0008-a-refused-allocation-is-reported.md).
+
+### Changed
+
+- **An error handle passes through.** These functions return an error they are
+  handed, rather than reading it:
+  - the `with_*` builders, `preset_build` and `crtract_new` (its `params`);
+  - the vocalize and render entry points, and `crvoice_synthesize_cat_purr`;
+  - `crtract_set_formant_blend`, `emotion_evaluate` and `stream_new`;
+  - the sequence renderers, and the two stream counters.
+
+  `stream_is_finished` answers 1 for a null or error handle, so a drain loop
+  terminates.
+- **A refused bandpass inside naad** (`NAAD_ERR_ALLOCATION`, naad ADR-0010) is
+  `PRANI_ERR_ALLOC` from `crtract_new`. Before, it built a snake tract with no
+  filter, which then failed at its first render.
+- **Five paths allocate nothing now**, which is the cheapest refusal there is. Measured
+  against 2.1.2, all output byte-identical:
+
+  | Path | 2.1.2 | 2.2.0 |
+  |---|---:|---:|
+  | cat-purr stream fill | 8,088 B/call | **0** |
+  | `species_supports_vocalization` | 128 B/call | **0** |
+  | `crtract_set_formant_blend` | 80 B/call | **0** |
+  | 1 s wolf howl (`crvoice_vocalize`) | 1,117,600 B | 1,095,752 B |
+  | 1 s crow chirp | 1,114,384 B | 1,095,280 B |
+
+  - The species row is read into a stack buffer.
+  - svara's target is built on the stack with `svara_vowel_target_set`, where svara
+    allocated one unchecked per call.
+  - The vocalize loop's blend storage is allocated once, not per 20 ms block.
+  - The purr fill renders into the stream's reused block.
+
+  `tests/allocbudget.tcyr` pins the first three and the howl, and each of those
+  assertions fails on 2.1.2. The two stack sizes (`SpeciesParams` 128 B,
+  `SvVowelTarget` 80 B) are pinned in `tests/species.tcyr` and `tests/tract.tcyr`.
+- **`fatigue_modifiers()` off a poisoned state is refused.** A NaN in a
+  `FatigueState` document used to come back as NaN modifiers.
+- **Docs.**
+  - ADR-0006 gains a 2.2.0 note on the builders, and ADR-0003 is marked revisited.
+  - `input-ranges.md`'s "Not guarded" section marks what 2.2.0 settled.
+  - CONTRIBUTING's rule now reads "allocate only through the funnel".
+  - The `error_handling` example lists six codes.
+  - The README shows the stdlib-leaf `sakshi` and checking a chain's result.
+
+### Fixed
+
+- **A refused allocation ended the process.** Measured on the 2.1.2 tree:
+  - refusing `crvoice_new`'s first request was a SIGSEGV;
+  - refusing a `vec_push` grow was `vec: alloc failed` and exit 1.
+
+  Both are `PRANI_ERR_ALLOC` now. Refusals inside svara's own allocations are
+  svara's, and still stop at the null page (svara ADR-0009). ADR-0008 draws that
+  line.
+
+### Verified
+
+- **Valid-input output is unchanged**: the 716,010-line sweep against 2.1.2 moved
+  0 of 709,301 sample values and none of the 26 JSON documents. 3 of 953 hostile
+  cases changed: `crvoice_with_size(NaN)` and `crvoice_with_vocal_effort(NaN)` now
+  fail at the builder with `PRANI_ERR_INVALID_SPECIES`, where vocalize returned
+  `PRANI_ERR_INVALID_TRACT`, and `crvoice_new(99)` is now an error.
+- **The suite can fail.** Eight mutants each fail `tests/allocrefused.tcyr`:
+  - three crash it: an unchecked `dcblocker_new`, an unchecked `species_params` and
+    an unchecked samples vec in vocalize;
+  - five fail an assertion: a synthesis loop ignoring a refused push, `crtract_new`
+    dropping naad's code, `next_block` returning zeros, a retiring fill not
+    recording why, and `preset_all` storing a refused preset.
+
+  The builder refusals fail on 2.1.2 (5 of 5 probed).
+- **Timing**, over six rounds alternating the 2.1.2 tree and this one on one machine:
+  - every synthesis benchmark is 0.98–1.02× (median 0.996×);
+  - **`emotion_evaluate` costs about 9 ns more, 69 → 78 ns (median).** It allocates
+    its result each frame, and that allocation now crosses the funnel and the
+    error-handle check. A first version went through the Allocator vtable for it,
+    and cost 16 ns (+22%); `prani_alloc` calls its allocator directly since.
+- **Gates.** `cyrius audit` exits 0, `scripts/check-alloc.sh` passes, the five
+  examples run, the suite passes for aarch64 under qemu, and `cyrius distlib` is
+  current.
+
 ## [2.1.2] - svara's corrected pulse, at prani's level
 
 Dependency release, and the repair the new svara needed in prani. `svara` 3.6.3 ->

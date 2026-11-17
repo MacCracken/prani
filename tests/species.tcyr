@@ -525,5 +525,16 @@ assert_eq(prani_is_err(t_sp_via_node(nd_inv)), 1, "a document with f0_min > f0_m
 assert_eq(species_params_validate(species_params_from_node(0)), PRANI_ERR_INVALID_SPECIES,
   "validate(from_node(...)) rejects a negative pointer instead of dereferencing it");
 
+# ================================================================
+test_group("2.2.0 SpeciesParams is 128 bytes, the stack rows that hold it");
+# species_supports_vocalization, stream_new and preset_from_json_str read a
+# species' row into `var row[128]` instead of allocating one (ADR-0008). A field
+# added to SpeciesParams without growing those buffers would write past them.
+assert_eq(sizeof(SpeciesParams), 128, "sizeof(SpeciesParams) == 128, the size of the three stack rows");
+var sz_row[128];
+var sz_p = species_params_into(&sz_row, PRANI_SP_RAPTOR);
+assert_eq(SpeciesParams_resonance_seed(sz_p), SpeciesParams_resonance_seed(species_params(PRANI_SP_RAPTOR)),
+  "control: a stack row holds the same species as an allocated one, last field included");
+
 var rc = assert_summary();
 syscall(60, rc);

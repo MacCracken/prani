@@ -70,12 +70,12 @@
 #   shimmer        [0, 0.1]           exactly what with_shimmer clamps to.
 #   nasal_fraction finite, >= 0       fraction of the call that is nasal.
 #
-# The builders (crvoice_with_*) return `self` with no error channel, so a NaN
-# handed to one is stored (f64_clamp(NaN, lo, hi) == NaN -- NaN passes every
-# clamp) and only reported at the POINT OF USE, at the top of
-# crvoice_vocalize_with_intent. Giving the builders an error channel is 2.2.0's
-# constructor-contract work; guarding the consumer catches every path to svara
-# with zero API change. Measured before the guard: a NaN through with_size or
+# Since 2.2.0 the builders (crvoice_with_*) refuse a NaN themselves
+# (f64_clamp(NaN, lo, hi) == NaN -- NaN passes every clamp) and leave the voice as
+# it was; a finite or infinite value still clamps to the rails. Through 2.1.2 they
+# stored a NaN, and it was reported only at the POINT OF USE, at the top of
+# crvoice_vocalize_with_intent. That guard stays, for a NaN that arrives another
+# way (a raw setter, a document). Measured before it: a NaN through with_size or
 # with_breathiness produced a full-length ALL-NaN buffer returned as SUCCESS.
 # ================================================================
 
@@ -136,9 +136,18 @@ struct CreatureVoice {
 # size_scale 1, vocal_effort 0.5, with the species' default vocal parameters.
 #must_use
 fn crvoice_new(species) {
-    var self = alloc(sizeof(CreatureVoice));
+    # 2.2.0: an unknown tag is refused here, now that there is a channel to refuse
+    # it on. species_params still falls through to the Fantasy row for one
+    # (totality), and vocalize/stream_new still check the tag a voice carries,
+    # for a voice whose tag was set some other way.
+    if (species < 0) { return PRANI_ERR_INVALID_SPECIES; }
+    if (species >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
+    var self = prani_alloc(sizeof(CreatureVoice));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
+    var params = species_params(species);
+    if (prani_is_err(params) == 1) { return params; }
     CreatureVoice_set_species(self, species);
-    CreatureVoice_set_params(self, species_params(species));
+    CreatureVoice_set_params(self, params);
     CreatureVoice_set_f0_offset(self, 0);
     CreatureVoice_set_size_scale(self, F64_ONE);
     CreatureVoice_set_vocal_effort(self, PR_V_0_5);
@@ -251,6 +260,8 @@ fn crvoice_from_json_str(json) {
     if (species < 0) { return PRANI_ERR_INVALID_SPECIES; }
     if (species >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
     var params = species_params_from_node(bayan_json_v_obj_get_by_cstr(root, "params"));
+    # from_node reports its own failures, a refused allocation among them (2.2.0).
+    if (prani_is_err(params) == 1) { return params; }
     if (crvoice_params_in_range(params) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     # with_f0_offset's own clamp range, read off the params just validated.
     var range = f64_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
@@ -260,7 +271,8 @@ fn crvoice_from_json_str(json) {
     if (prani_in_range(size_scale, PR_V_0_1, f64_from(10)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var vocal_effort = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "vocal_effort"));
     if (prani_in_range(vocal_effort, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_SPECIES; }
-    var self = alloc(sizeof(CreatureVoice));
+    var self = prani_alloc(sizeof(CreatureVoice));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     CreatureVoice_set_species(self, species);
     CreatureVoice_set_f0_offset(self, f0_offset);
     CreatureVoice_set_size_scale(self, size_scale);
@@ -273,6 +285,11 @@ fn crvoice_from_json_str(json) {
 # effective f0 stays within the species range. Mutates self, returns self.
 #must_use
 fn crvoice_with_f0_offset(self, offset) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    # 2.2.0: a NaN passes every clamp, so it is refused here and the voice is left
+    # as it was. A finite value, however far out, still clamps (the oracle's rails),
+    # and so does an infinity, which the clamp bounds to a legal endpoint.
+    if (prani_is_nan(offset) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     var params = CreatureVoice_params(self);
     var range = f64_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
     CreatureVoice_set_f0_offset(self, f64_clamp(offset, f64_neg(range), range));
@@ -283,6 +300,11 @@ fn crvoice_with_f0_offset(self, offset) {
 # creature (lower pitch, longer tract). Mutates self, returns self.
 #must_use
 fn crvoice_with_size(self, scale) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    # 2.2.0: a NaN passes every clamp, so it is refused here and the voice is left
+    # as it was. A finite value, however far out, still clamps (the oracle's rails),
+    # and so does an infinity, which the clamp bounds to a legal endpoint.
+    if (prani_is_nan(scale) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     CreatureVoice_set_size_scale(self, f64_clamp(scale, PR_V_0_1, f64_from(10)));
     return self;
 }
@@ -291,6 +313,11 @@ fn crvoice_with_size(self, scale) {
 # params ptr in place (no move semantics). Returns self.
 #must_use
 fn crvoice_with_breathiness(self, breathiness) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    # 2.2.0: a NaN passes every clamp, so it is refused here and the voice is left
+    # as it was. A finite value, however far out, still clamps (the oracle's rails),
+    # and so does an infinity, which the clamp bounds to a legal endpoint.
+    if (prani_is_nan(breathiness) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     SpeciesParams_set_breathiness(CreatureVoice_params(self), f64_clamp(breathiness, 0, F64_ONE));
     return self;
 }
@@ -298,6 +325,11 @@ fn crvoice_with_breathiness(self, breathiness) {
 # with_jitter(self, jitter) -- clamps to [0, 0.05]; mutates params in place.
 #must_use
 fn crvoice_with_jitter(self, jitter) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    # 2.2.0: a NaN passes every clamp, so it is refused here and the voice is left
+    # as it was. A finite value, however far out, still clamps (the oracle's rails),
+    # and so does an infinity, which the clamp bounds to a legal endpoint.
+    if (prani_is_nan(jitter) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     SpeciesParams_set_jitter(CreatureVoice_params(self), f64_clamp(jitter, 0, PR_V_0_05));
     return self;
 }
@@ -305,6 +337,11 @@ fn crvoice_with_jitter(self, jitter) {
 # with_shimmer(self, shimmer) -- clamps to [0, 0.1]; mutates params in place.
 #must_use
 fn crvoice_with_shimmer(self, shimmer) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    # 2.2.0: a NaN passes every clamp, so it is refused here and the voice is left
+    # as it was. A finite value, however far out, still clamps (the oracle's rails),
+    # and so does an infinity, which the clamp bounds to a legal endpoint.
+    if (prani_is_nan(shimmer) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     SpeciesParams_set_shimmer(CreatureVoice_params(self), f64_clamp(shimmer, 0, PR_V_0_1));
     return self;
 }
@@ -312,6 +349,11 @@ fn crvoice_with_shimmer(self, shimmer) {
 # with_vocal_effort(self, effort) -- clamps to [0, 1]. Mutates self, returns self.
 #must_use
 fn crvoice_with_vocal_effort(self, effort) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    # 2.2.0: a NaN passes every clamp, so it is refused here and the voice is left
+    # as it was. A finite value, however far out, still clamps (the oracle's rails),
+    # and so does an infinity, which the clamp bounds to a legal endpoint.
+    if (prani_is_nan(effort) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     CreatureVoice_set_vocal_effort(self, f64_clamp(effort, 0, F64_ONE));
     return self;
 }
@@ -439,10 +481,11 @@ fn crvoice_pitch_contour_f0_at(self, t) {
 
 # ---- pitch_contour ----------------------------------------------------------
 
-# push a (time, multiplier) point onto a flat contour vec.
+# push a (time, multiplier) point onto a flat contour vec. PRANI_ERR_NONE, or
+# PRANI_ERR_ALLOC if a grow is refused (2.2.0).
 fn crvoice_contour_push(v, t, mult) {
-    vec_push(v, t);
-    vec_push(v, mult);
+    if (prani_vec_push(v, t) < 0) { return PRANI_ERR_ALLOC; }
+    return prani_vec_push(v, mult);
 }
 
 # pitch_contour(voc, base_f0) -- the vocalization's pitch contour. Builds the
@@ -450,44 +493,46 @@ fn crvoice_contour_push(v, t, mult) {
 # from the oracle). Returns a PitchContour ptr.
 #must_use
 fn crvoice_pitch_contour(voc, base_f0) {
-    var points = vec_new();
+    var points = prani_vec_new();
+    if (points < 0) { return points; }   # PRANI_ERR_ALLOC (2.2.0)
     if (voc == PRANI_VOC_HOWL) {
         # HOWL: (0.0,0.8),(0.3,1.3),(0.7,1.2),(1.0,0.6)
-        crvoice_contour_push(points, 0, PR_V_0_8);
-        crvoice_contour_push(points, PR_V_0_3, PR_V_1_3);
-        crvoice_contour_push(points, PR_V_0_7, PR_V_1_2);
-        crvoice_contour_push(points, F64_ONE, PR_V_0_6);
+        if (crvoice_contour_push(points, 0, PR_V_0_8) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_3, PR_V_1_3) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_7, PR_V_1_2) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, F64_ONE, PR_V_0_6) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_BARK) {
-        crvoice_pitch_contour_bark(points);
+        if (crvoice_pitch_contour_bark(points) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_YELP) {
-        crvoice_pitch_contour_bark(points);
+        if (crvoice_pitch_contour_bark(points) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_ROAR) {
-        crvoice_pitch_contour_roar(points);
+        if (crvoice_pitch_contour_roar(points) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_RUMBLE) {
-        crvoice_pitch_contour_roar(points);
+        if (crvoice_pitch_contour_roar(points) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_WHINE) {
         # WHINE: (0.0,1.0),(0.5,1.4),(1.0,1.6)
-        crvoice_contour_push(points, 0, F64_ONE);
-        crvoice_contour_push(points, PR_V_0_5, PR_V_1_4);
-        crvoice_contour_push(points, F64_ONE, PR_V_1_6);
+        if (crvoice_contour_push(points, 0, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_5, PR_V_1_4) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, F64_ONE, PR_V_1_6) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_SCREECH) {
         # SCREECH: (0.0,1.5),(0.3,1.2),(1.0,0.7)
-        crvoice_contour_push(points, 0, PR_V_1_5);
-        crvoice_contour_push(points, PR_V_0_3, PR_V_1_2);
-        crvoice_contour_push(points, F64_ONE, PR_V_0_7);
+        if (crvoice_contour_push(points, 0, PR_V_1_5) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_3, PR_V_1_2) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, F64_ONE, PR_V_0_7) < 0) { return PRANI_ERR_ALLOC; }
     } elif (voc == PRANI_VOC_TRILL) {
         # TRILL: (0.0,1.0),(0.25,1.1),(0.5,0.9),(0.75,1.1),(1.0,1.0)
-        crvoice_contour_push(points, 0, F64_ONE);
-        crvoice_contour_push(points, PR_V_0_25, PR_V_1_1);
-        crvoice_contour_push(points, PR_V_0_5, PR_V_0_9);
-        crvoice_contour_push(points, PR_V_0_75, PR_V_1_1);
-        crvoice_contour_push(points, F64_ONE, F64_ONE);
+        if (crvoice_contour_push(points, 0, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_25, PR_V_1_1) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_5, PR_V_0_9) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, PR_V_0_75, PR_V_1_1) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, F64_ONE, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
     } else {
         # FLAT: (0.0,1.0),(1.0,1.0)
-        crvoice_contour_push(points, 0, F64_ONE);
-        crvoice_contour_push(points, F64_ONE, F64_ONE);
+        if (crvoice_contour_push(points, 0, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
+        if (crvoice_contour_push(points, F64_ONE, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
     }
-    var self = alloc(sizeof(PitchContour));
+    var self = prani_alloc(sizeof(PitchContour));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     PitchContour_set_base(self, base_f0);
     PitchContour_set_points(self, points);
     return self;
@@ -495,27 +540,34 @@ fn crvoice_pitch_contour(voc, base_f0) {
 
 # BARK/YELP: (0.0,1.2),(0.1,1.0),(1.0,0.8)
 fn crvoice_pitch_contour_bark(points) {
-    crvoice_contour_push(points, 0, PR_V_1_2);
-    crvoice_contour_push(points, PR_V_0_1, F64_ONE);
-    crvoice_contour_push(points, F64_ONE, PR_V_0_8);
+    if (crvoice_contour_push(points, 0, PR_V_1_2) < 0) { return PRANI_ERR_ALLOC; }
+    if (crvoice_contour_push(points, PR_V_0_1, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
+    if (crvoice_contour_push(points, F64_ONE, PR_V_0_8) < 0) { return PRANI_ERR_ALLOC; }
+    return PRANI_ERR_NONE;
 }
 
 # ROAR/RUMBLE: (0.0,0.9),(0.15,1.2),(0.5,1.0),(1.0,0.7)
 fn crvoice_pitch_contour_roar(points) {
-    crvoice_contour_push(points, 0, PR_V_0_9);
-    crvoice_contour_push(points, PR_V_0_15, PR_V_1_2);
-    crvoice_contour_push(points, PR_V_0_5, F64_ONE);
-    crvoice_contour_push(points, F64_ONE, PR_V_0_7);
+    if (crvoice_contour_push(points, 0, PR_V_0_9) < 0) { return PRANI_ERR_ALLOC; }
+    if (crvoice_contour_push(points, PR_V_0_15, PR_V_1_2) < 0) { return PRANI_ERR_ALLOC; }
+    if (crvoice_contour_push(points, PR_V_0_5, F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
+    if (crvoice_contour_push(points, F64_ONE, PR_V_0_7) < 0) { return PRANI_ERR_ALLOC; }
+    return PRANI_ERR_NONE;
 }
 
 # ---- FormantTransitionContour::at -------------------------------------------
 
 # push an 8-slot keyframe [t, f0,f1,f2, b0,b1,b2, blend] onto the flat vec.
+# PRANI_ERR_NONE, or PRANI_ERR_ALLOC if a grow is refused (2.2.0).
 fn crvoice_keyframe_push(v, t, f0, f1, f2, b0, b1, b2, blend) {
-    vec_push(v, t);
-    vec_push(v, f0);  vec_push(v, f1);  vec_push(v, f2);
-    vec_push(v, b0);  vec_push(v, b1);  vec_push(v, b2);
-    vec_push(v, blend);
+    if (prani_vec_push(v, t) < 0) { return PRANI_ERR_ALLOC; }
+    if (prani_vec_push(v, f0) < 0) { return PRANI_ERR_ALLOC; }
+    if (prani_vec_push(v, f1) < 0) { return PRANI_ERR_ALLOC; }
+    if (prani_vec_push(v, f2) < 0) { return PRANI_ERR_ALLOC; }
+    if (prani_vec_push(v, b0) < 0) { return PRANI_ERR_ALLOC; }
+    if (prani_vec_push(v, b1) < 0) { return PRANI_ERR_ALLOC; }
+    if (prani_vec_push(v, b2) < 0) { return PRANI_ERR_ALLOC; }
+    return prani_vec_push(v, blend);
 }
 
 # formant_transition_at(self, t) -- FormantTransitionContour::at. Interpolated
@@ -524,10 +576,20 @@ fn crvoice_keyframe_push(v, t, f0, f1, f2, b0, b1, b2, blend) {
 # keyframe's values.
 #must_use
 fn crvoice_formant_transition_at(self, t) {
+    var out = prani_alloc(sizeof(FormantBlend));
+    if (out < 0) { return out; }   # PRANI_ERR_ALLOC (2.2.0)
+    return crvoice_formant_transition_at_into(self, t, out);
+}
+
+# formant_transition_at_into(self, t, out) -- the same, written into a caller-owned
+# FormantBlend and returning it. Allocates nothing: the vocalize block loop keeps
+# one FormantBlend for the whole call (2.2.0), where it used to allocate one per
+# 20 ms block.
+#must_use
+fn crvoice_formant_transition_at_into(self, t, out) {
     var kf = FormantTransitionContour_keyframes(self);
     var slots = vec_len(kf);          # 8 per keyframe
     var tc = f64_clamp(t, 0, F64_ONE);
-    var out = alloc(sizeof(FormantBlend));
     if (slots == 0) {
         FormantBlend_set_f0(out, 0);  FormantBlend_set_f1(out, 0);  FormantBlend_set_f2(out, 0);
         FormantBlend_set_b0(out, 0);  FormantBlend_set_b1(out, 0);  FormantBlend_set_b2(out, 0);
@@ -609,20 +671,22 @@ fn crvoice_formant_transition_contour(voc, species) {
 # CAT_MEOW_HOWL keyframes (verbatim from the oracle static table).
 #must_use
 fn crvoice_make_cat_meow_howl() {
-    var kf = vec_new();
+    var kf = prani_vec_new();
+    if (kf < 0) { return kf; }   # PRANI_ERR_ALLOC (2.2.0)
     # (0.0, [400,2000,3500], [150,200,250], 0.8)
-    crvoice_keyframe_push(kf, 0,
-      f64_from(400), f64_from(2000), f64_from(3500),
-      f64_from(150), f64_from(200), f64_from(250), PR_V_0_8);
+    if (crvoice_keyframe_push(kf, 0,
+        f64_from(400), f64_from(2000), f64_from(3500),
+        f64_from(150), f64_from(200), f64_from(250), PR_V_0_8) < 0) { return PRANI_ERR_ALLOC; }
     # (0.4, [1000,2800,4500], [100,130,180], 1.0)
-    crvoice_keyframe_push(kf, PR_V_0_4,
-      f64_from(1000), f64_from(2800), f64_from(4500),
-      f64_from(100), f64_from(130), f64_from(180), F64_ONE);
+    if (crvoice_keyframe_push(kf, PR_V_0_4,
+        f64_from(1000), f64_from(2800), f64_from(4500),
+        f64_from(100), f64_from(130), f64_from(180), F64_ONE) < 0) { return PRANI_ERR_ALLOC; }
     # (1.0, [500,1800,3800], [140,180,220], 0.6)
-    crvoice_keyframe_push(kf, F64_ONE,
-      f64_from(500), f64_from(1800), f64_from(3800),
-      f64_from(140), f64_from(180), f64_from(220), PR_V_0_6);
-    var self = alloc(sizeof(FormantTransitionContour));
+    if (crvoice_keyframe_push(kf, F64_ONE,
+        f64_from(500), f64_from(1800), f64_from(3800),
+        f64_from(140), f64_from(180), f64_from(220), PR_V_0_6) < 0) { return PRANI_ERR_ALLOC; }
+    var self = prani_alloc(sizeof(FormantTransitionContour));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     FormantTransitionContour_set_keyframes(self, kf);
     return self;
 }
@@ -630,24 +694,26 @@ fn crvoice_make_cat_meow_howl() {
 # WOLF_HOWL keyframes (verbatim from the oracle static table).
 #must_use
 fn crvoice_make_wolf_howl() {
-    var kf = vec_new();
+    var kf = prani_vec_new();
+    if (kf < 0) { return kf; }   # PRANI_ERR_ALLOC (2.2.0)
     # (0.0, [420,1250,2100], [100,120,150], 0.0)
-    crvoice_keyframe_push(kf, 0,
-      f64_from(420), f64_from(1250), f64_from(2100),
-      f64_from(100), f64_from(120), f64_from(150), 0);
+    if (crvoice_keyframe_push(kf, 0,
+        f64_from(420), f64_from(1250), f64_from(2100),
+        f64_from(100), f64_from(120), f64_from(150), 0) < 0) { return PRANI_ERR_ALLOC; }
     # (0.3, [500,1400,2300], [90,110,140], 0.6)
-    crvoice_keyframe_push(kf, PR_V_0_3,
-      f64_from(500), f64_from(1400), f64_from(2300),
-      f64_from(90), f64_from(110), f64_from(140), PR_V_0_6);
+    if (crvoice_keyframe_push(kf, PR_V_0_3,
+        f64_from(500), f64_from(1400), f64_from(2300),
+        f64_from(90), f64_from(110), f64_from(140), PR_V_0_6) < 0) { return PRANI_ERR_ALLOC; }
     # (0.7, [480,1350,2200], [95,115,145], 0.4)
-    crvoice_keyframe_push(kf, PR_V_0_7,
-      f64_from(480), f64_from(1350), f64_from(2200),
-      f64_from(95), f64_from(115), f64_from(145), PR_V_0_4);
+    if (crvoice_keyframe_push(kf, PR_V_0_7,
+        f64_from(480), f64_from(1350), f64_from(2200),
+        f64_from(95), f64_from(115), f64_from(145), PR_V_0_4) < 0) { return PRANI_ERR_ALLOC; }
     # (1.0, [400,1200,2000], [110,130,160], 0.3)
-    crvoice_keyframe_push(kf, F64_ONE,
-      f64_from(400), f64_from(1200), f64_from(2000),
-      f64_from(110), f64_from(130), f64_from(160), PR_V_0_3);
-    var self = alloc(sizeof(FormantTransitionContour));
+    if (crvoice_keyframe_push(kf, F64_ONE,
+        f64_from(400), f64_from(1200), f64_from(2000),
+        f64_from(110), f64_from(130), f64_from(160), PR_V_0_3) < 0) { return PRANI_ERR_ALLOC; }
+    var self = prani_alloc(sizeof(FormantTransitionContour));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     FormantTransitionContour_set_keyframes(self, kf);
     return self;
 }
@@ -887,6 +953,7 @@ fn crvoice_apply_vocalization_envelope(samples, voc, sample_rate) {
 #                              f64_clamp(NaN, 20, 35) is NaN -- NaN passes every
 #                              clamp, so the rails below do not catch it.
 fn crvoice_synthesize_cat_purr(self, sample_rate, num_samples, modifiers) {
+    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_is_positive(CreatureVoice_size_scale(self)) == 0) { return PRANI_ERR_INVALID_SPECIES; }
@@ -937,6 +1004,8 @@ fn crvoice_vocalize(self, voc, sample_rate, duration) {
 # block at the top of the file). crvoice_vocalize forwards here, so both public
 # synthesis entry points are covered by one copy of the guards.
 fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
+    # 2.2.0: an error handle (a refused crvoice_new, say) is reported, not read.
+    if (prani_is_err(self) == 1) { return self; }
     var species = CreatureVoice_species(self);
     var params = CreatureVoice_params(self);
 
@@ -955,9 +1024,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # defaults for any unknown tag (src/species.cyr, "preserves totality since
     # the Rust enum is #[non_exhaustive]"), so crvoice_new(99) returned a voice
     # and this function rendered 2205 samples for it as a success (measured).
-    # crvoice_new cannot report it -- it returns a pointer with no error channel
-    # -- so the guard belongs here, at the point of use, exactly as ADR-0006
-    # describes for the builders.
+    # Since 2.2.0 crvoice_new refuses an unknown tag itself; this point-of-use
+    # guard stays (ADR-0006) for a tag set on a voice some other way.
     var species_tag = CreatureVoice_species(self);
     if (species_tag < 0) { return PRANI_ERR_INVALID_SPECIES; }
     if (species_tag >= PRANI_SP_COUNT) { return PRANI_ERR_INVALID_SPECIES; }
@@ -983,6 +1051,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     }
 
     var modifiers = prani_intent_modifiers(intent);
+    if (prani_is_err(modifiers) == 1) { return modifiers; }   # PRANI_ERR_ALLOC (2.2.0)
     var f0 = f64_mul(eff_f0, IntentModifiers_pitch_scale(modifiers));
     var effective_duration = f64_mul(duration, IntentModifiers_duration_scale(modifiers));
     # num_samples = (effective_duration * sample_rate) as usize -- ranged BEFORE
@@ -1013,6 +1082,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # working copy of params with effort-adjusted breathiness (do NOT mutate the
     # voice's own params -- Rust cloned; here we allocate a fresh copy).
     var effort_params = crvoice_clone_params(params);
+    if (prani_is_err(effort_params) == 1) { return effort_params; }   # PRANI_ERR_ALLOC (2.2.0)
     SpeciesParams_set_breathiness(effort_params,
       f64_clamp(f64_add(SpeciesParams_breathiness(effort_params), effort_breathiness_delta), 0, F64_ONE));
 
@@ -1021,9 +1091,11 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
     # formant transition contour (0 == None)
     var formant_contour = crvoice_formant_transition_contour(voc, species);
+    if (prani_is_err(formant_contour) == 1) { return formant_contour; }   # 0 is None; <0 is ALLOC
 
     # vocalization-specific pitch contour
     var contour = crvoice_pitch_contour(voc, f0);
+    if (prani_is_err(contour) == 1) { return contour; }   # PRANI_ERR_ALLOC (2.2.0)
     # block_size = (sample_rate * 0.02) as usize -- 20ms blocks.
     # DIVERGENCE (ADR-0001): floored at 1. The oracle
     # (2.0.3:rust-old/src/voice.rs:227-231) computes
@@ -1034,7 +1106,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # allocating a SynthesisOptions per iteration.
     var block_size = f64_to(f64_mul(sample_rate, PR_V_0_02));
     if (block_size < 1) { block_size = 1; }
-    var samples = vec_new();
+    var samples = prani_vec_new();
+    if (samples < 0) { return samples; }   # PRANI_ERR_ALLOC (2.2.0)
 
     # syringeal source-filter coupling precomputes (species F1..F3 / B1..B3)
     var is_syringeal = 0;
@@ -1051,7 +1124,42 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
     # one reusable SynthesisOptions for the whole block loop (see below)
     var options = crtract_options_default();
-    var block_buf = vec_new();   # 2.0.9: reused by every block below
+    if (prani_is_err(options) == 1) { return options; }   # PRANI_ERR_ALLOC (2.2.0)
+    var block_buf = prani_vec_new();   # 2.0.9: reused by every block below
+    if (block_buf < 0) { return block_buf; }
+
+    # 2.2.0: the formant-blend storage is allocated ONCE here and rewritten per
+    # block, as `options` and `block_buf` are. Through 2.1.2 every block with a
+    # formant transition allocated a FormantBlend and two 3-slot vecs, and every
+    # syringeal block two more vecs, all kept for the life of the process. Now
+    # the loop allocates nothing of prani's, so a refusal can only come here.
+    var fb_buf = 0;
+    var tf = 0;
+    var tb = 0;
+    if (formant_contour != 0) {
+        fb_buf = prani_alloc(sizeof(FormantBlend));
+        if (fb_buf < 0) { return fb_buf; }
+        tf = prani_vec_new();
+        if (tf < 0) { return tf; }
+        if (prani_vec_push_zeros(tf, 3) < 0) { return PRANI_ERR_ALLOC; }
+        tb = prani_vec_new();
+        if (tb < 0) { return tb; }
+        if (prani_vec_push_zeros(tb, 3) < 0) { return PRANI_ERR_ALLOC; }
+    }
+    var ctf = 0;
+    var ctb = 0;
+    if (is_syringeal == 1) {
+        ctf = prani_vec_new();
+        if (ctf < 0) { return ctf; }
+        if (prani_vec_push_zeros(ctf, 3) < 0) { return PRANI_ERR_ALLOC; }
+        ctb = prani_vec_new();
+        if (ctb < 0) { return ctb; }
+        if (prani_vec_push_zeros(ctb, 3) < 0) { return PRANI_ERR_ALLOC; }
+        # the bandwidths never change across blocks
+        vec_set(ctb, 0, sb0);
+        vec_set(ctb, 1, sb1);
+        vec_set(ctb, 2, sb2);
+    }
 
     var rendered = 0;
     while (rendered < num_samples) {
@@ -1063,29 +1171,22 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
         # formant transition if this vocalization has one
         if (formant_contour != 0) {
-            var fb = crvoice_formant_transition_at(formant_contour, t);
-            var tf = vec_new();
-            vec_push(tf, FormantBlend_f0(fb));
-            vec_push(tf, FormantBlend_f1(fb));
-            vec_push(tf, FormantBlend_f2(fb));
-            var tb = vec_new();
-            vec_push(tb, FormantBlend_b0(fb));
-            vec_push(tb, FormantBlend_b1(fb));
-            vec_push(tb, FormantBlend_b2(fb));
+            var fb = crvoice_formant_transition_at_into(formant_contour, t, fb_buf);
+            vec_set(tf, 0, FormantBlend_f0(fb));
+            vec_set(tf, 1, FormantBlend_f1(fb));
+            vec_set(tf, 2, FormantBlend_f2(fb));
+            vec_set(tb, 0, FormantBlend_b0(fb));
+            vec_set(tb, 1, FormantBlend_b1(fb));
+            vec_set(tb, 2, FormantBlend_b2(fb));
             crtract_set_formant_blend(tract, tf, tb, FormantBlend_blend(fb));
         }
 
         # syringeal source-filter coupling: nudge F1 toward block_f0 (40%).
         if (is_syringeal == 1) {
             var coupled_f1 = f64_add(sf0, f64_mul(f64_sub(block_f0, sf0), PR_V_0_4));
-            var ctf = vec_new();
-            vec_push(ctf, coupled_f1);
-            vec_push(ctf, sf1);
-            vec_push(ctf, sf2);
-            var ctb = vec_new();
-            vec_push(ctb, sb0);
-            vec_push(ctb, sb1);
-            vec_push(ctb, sb2);
+            vec_set(ctf, 0, coupled_f1);
+            vec_set(ctf, 1, sf1);
+            vec_set(ctf, 2, sf2);
             crtract_set_formant_blend(tract, ctf, ctb, F64_ONE);
         }
 
@@ -1117,7 +1218,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
         # reads the buffer after this line and reuse is safe.
         var block = crtract_synthesize_into(tract, block_f0, block_len, options, block_buf);
         if (prani_is_err(block) == 1) { return block; }
-        prani_vec_extend(samples, block);   # samples.extend_from_slice(&block)
+        var ext_rc = prani_vec_extend(samples, block);   # samples.extend_from_slice(&block)
+        if (prani_is_err(ext_rc) == 1) { return ext_rc; }
         rendered = rendered + block_len;
     }
 
@@ -1128,6 +1230,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     if (crvoice_species_has_subharmonics(species) == 1) {
         var sub_f0 = f64_mul(f0, PR_V_0_5);
         var chaos_rng = prani_rng_new(species_params_resonance_seed(params) + 0xCA05);
+        if (prani_is_err(chaos_rng) == 1) { return chaos_rng; }   # PRANI_ERR_ALLOC (2.2.0)
         var i = 0;
         while (i < total) {
             var t_norm = f64_div(f64_from(i), f64_from(num_samples_max));
@@ -1156,6 +1259,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # 2. dragon fire-breath: broadband turbulent noise mixed in.
     if (species == PRANI_SP_DRAGON) {
         var fire_rng = prani_rng_new(species_params_resonance_seed(params) + 0xF12E);
+        if (prani_is_err(fire_rng) == 1) { return fire_rng; }   # PRANI_ERR_ALLOC (2.2.0)
         var fire_amp = f64_mul(SpeciesParams_breathiness(params), PR_V_0_4);
         var i2 = 0;
         while (i2 < total) {

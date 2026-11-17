@@ -11,25 +11,21 @@ this roadmap.
 language port through parity re-verification, input-range validation, runnable
 examples and the Rust comparison, and ended by retiring `rust-old/` in 2.0.8;
 2.0.9–2.0.11 then repaired what its own measurements found. All of it is in the
-CHANGELOG. What is left below is **2.2.0** — the first release that changes the
-public surface — plus two externally-blocked items and the watch list.
+CHANGELOG, and so is **2.2.0**, the first release that changed the public surface
+(the allocation-failure contract, ADR-0008). What is left below is **2.3.0**, the f32
+lane that 2.2.0 shipped without, plus two externally-blocked items and the watch
+list.
 
 ---
 
 ## 2.x — the work that changes the public surface
 
-### 2.2.0 — two lanes: f32 throughout, and the allocation-failure contract
+### 2.3.0 — Lane A: f32 throughout, to match the oracle
 
-*Numbered 2.1.0 until that number went to the cyrius 6.7.x floor release. The dated
-records, the 2026-08-30 audit and ADR-0006 among them, still call it that.*
-
-Both are minor-bump work on the same functions, so they share a release. **Lane B
-(allocation) can start today. Lane A (f32) waited on svara and naad, and both have
-since decided to stay f64**, so it needs a decision first (see Lane A). If
-Lane A is still blocked when Lane B is ready, ship Lane B as 2.2.0 and Lane A
-becomes 2.3.0 — do not hold a finished contract behind a blocked dependency.
-
-#### Lane A — f32 throughout, to match the oracle
+*Planned as one of 2.2.0's two lanes (and numbered 2.1.0 before that). Lane B, the
+allocation-failure contract, was ready first and shipped alone as 2.2.0. That
+followed this roadmap's own rule: do not hold a finished contract behind a blocked
+dependency. The dated records still call this lane by the older numbers.*
 
 **Source**: 2.0.7's measured comparison, and the fact that the constraint this
 port was built on **no longer holds**.
@@ -99,39 +95,6 @@ assertions are re-tightened to bit-exact against the oracle, and 2.0.7's
 comparison is re-run f32-vs-f32 so the remaining gap is attributable to codegen
 alone.
 
-#### Lane B — the allocation-failure contract
-
-**Source**: audit finding **F9**, accepted rather than repaired in 2.0.3
-precisely because it is this size.
-
-`alloc()` returns 0 on exhaustion and prani stores through it at **27 sites**;
-`vec_new()` can return 0, and **no call site in the library checks it**. `vec_push`
-returns nothing to check: on a refused allocation it exits the process (`vec: alloc
-failed`), and only `vec_push_a` returns -1. An exhausted arena therefore produces a
-null dereference or a process exit, neither of which a host can handle.
-
-This is a minor bump rather than a patch because the only real fix puts a
-fallible return on every constructor in the library (`crvoice_new`,
-`dcblocker_new`, `prani_rng_new`, `species_params`, `crtract_options_new`, the
-sequence constructors), which every consumer must then check. Decide the shape
-first — the choice is between a negative `PRANI_ERR_ALLOC` from every
-constructor, or a single checked-allocation helper that the constructors funnel
-through.
-
-Related and already done, from the other end: 2.0.3 removed the two paths that
-allocated per frame and per block (`prani_ffi_voice_set_size`, the synthesis
-block loop), so the arena is under less pressure than it was — but that reduces
-the odds of exhaustion, it does not handle it.
-
-**The dependencies have since picked a shape.** naad 2.3.4 (its ADR-0010) made the
-constructors a synth builds per voice return `NAAD_ERR_ALLOCATION` on a refused
-allocation, and svara 3.6.4 passes that on: `svara_glottal_new` returns
-`SVARA_ERR_COMPUTATION`, as `svara_tract_new` already did. prani reaches both and
-already treats any negative return from them as a failure (`crtract_new`, the two
-voiced paths, the NoiseOnly bandpass), so they need no change. naad's
-`tests/alloc_refused.tcyr` and svara's `tests/allocrefused.tcyr`, which replace the
-stdlib `alloc` to refuse chosen requests, are the test pattern to copy.
-
 ### Consumer-green — kiran and joshua
 
 **Source**: the 2.0.0 criteria carried this unmet, and it is the one criterion
@@ -168,9 +131,11 @@ Things deliberately left alone, with the condition that would change that.
   block is duplicated verbatim between `voice.cyr` and `stream.cyr`. **Extract on
   the third instance**, not before. (Source: audit report, Refactor.)
 - **ADR-0003's retirement rule.** A failed `stream_fill_buffer` retires the
-  stream, which is correct only while both failure causes are configuration
-  properties fixed at `stream_new` time. **Revisit if a transient failure mode is
-  ever introduced.**
+  stream. 2.2.0 revisited this when a refused allocation became a third failure
+  cause (ADR-0008), and retirement stood: the bump arena frees nothing, so a refusal
+  is not one a later fill could wait out. `stream_last_error` now says which cause it
+  was. **Revisit if prani ever allocates from something that can free**, an arena a
+  host can reset for instance, because then a refusal can be transient.
 - **svara's sample-rate floor is a measurement, and it has already moved once.**
   ADR-0001 chose not to restate svara's rule in prani source. That rule was
   ">1000 Hz" until svara **3.5.4** repaired two defects prani found, after which
@@ -193,4 +158,4 @@ Things deliberately left alone, with the condition that would change that.
   is spent**: 2.0.7 captured the comparison while it still built, and
   `docs/benchmarks.md` records it with its method. If a crate is ever yanked, a
   *re-run* becomes impossible — the recorded figures do not. Only revisit this if
-  someone needs a fresh comparison, e.g. after 2.2.0 Lane A makes it f32-vs-f32.
+  someone needs a fresh comparison, e.g. after 2.3.0 Lane A makes it f32-vs-f32.

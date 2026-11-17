@@ -55,6 +55,11 @@ vec_push(pack, crvoice_new(PRANI_SP_WOLF));
 var chorus = sequence_synthesize_chorus(pack, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_from(44100), f64_from(3), F64_HALF);
 ```
 
+Every constructor returns a negative `PRANI_ERR_*` on failure, including
+`PRANI_ERR_ALLOC` for a refused allocation (2.2.0), and every renderer passes an
+error handle straight back. So checking the final result with `prani_is_err` is
+enough.
+
 Five worked programs live in [`docs/examples/`](docs/examples/) — start with
 `basic.cyr`. Each one includes the published `dist/prani.cyr` exactly as a
 consumer would, and CI builds and runs all five on every push, so they cannot
@@ -77,9 +82,12 @@ include "lib/prani.cyr"
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.1.1"
+tag = "2.2.0"
 modules = ["dist/prani.cyr"]
 ```
+
+`sakshi` is a stdlib leaf, not a package: list it in your `[deps].stdlib` (with
+`bayan`, which prani's decoders call), and do not declare `[deps.sakshi]`.
 
 ## License
 
