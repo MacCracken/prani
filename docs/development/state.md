@@ -5,17 +5,18 @@
 
 ## Version
 
-**2.2.1** — the second P(-1) sweep
-([audit](../audit/2026-11-17-audit.md)): 53 confirmed findings plus 4 found while
-verifying, 52 repaired, each with a regression test that fails on 2.2.0. Six of the
-repairs are the oracle's own render defects, and
-[ADR-0009](../adr/0009-renders-do-not-depend-on-how-they-are-cut.md) records them.
-A tract keeps a sample clock, a stream renders vocalize's 20 ms blocks and its own
-voice, and an estimated formant above Nyquist is placed in band. Every public function
-answers a null or error handle without reading it, and the four hand-written decoders
-require every field. No dependency moved since 2.1.2 (cyrius 6.7.18, svara **3.14.0**).
-Consumers still need **cyrius 6.7.2 or later**. **2477 assertions /
-21 suites**, audit exit 0, and the build is warning-free.
+**2.3.0** — two float formats
+([ADR-0010](../adr/0010-two-float-formats.md)). A real is f64 by default and f32 when
+the build defines `PRANI_F32`, from one bundle. The f64 build is 2.2.1's arithmetic,
+bit for bit: the 716,010-line sweep is byte-identical to tag 2.2.1, JSON included.
+The f32 build is held to accuracy against it. Its render levels are within a relative
+6.4e-7, its single computations within an ulp or two, and an oscillator's time and
+phase stay f64. Documents carry f64 bit patterns in both builds. The 2.2.1 work
+underneath is unchanged ([audit](../audit/2026-11-17-audit.md),
+[ADR-0009](../adr/0009-renders-do-not-depend-on-how-they-are-cut.md)). No dependency
+moved since 2.1.2 (cyrius 6.7.18, svara **3.14.0**). Consumers still need
+**cyrius 6.7.2 or later**, in either format. **2520 assertions / 22 suites,
+in each format**, audit exit 0, and both builds are warning-free.
 
 Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
 cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
@@ -34,7 +35,10 @@ that builds one buffer refuses such a count first (`prani_buffer_count_ok`).
   `lib/hashmap_fast.cyr`, which `lib sync` copies and nothing includes:
   `rm lib/hashmap_fast.cyr && cyrius deps --lock`, or `cyrius deps` names it on every
   build. `--full` copies the whole snapshot, which this project does not want.
-- Build: `cyrius build src/main.cyr build/prani`
+- Build: `cyrius build src/main.cyr build/prani` (f64); add `-D PRANI_F32` for f32.
+- **Two formats** (ADR-0010): every suite runs in each, `cyrius test` and
+  `cyrius test -D PRANI_F32`. The f64 build compiles `src/f64/`, generated from `src/`
+  by `sh scripts/gen-f64.sh`: regenerate it after any `src/` edit, then `distlib`.
 - Test ONE suite: `cyrius test tests/<mod>.tcyr`; all of them: `cyrius test tests`.
   `cyrius tests` is gone since cyrius 6.7.12.
 - Bundle: `cyrius distlib` → `dist/prani.cyr` (reads `[lib].modules`). There is no
@@ -57,6 +61,8 @@ that builds one buffer refuses such a count first (`prani_buffer_count_ok`).
   `f64_*` builtins) carry no independent Cyrius module.
 - Cyrius port: `src/main.cyr` (smoke) + 15 per-module `src/*.cyr` (+
   `logging.cyr`, which has no Rust counterpart), each validated by `tests/*.tcyr`.
+  Since 2.3.0, `src/real.cyr` (the float format) comes first, and the 13 modules
+  that do arithmetic each have a generated f64 build in `src/f64/`.
 
 ## Dependencies
 
@@ -100,14 +106,22 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.2.1: fmt · lint · docs · tests · bench,
-**exit 0**. 21 suites / **2477 assertions** (770 at 2.0.3; 2.0.4 added
-430 closing the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)),
-plus the decoders' fuzz harness, `tests/prani.fcyr` (2.2.1).
-Measured with `for t in tests/*.tcyr; do cyrius test $t; done`, summing each total. CI runs
-the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
-`scripts/run-examples.sh` (2.0.6) and `scripts/bench-check.sh` (2.0.11); before
-2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
+`cyrius audit` is green end to end as of 2.3.0: fmt · lint · docs · tests · bench,
+**exit 0**. 22 suites / **2520 assertions, in each format** (770 at 2.0.3;
+2.0.4 added 430 closing the parity shortfalls — see
+[`rust-test-parity.md`](rust-test-parity.md)), plus the decoders' fuzz harness,
+`tests/prani.fcyr` (2.2.1). Measured with `for t in tests/*.tcyr; do cyrius test $t;
+done` and the same with `-D PRANI_F32`, summing each total. CI runs the audit and a
+`dist/` bundle-coherence check on every push, as of 2.0.4 — plus
+`scripts/run-examples.sh` (2.0.6), `scripts/bench-check.sh` (2.0.11), and since 2.3.0
+the f32 build's suites, examples and fuzz harness, and `scripts/gen-f64.sh --check`.
+Before 2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
+
+`tests/real.tcyr` (2.3.0, **36** assertions) is the format layer's suite: the
+primitives' NaN, signed-zero and saturation behaviour in both formats, integers in
+the format, the f64 time base, and document portability (the same bytes from either
+build). `tests/realt.cyr` holds the shared helpers: `assert_real` is exact in the f64
+build and within a measured ulp budget in the f32 build.
 
 `tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **242** at 2.2.1) is the
 P(-1) sweeps' regression suite — one group per repaired finding, each written so it FAILS on

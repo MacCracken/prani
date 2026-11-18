@@ -6,8 +6,11 @@
 # (2.0.3:rust-old/tests/integration.rs:297-320). Display tests dropped, serde
 # restored.
 
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/vocalization.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
@@ -109,13 +112,13 @@ assert_eq(IntentModifiers_urgency(social), PR_F_0_3, "social urgency 0.3");
 #   amplitude 0.5 idle     < 0.8 social
 # ================================================================
 test_group("intent modifiers -- cross-intent superlatives are real orderings");
-assert_eq(f64_gt(IntentModifiers_duration_scale(mating), IntentModifiers_duration_scale(terr)), 1,
+assert_eq(pr_gt(IntentModifiers_duration_scale(mating), IntentModifiers_duration_scale(terr)), 1,
   "mating is longest: 2.0 > territorial 1.5");
-assert_eq(f64_gt(IntentModifiers_urgency(distress), IntentModifiers_urgency(a)), 1,
+assert_eq(pr_gt(IntentModifiers_urgency(distress), IntentModifiers_urgency(a)), 1,
   "distress is most urgent: 1.0 > alarm 0.9");
-assert_eq(f64_lt(IntentModifiers_pitch_scale(threat), IntentModifiers_pitch_scale(terr)), 1,
+assert_eq(pr_lt(IntentModifiers_pitch_scale(threat), IntentModifiers_pitch_scale(terr)), 1,
   "threat is lowest-pitched: 0.7 < territorial 0.9");
-assert_eq(f64_lt(IntentModifiers_amplitude_scale(idle), IntentModifiers_amplitude_scale(social)), 1,
+assert_eq(pr_lt(IntentModifiers_amplitude_scale(idle), IntentModifiers_amplitude_scale(social)), 1,
   "idle is quietest: 0.5 < social 0.8");
 
 # ================================================================
@@ -204,8 +207,8 @@ assert_eq(IntentModifiers_pitch_scale(m2), IntentModifiers_pitch_scale(mser), "p
 assert_eq(IntentModifiers_amplitude_scale(m2), IntentModifiers_amplitude_scale(mser),
   "amplitude_scale roundtrips (1.5 exact)");
 # 0.7 is 1 ULP off after 6-digit decimal serialization -> assert within 1e-6.
-var ddiff = f64_abs(f64_sub(IntentModifiers_duration_scale(m2), IntentModifiers_duration_scale(mser)));
-assert_eq(f64_lt(ddiff, 0x3EB0C6F7A0B5ED8D), 1, "duration_scale roundtrips (0.7 within 1e-6)");
+var ddiff = pr_abs(pr_sub(IntentModifiers_duration_scale(m2), IntentModifiers_duration_scale(mser)));
+assert_eq(pr_lt(ddiff, pr_of64(0x3EB0C6F7A0B5ED8D)), 1, "duration_scale roundtrips (0.7 within 1e-6)");
 assert_eq(IntentModifiers_urgency(m2), IntentModifiers_urgency(mser), "urgency roundtrips (0.9 exact)");
 var sb2 = str_builder_new();
 IntentModifiers_to_json(m2, sb2);

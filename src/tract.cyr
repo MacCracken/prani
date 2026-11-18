@@ -15,9 +15,10 @@
 # svara_is_err), error.cyr, rng.cyr, dsp.cyr, species.cyr. Module files carry
 # no `include` lines -- the entry orders them.
 #
-# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
-# widening is forced). Integer literals via f64_from(n); non-integers via the
-# module-top IEEE-754 hex constants below (decimals in comments).
+# FLOATS: a real is the build's float, f64 or f32 (ADR-0010). svara and naad are f64
+# in both builds, so every call into them widens with pr_to64 and every result is
+# narrowed with pr_of64. Integer literals via pr_from(n); non-integers via the
+# module-top constant pairs below (decimals in comments).
 #
 # PARITY NOTE (naad-backend default): NoiseOnly pre-builds a naad bandpass filter
 # (default features), and synthesize_noise uses it; the svara FormantFilter
@@ -35,6 +36,29 @@
 # ================================================================
 # Non-integer literal constants (IEEE-754 hex; decimals in comments).
 # ================================================================
+# prani:real-source
+#ifdef PRANI_F32
+#ifdef PRANI_F32
+
+var PR_TR_1_3   = 0x3FA66666;           # 1.3   F4 estimate multiplier
+var PR_TR_1_5   = 0x3FC00000;           # 1.5   F5 estimate multiplier
+var PR_TR_1_2   = 0x3F99999A;           # 1.2   B4 estimate multiplier
+var PR_TR_1_4   = 0x3FB33333;           # 1.4   B5 estimate multiplier
+var PR_TR_0_05  = 0x3D4CCCCD;           # 0.05  jitter clamp ceiling
+var PR_TR_0_1   = 0x3DCCCCCD;           # 0.1   shimmer clamp ceiling / tilt abs threshold
+var PR_TR_0_5   = 0x3F000000;           # 0.5   sub_f0 mult / tone mix / mod_rate / env thresholds
+var PR_TR_1_498 = 0x3FBFBE77;           # 1.498 syringeal second-source ratio (~perfect fifth)
+var PR_TR_0_6   = 0x3F19999A;           # 0.6   tone2 amplitude
+var PR_TR_0_25  = 0x3E800000;           # 0.25  stridulatory/vibratile signal scale
+var PR_TR_0_3   = 0x3E99999A;           # 0.3   second-harmonic amplitude
+var PR_TR_2_5   = 0x40200000;           # 2.5   cricket chirp rate (Hz)
+var PR_TR_30_0  = 0x41F00000;           # 30.0  cricket syllable rate (Hz)
+var PR_TR_0_4   = 0x3ECCCCCD;           # 0.4   purr open-phase duty
+var PR_TR_0_02  = 0x3CA3D70A;           # 0.02  purr closed-phase noise scale
+var PR_TR_0_85  = 0x3F59999A;           # 0.85  spectral-tilt coefficient clamp ceiling
+var PR_TR_0_01  = 0x3C23D70A;           # 0.01  spectral-tilt coefficient floor
+var PR_TR_12_0  = 0x41400000;           # 12.0  dB/octave -> coefficient divisor
+#else
 var PR_TR_1_3   = 0x3ff4cccccccccccd;   # 1.3   F4 estimate multiplier
 var PR_TR_1_5   = 0x3ff8000000000000;   # 1.5   F5 estimate multiplier
 var PR_TR_1_2   = 0x3ff3333333333333;   # 1.2   B4 estimate multiplier
@@ -53,6 +77,7 @@ var PR_TR_0_02  = 0x3f947ae147ae147b;   # 0.02  purr closed-phase noise scale
 var PR_TR_0_85  = 0x3feb333333333333;   # 0.85  spectral-tilt coefficient clamp ceiling
 var PR_TR_0_01  = 0x3f847ae147ae147b;   # 0.01  spectral-tilt coefficient floor
 var PR_TR_12_0  = 0x4028000000000000;   # 12.0  dB/octave -> coefficient divisor
+#endif
 
 # ================================================================
 # INPUT RANGES (2.0.5, audit F11). Every fallible entry point in this module
@@ -176,8 +201,8 @@ struct CreatureTract {
 # whose estimates were in band (every species at 44.1 kHz) is unchanged.
 #must_use
 fn crtract_in_band(est, below, nyquist) {
-    if (f64_lt(est, nyquist) == 1) { return est; }
-    return f64_mul(f64_add(below, nyquist), F64_HALF);
+    if (pr_lt(est, nyquist)) { return est; }
+    return pr_mul(pr_add(below, nyquist), PR_HALF);
 }
 
 # new(params, sample_rate) -- CreatureTract::new. Configures the svara tract
@@ -208,7 +233,7 @@ fn crtract_new(params, sample_rate) {
     # refused allocation; an error passes through rather than being read, and a
     # null is refused (2.2.1).
     if (params <= 0) { return prani_handle_code(params, PRANI_ERR_INVALID_SPECIES); }
-    var tract = svara_tract_new(sample_rate);
+    var tract = svara_tract_new(pr_to64(sample_rate));
     if (svara_is_err(tract) == 1) {
         prani_log_error("prani: svara vocal tract rejected the sample rate");
         return prani_from_svara(tract);
@@ -225,11 +250,12 @@ fn crtract_new(params, sample_rate) {
     # on the stack (80 bytes, see crtract_set_formant_blend), not one
     # svara allocates and never checks: the setter copies its values out.
     var vt[80];
-    var ny = f64_mul(sample_rate, F64_HALF);
-    var f3e = crtract_in_band(f64_mul(f2, PR_TR_1_3), f2, ny);   # audit B2 (ADR-0009)
+    var ny = pr_mul(sample_rate, PR_HALF);
+    var f3e = crtract_in_band(pr_mul(f2, PR_TR_1_3), f2, ny);   # audit B2 (ADR-0009)
+    var f4e = crtract_in_band(pr_mul(f2, PR_TR_1_5), f3e, ny);
     var target = svara_vowel_target_set(&vt,
-      f0, f1, f2, f3e, crtract_in_band(f64_mul(f2, PR_TR_1_5), f3e, ny),
-      b0, b1, b2, f64_mul(b2, PR_TR_1_2), f64_mul(b2, PR_TR_1_4));
+      pr_to64(f0), pr_to64(f1), pr_to64(f2), pr_to64(f3e), pr_to64(f4e),
+      pr_to64(b0), pr_to64(b1), pr_to64(b2), pr_to64(pr_mul(b2, PR_TR_1_2)), pr_to64(pr_mul(b2, PR_TR_1_4)));
     # Rust: `if let Err(e) = ... { warn!(...) }` then continue. Ports the
     # tracing::warn! to sakshi (prani_log_warn), preserving warn-then-continue.
     var _fmt_rc = svara_tract_set_formants_from_target(tract, target);
@@ -240,7 +266,7 @@ fn crtract_new(params, sample_rate) {
     # naad-backend: pre-build a bandpass for NoiseOnly (snakes). Error -> None(0).
     var noise_filter = 0;
     if (SpeciesParams_apparatus(params) == PRANI_APP_NOISE_ONLY) {
-        var nf = filter_biquad_new(NAAD_FILTER_BANDPASS, sample_rate, f0, f64_from(2));
+        var nf = filter_biquad_new(NAAD_FILTER_BANDPASS, pr_to64(sample_rate), pr_to64(f0), f64_from(2));
         # 2.2.0: since naad 2.3.4 a refused allocation inside the constructor comes
         # back as NAAD_ERR_ALLOCATION (naad ADR-0010). That is not the oracle's
         # "this species cannot have a filter" (which surfaces, as before, when the
@@ -286,19 +312,19 @@ fn crtract_to_json(self, sb) {
     var rng = CreatureTract_rng(self);
     var dc = CreatureTract_dc_blocker(self);
     str_builder_add_cstr(sb, "{\"sample_rate\":");
-    str_builder_add_int(sb, CreatureTract_sample_rate(self));
+    str_builder_add_int(sb, pr_to64(CreatureTract_sample_rate(self)));
     str_builder_add_cstr(sb, ",\"phase\":");
-    str_builder_add_int(sb, CreatureTract_phase(self));
+    str_builder_add_int(sb, pr_to64(CreatureTract_phase(self)));
     str_builder_add_cstr(sb, ",\"rng_state\":");
     str_builder_add_int(sb, PrRng_state(rng));
     str_builder_add_cstr(sb, ",\"rng_inc\":");
     str_builder_add_int(sb, PrRng_inc(rng));
     str_builder_add_cstr(sb, ",\"dcb_x_prev\":");
-    str_builder_add_int(sb, DcBlocker_x_prev(dc));
+    str_builder_add_int(sb, pr_to64(DcBlocker_x_prev(dc)));
     str_builder_add_cstr(sb, ",\"dcb_y_prev\":");
-    str_builder_add_int(sb, DcBlocker_y_prev(dc));
+    str_builder_add_int(sb, pr_to64(DcBlocker_y_prev(dc)));
     str_builder_add_cstr(sb, ",\"dcb_r\":");
-    str_builder_add_int(sb, DcBlocker_r(dc));
+    str_builder_add_int(sb, pr_to64(DcBlocker_r(dc)));
     # 2.2.1 (ADR-0009): the clock is prani state, so it roundtrips (ADR-0005). It is
     # a sample count, written as a plain integer, not as f64 bits.
     str_builder_add_cstr(sb, ",\"clock\":");
@@ -372,11 +398,11 @@ fn crtract_from_json_str(json) {
     # even one is not a state prani_rng_new can make, and 0 with state 0 never moves.
     if ((bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "rng_inc")) & 1) == 0) { return PRANI_ERR_INVALID_TRACT; }
 
-    var phase = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "phase"));
-    var dcb_x = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_x_prev"));
-    var dcb_y = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_y_prev"));
-    var dcb_r = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_r"));
-    if (prani_in_range(phase, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    var phase = pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "phase")));
+    var dcb_x = pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_x_prev")));
+    var dcb_y = pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_y_prev")));
+    var dcb_r = pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_r")));
+    if (prani_in_range(phase, 0, PR_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var clock = 0;
     var n_clock = bayan_json_v_obj_get_by_cstr(root, "clock");
     if (n_clock != 0) {
@@ -386,13 +412,13 @@ fn crtract_from_json_str(json) {
     }
     if (prani_finite2(dcb_x, dcb_y) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_is_non_negative(dcb_r) == 0) { return PRANI_ERR_INVALID_TRACT; }
-    if (f64_lt(dcb_r, F64_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (pr_lt(dcb_r, PR_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
 
     var params = species_params_from_node(bayan_json_v_obj_get_by_cstr(root, "params"));
     # species.cyr ranges the nested params object itself (2.0.5); propagate its
     # code rather than restating it, exactly as the crtract_new check below does.
     if (prani_is_err(params) == 1) { return params; }
-    var sample_rate = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "sample_rate"));
+    var sample_rate = pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "sample_rate")));
     # rebuild the svara tract + naad filter + fresh rng/dc_blocker from params
     var self = crtract_new(params, sample_rate);
     if (prani_is_err(self) == 1) { return self; }
@@ -458,7 +484,11 @@ fn crtract_from_json_str(json) {
 #    spread is the timbre svara corrected, which no single gain can or should undo.
 #    The loudest render anywhere in that sweep peaks at 0.786; 2.1.1's peaked at
 #    0.810.
+#ifdef PRANI_F32
+var PR_TR_EXC_GAIN = 0x40158A12;           # 2.336552212222851  (+7.37 dB), step 2 above
+#else
 var PR_TR_EXC_GAIN = 0x4002b14249472616;   # 2.336552212222851  (+7.37 dB), step 2 above
+#endif
 
 # crtract_pulse_peak(glottal) -- the peak of the voiced pulse svara will emit:
 # SV_G_ROSENBERG_GAIN for the Rosenberg model, which is the only one prani builds
@@ -466,8 +496,8 @@ var PR_TR_EXC_GAIN = 0x4002b14249472616;   # 2.336552212222851  (+7.37 dB), step
 # copied, so a recalibration there flows through and a rename fails the build.
 # 1.0 for any other model, whose pulse svara leaves at unit peak.
 fn crtract_pulse_peak(glottal) {
-    if (svara_glottal_model(glottal) == SVARA_GLOTTAL_ROSENBERG) { return SV_G_ROSENBERG_GAIN; }
-    return F64_ONE;
+    if (svara_glottal_model(glottal) == SVARA_GLOTTAL_ROSENBERG) { return pr_of64(SV_G_ROSENBERG_GAIN); }
+    return PR_ONE;
 }
 
 # crtract_svara_breathiness(b, g) -- the breathiness to hand svara so that its
@@ -475,8 +505,8 @@ fn crtract_pulse_peak(glottal) {
 # g*b / (1 - b + g*b). b is a species breathiness in [0, 1] (clamped upstream),
 # and g >= 1, so the denominator is >= 1 and the result stays in [0, 1].
 fn crtract_svara_breathiness(b, g) {
-    var gb = f64_mul(g, b);
-    return f64_div(gb, f64_add(f64_sub(F64_ONE, b), gb));
+    var gb = pr_mul(g, b);
+    return pr_div(gb, pr_add(pr_sub(PR_ONE, b), gb));
 }
 
 # crtract_excitation_scale(b, g) -- the factor that takes svara's sample, built
@@ -484,7 +514,7 @@ fn crtract_svara_breathiness(b, g) {
 # (1 - b + g*b) / g for the oracle's excitation (step 1), times PR_TR_EXC_GAIN
 # for the oracle's loudness (step 2).
 fn crtract_excitation_scale(b, g) {
-    return f64_mul(f64_div(f64_add(f64_sub(F64_ONE, b), f64_mul(g, b)), g), PR_TR_EXC_GAIN);
+    return pr_mul(pr_div(pr_add(pr_sub(PR_ONE, b), pr_mul(g, b)), g), PR_TR_EXC_GAIN);
 }
 
 # crtract_glottal_new(clamped_f0, sr, params, pert) -- the glottal source both
@@ -494,13 +524,13 @@ fn crtract_excitation_scale(b, g) {
 # excitation level above. Returns the source, or svara's negative error code.
 # The caller multiplies every sample by crtract_excitation_scale(b, g).
 fn crtract_glottal_new(clamped_f0, sr, params, pert) {
-    var glottal = svara_glottal_new(clamped_f0, sr);
+    var glottal = svara_glottal_new(pr_to64(clamped_f0), pr_to64(sr));
     if (svara_is_err(glottal) == 1) { return glottal; }
-    var b = f64_clamp(SpeciesParams_breathiness(params), 0, F64_ONE);
-    svara_glottal_set_breathiness(glottal, crtract_svara_breathiness(b, crtract_pulse_peak(glottal)));
-    var ps = f64_max(pert, 0);
-    svara_glottal_set_jitter(glottal, f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05));
-    svara_glottal_set_shimmer(glottal, f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1));
+    var b = pr_clamp(SpeciesParams_breathiness(params), 0, PR_ONE);
+    svara_glottal_set_breathiness(glottal, pr_to64(crtract_svara_breathiness(b, crtract_pulse_peak(glottal))));
+    var ps = pr_max(pert, 0);
+    svara_glottal_set_jitter(glottal, pr_to64(pr_min(pr_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05)));
+    svara_glottal_set_shimmer(glottal, pr_to64(pr_min(pr_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1)));
     return glottal;
 }
 
@@ -529,36 +559,36 @@ fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
     var tract = CreatureTract_tract(self);
 
     # clamp f0 to [max(f0_min,20), min(f0_max,2000)]
-    var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
-    var hi = f64_min(SpeciesParams_f0_max(params), f64_from(2000));
+    var lo = pr_max(SpeciesParams_f0_min(params), pr_from(20));
+    var hi = pr_min(SpeciesParams_f0_max(params), pr_from(2000));
     # 2.2.1 (audit B11): a species whose f0_max is below the 20 Hz floor has no f0
     # to clamp to. f64_clamp(f0, lo, hi) answered lo, a pitch outside the species'
     # own range; the oracle's f32::clamp panicked.
-    if (f64_gt(lo, hi) == 1) { return PRANI_ERR_INVALID_SPECIES; }
-    var clamped_f0 = f64_clamp(f0, lo, hi);
+    if (pr_gt(lo, hi)) { return PRANI_ERR_INVALID_SPECIES; }
+    var clamped_f0 = pr_clamp(f0, lo, hi);
 
     # non-stationary perturbation: jitter/shimmer scaled by block intensity, and
     # the excitation at the oracle's level (see THE EXCITATION LEVEL above).
     var glottal = crtract_glottal_new(clamped_f0, sr, params, pert);
     if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
     var k = crtract_excitation_scale(
-      f64_clamp(SpeciesParams_breathiness(params), 0, F64_ONE), crtract_pulse_peak(glottal));
+      pr_clamp(SpeciesParams_breathiness(params), 0, PR_ONE), crtract_pulse_peak(glottal));
 
     var output = out;
     vec_truncate(output, 0);
-    if (f64_gt(sub_amp, 0) == 1) {
+    if (pr_gt(sub_amp, 0)) {
         # inject subharmonics into excitation before tract filtering, so the
         # formant resonances shape the subharmonic energy.
-        var sub_f0 = f64_mul(clamped_f0, PR_TR_0_5);
-        var phase_inc = f64_div(sub_f0, sr);
+        var sub_f0 = pr_mul(clamped_f0, PR_TR_0_5);
+        var phase_inc = pr_div(sub_f0, sr);
         var i = 0;
         while (i < num_samples) {
-            var glottal_sample = f64_mul(svara_glottal_next_sample(glottal), k);
-            var sub = f64_mul(f64_sin(f64_mul(F64_TAU, CreatureTract_phase(self))), sub_amp);
-            var ph = f64_add(CreatureTract_phase(self), phase_inc);
-            if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+            var glottal_sample = pr_mul(pr_of64(svara_glottal_next_sample(glottal)), k);
+            var sub = pr_mul(pr_sin(pr_mul(PR_TAU, CreatureTract_phase(self))), sub_amp);
+            var ph = pr_add(CreatureTract_phase(self), phase_inc);
+            if (pr_ge(ph, PR_ONE)) { ph = pr_sub(ph, PR_ONE); }
             CreatureTract_set_phase(self, ph);
-            var y = svara_tract_process_sample(tract, f64_add(glottal_sample, sub));
+            var y = pr_of64(svara_tract_process_sample(tract, pr_to64(pr_add(glottal_sample, sub))));
             if (prani_vec_push(output, y) < 0) { return PRANI_ERR_ALLOC; }
             i = i + 1;
         }
@@ -567,7 +597,8 @@ fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
         # into the vec directly (avoids the raw-buffer/vec mismatch before DC).
         var i = 0;
         while (i < num_samples) {
-            var y = svara_tract_process_sample(tract, f64_mul(svara_glottal_next_sample(glottal), k));
+            var gs = pr_mul(pr_of64(svara_glottal_next_sample(glottal)), k);
+            var y = pr_of64(svara_tract_process_sample(tract, pr_to64(gs)));
             if (prani_vec_push(output, y) < 0) { return PRANI_ERR_ALLOC; }
             i = i + 1;
         }
@@ -600,41 +631,55 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
     var tract = CreatureTract_tract(self);
 
     # clamp f0 to [max(f0_min,20), f0_max]
-    var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
-    if (f64_gt(lo, SpeciesParams_f0_max(params)) == 1) { return PRANI_ERR_INVALID_SPECIES; }   # audit B11
-    var clamped_f0 = f64_clamp(f0, lo, SpeciesParams_f0_max(params));
+    var lo = pr_max(SpeciesParams_f0_min(params), pr_from(20));
+    if (pr_gt(lo, SpeciesParams_f0_max(params))) { return PRANI_ERR_INVALID_SPECIES; }   # audit B11
+    var clamped_f0 = pr_clamp(f0, lo, SpeciesParams_f0_max(params));
 
     var output = out;
     vec_truncate(output, 0);
-    if (f64_le(clamped_f0, f64_from(2000)) == 1) {
+    if (pr_le(clamped_f0, pr_from(2000))) {
         var glottal = crtract_glottal_new(clamped_f0, sr, params, pert);
         if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
         var k = crtract_excitation_scale(
-          f64_clamp(SpeciesParams_breathiness(params), 0, F64_ONE), crtract_pulse_peak(glottal));
+          pr_clamp(SpeciesParams_breathiness(params), 0, PR_ONE), crtract_pulse_peak(glottal));
         var i = 0;
         while (i < num_samples) {
-            var y = svara_tract_process_sample(tract, f64_mul(svara_glottal_next_sample(glottal), k));
+            var gs = pr_mul(pr_of64(svara_glottal_next_sample(glottal)), k);
+            var y = pr_of64(svara_tract_process_sample(tract, pr_to64(gs)));
             if (prani_vec_push(output, y) < 0) { return PRANI_ERR_ALLOC; }
             i = i + 1;
         }
     } else {
         # high-frequency syringeal with dual-source capability: the syrinx has
         # two independent sound sources (left/right bronchus) at different pitches.
-        var f0_2 = f64_mul(clamped_f0, PR_TR_1_498);   # ~perfect fifth above
+        var f0_2 = pr_mul(clamped_f0, PR_TR_1_498);   # ~perfect fifth above
         var breathiness = SpeciesParams_breathiness(params);
         var rng = CreatureTract_rng(self);
         var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009): continuous across calls
+        #ifdef PRANI_F32
+        # ADR-0010: the time and the phase in f64 (TIME AND PHASE STAY f64, real.cyr).
+        var sr64 = pr_to64(sr);
+        var w1 = f64_mul(F64_TAU, pr_to64(clamped_f0));
+        var w2 = f64_mul(F64_TAU, pr_to64(f0_2));
+        #endif
         var i = 0;
         while (i < num_samples) {
-            var t = f64_div(f64_from(t0 + i), sr);
-            var tone1 = f64_sin(f64_mul(f64_mul(F64_TAU, clamped_f0), t));
-            var tone2 = f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, f0_2), t)), PR_TR_0_6);
-            var noise = f64_mul(prani_rng_next_f32(rng), breathiness);
+            #ifdef PRANI_F32
+            var t = pr_time(t0 + i, sr64);
+            var tone1 = pr_sinw(w1, t);
+            var tone2 = pr_mul(pr_sinw(w2, t), PR_TR_0_6);
+            #else
+            var t = pr_div(pr_from(t0 + i), sr);
+            var tone1 = pr_sin(pr_mul(pr_mul(PR_TAU, clamped_f0), t));
+            var tone2 = pr_mul(pr_sin(pr_mul(pr_mul(PR_TAU, f0_2), t)), PR_TR_0_6);
+            #endif
+            var noise = pr_mul(prani_rng_next_f32(rng), breathiness);
             # excitation = (tone1+tone2)*0.5*(1-breathiness) + noise
-            var excitation = f64_add(
-              f64_mul(f64_mul(f64_add(tone1, tone2), PR_TR_0_5), f64_sub(F64_ONE, breathiness)),
+            var excitation = pr_add(
+              pr_mul(pr_mul(pr_add(tone1, tone2), PR_TR_0_5), pr_sub(PR_ONE, breathiness)),
               noise);
-            if (prani_vec_push(output, svara_tract_process_sample(tract, excitation)) < 0) { return PRANI_ERR_ALLOC; }
+            var ty = pr_of64(svara_tract_process_sample(tract, pr_to64(excitation)));
+            if (prani_vec_push(output, ty) < 0) { return PRANI_ERR_ALLOC; }
             i = i + 1;
         }
     }
@@ -670,8 +715,9 @@ fn crtract_synthesize_noise_into(self, num_samples, out) {
     var rng = CreatureTract_rng(self);
     var i = 0;
     while (i < num_samples) {
-        var noise = f64_mul(prani_rng_next_f32(rng), PR_TR_0_5);
-        if (prani_vec_push(output, filter_biquad_process_sample(filter, noise)) < 0) { return PRANI_ERR_ALLOC; }
+        var noise = pr_mul(prani_rng_next_f32(rng), PR_TR_0_5);
+        var fy = pr_of64(filter_biquad_process_sample(filter, pr_to64(noise)));
+        if (prani_vec_push(output, fy) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
@@ -684,9 +730,9 @@ fn crtract_synthesize_noise_into(self, num_samples, out) {
 # at t = 0 is NaN, so a bee rendered 256 NaN samples as success (audit B7, 2.2.1).
 #must_use
 fn crtract_osc_ok(f0, end_clock, sr) {
-    var w = f64_mul(F64_TAU, f64_mul(f64_abs(f0), F64_TWO));
+    var w = pr_mul(PR_TAU, pr_mul(pr_abs(f0), PR_TWO));
     if (prani_is_finite(w) == 0) { return 0; }
-    return prani_is_finite(f64_mul(w, f64_div(f64_from(end_clock), sr)));
+    return prani_is_finite(pr_mul(w, pr_div(pr_from(end_clock), sr)));
 }
 
 # synthesize_stridulatory -- amplitude-modulated tone for insects.
@@ -713,40 +759,54 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
     var output = out;
     vec_truncate(output, 0);
 
-    if (f64_gt(f0, f64_from(1000)) == 1) {
+    if (pr_gt(f0, pr_from(1000))) {
         # cricket-style discrete pulse-train chirps.
         var syllable_rate = PR_TR_30_0;   # wing strokes per second within a chirp
         var chirp_rate = PR_TR_2_5;       # chirps per second
         var pulses_per_chirp = 4;         # typical field cricket (u32)
-        var chirp_period = f64_div(sr, chirp_rate);
-        var syllable_period = f64_div(sr, syllable_rate);
-        var chirp_active = f64_mul(syllable_period, f64_from(pulses_per_chirp));
+        var chirp_period = pr_div(sr, chirp_rate);
+        var syllable_period = pr_div(sr, syllable_rate);
+        var chirp_active = pr_mul(syllable_period, pr_from(pulses_per_chirp));
+        #ifdef PRANI_F32
+        # ADR-0010: the time, the chirp position and the phase in f64.
+        var sr64 = pr_to64(sr);
+        var w1 = f64_mul(F64_TAU, pr_to64(f0));
+        var w2 = f64_mul(f64_mul(F64_TAU, pr_to64(f0)), F64_TWO);
+        var period64 = pr_to64(chirp_period);
+        #endif
 
         var i = 0;
         while (i < num_samples) {
-            var t = f64_div(f64_from(t0 + i), sr);
+            #ifdef PRANI_F32
+            var t = pr_time(t0 + i, sr64);
+            var pos_in_chirp = pr_of64(crtract_fmod64(f64_from(t0 + i), period64));
+            var carrier = pr_sinw(w1, t);
+            var h2 = pr_mul(pr_sinw(w2, t), PR_TR_0_3);
+            #else
+            var t = pr_div(pr_from(t0 + i), sr);
             # pos_in_chirp = (clock as f32) % chirp_period
-            var pos_in_chirp = crtract_fmod(f64_from(t0 + i), chirp_period);
+            var pos_in_chirp = crtract_fmod(pr_from(t0 + i), chirp_period);
 
-            var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
-            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
-            var signal = f64_mul(f64_add(carrier, h2), PR_TR_0_25);
+            var carrier = pr_sin(pr_mul(pr_mul(PR_TAU, f0), t));
+            var h2 = pr_mul(pr_sin(pr_mul(pr_mul(pr_mul(PR_TAU, f0), PR_TWO), t)), PR_TR_0_3);
+            #endif
+            var signal = pr_mul(pr_add(carrier, h2), PR_TR_0_25);
 
-            if (f64_lt(pos_in_chirp, chirp_active) == 1) {
+            if (pr_lt(pos_in_chirp, chirp_active)) {
                 # within active chirp: pulse envelope per syllable
                 var pos_in_syllable = crtract_fmod(pos_in_chirp, syllable_period);
-                var syllable_frac = f64_div(pos_in_syllable, syllable_period);
+                var syllable_frac = pr_div(pos_in_syllable, syllable_period);
                 # sharp onset, quick decay per pulse (wing-stroke shape)
                 var pulse_env = 0;
-                if (f64_lt(syllable_frac, PR_TR_0_1) == 1) {
-                    pulse_env = f64_div(syllable_frac, PR_TR_0_1);
-                } elif (f64_lt(syllable_frac, PR_TR_0_5) == 1) {
-                    pulse_env = F64_ONE;
+                if (pr_lt(syllable_frac, PR_TR_0_1)) {
+                    pulse_env = pr_div(syllable_frac, PR_TR_0_1);
+                } elif (pr_lt(syllable_frac, PR_TR_0_5)) {
+                    pulse_env = PR_ONE;
                 } else {
                     # 1.0 - (syllable_frac - 0.5) / 0.5
-                    pulse_env = f64_sub(F64_ONE, f64_div(f64_sub(syllable_frac, PR_TR_0_5), PR_TR_0_5));
+                    pulse_env = pr_sub(PR_ONE, pr_div(pr_sub(syllable_frac, PR_TR_0_5), PR_TR_0_5));
                 }
-                if (prani_vec_push(output, f64_mul(signal, pulse_env)) < 0) { return PRANI_ERR_ALLOC; }
+                if (prani_vec_push(output, pr_mul(signal, pulse_env)) < 0) { return PRANI_ERR_ALLOC; }
             } else {
                 # inter-chirp silence
                 if (prani_vec_push(output, 0) < 0) { return PRANI_ERR_ALLOC; }
@@ -755,16 +815,30 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
         }
     } else {
         # bee-style continuous wing-beat modulation
-        var mod_rate = f64_mul(f0, PR_TR_0_5);
+        var mod_rate = pr_mul(f0, PR_TR_0_5);
+        #ifdef PRANI_F32
+        # ADR-0010: the time and the phase in f64.
+        var sr64 = pr_to64(sr);
+        var w1 = f64_mul(F64_TAU, pr_to64(f0));
+        var w2 = f64_mul(f64_mul(F64_TAU, pr_to64(f0)), F64_TWO);
+        var wm = f64_mul(F64_TAU, pr_to64(mod_rate));
+        #endif
         var i = 0;
         while (i < num_samples) {
-            var t = f64_div(f64_from(t0 + i), sr);
-            var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
-            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
+            #ifdef PRANI_F32
+            var t = pr_time(t0 + i, sr64);
+            var carrier = pr_sinw(w1, t);
+            var h2 = pr_mul(pr_sinw(w2, t), PR_TR_0_3);
+            var modulator = pr_add(PR_TR_0_5, pr_mul(PR_TR_0_5, pr_sinw(wm, t)));
+            #else
+            var t = pr_div(pr_from(t0 + i), sr);
+            var carrier = pr_sin(pr_mul(pr_mul(PR_TAU, f0), t));
+            var h2 = pr_mul(pr_sin(pr_mul(pr_mul(pr_mul(PR_TAU, f0), PR_TWO), t)), PR_TR_0_3);
             # modulator = 0.5 + 0.5*sin(TAU*mod_rate*t)
-            var modulator = f64_add(PR_TR_0_5,
-              f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
-            var y = f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25);
+            var modulator = pr_add(PR_TR_0_5,
+              pr_mul(PR_TR_0_5, pr_sin(pr_mul(pr_mul(PR_TAU, mod_rate), t))));
+            #endif
+            var y = pr_mul(pr_mul(pr_add(carrier, h2), modulator), PR_TR_0_25);
             if (prani_vec_push(output, y) < 0) { return PRANI_ERR_ALLOC; }
             i = i + 1;
         }
@@ -787,17 +861,31 @@ fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
     var sr = CreatureTract_sample_rate(self);
     var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009), as in stridulatory
     if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
-    var mod_rate = f64_mul(f0, PR_TR_0_5);
+    var mod_rate = pr_mul(f0, PR_TR_0_5);
     var output = out;
     vec_truncate(output, 0);
+    #ifdef PRANI_F32
+    # ADR-0010: the time and the phase in f64.
+    var sr64 = pr_to64(sr);
+    var w1 = f64_mul(F64_TAU, pr_to64(f0));
+    var w2 = f64_mul(f64_mul(F64_TAU, pr_to64(f0)), F64_TWO);
+    var wm = f64_mul(F64_TAU, pr_to64(mod_rate));
+    #endif
     var i = 0;
     while (i < num_samples) {
-        var t = f64_div(f64_from(t0 + i), sr);
-        var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
-        var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
-        var modulator = f64_add(PR_TR_0_5,
-          f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(F64_TAU, mod_rate), t))));
-        var y = f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25);
+        #ifdef PRANI_F32
+        var t = pr_time(t0 + i, sr64);
+        var carrier = pr_sinw(w1, t);
+        var h2 = pr_mul(pr_sinw(w2, t), PR_TR_0_3);
+        var modulator = pr_add(PR_TR_0_5, pr_mul(PR_TR_0_5, pr_sinw(wm, t)));
+        #else
+        var t = pr_div(pr_from(t0 + i), sr);
+        var carrier = pr_sin(pr_mul(pr_mul(PR_TAU, f0), t));
+        var h2 = pr_mul(pr_sin(pr_mul(pr_mul(pr_mul(PR_TAU, f0), PR_TWO), t)), PR_TR_0_3);
+        var modulator = pr_add(PR_TR_0_5,
+          pr_mul(PR_TR_0_5, pr_sin(pr_mul(pr_mul(PR_TAU, mod_rate), t))));
+        #endif
+        var y = pr_mul(pr_mul(pr_add(carrier, h2), modulator), PR_TR_0_25);
         if (prani_vec_push(output, y) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
@@ -810,9 +898,20 @@ fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
 # for the non-negative operands used here: i-index positions and periods).
 #must_use
 fn crtract_fmod(a, b) {
+    var q = pr_trunc(pr_div(a, b));
+    return pr_sub(a, pr_mul(q, b));
+}
+
+#ifdef PRANI_F32
+# crtract_fmod64(a, b) -- crtract_fmod in f64, for the f32 build's chirp position:
+# a is the tract clock (an integer sample index, exact in f64 to 2^53), b the chirp
+# period. In f32 the clock is inexact past 2^24 samples (ADR-0010).
+#must_use
+fn crtract_fmod64(a, b) {
     var q = f64_trunc(f64_div(a, b));
     return f64_sub(a, f64_mul(q, b));
 }
+#endif
 
 # ---- public API -------------------------------------------------------------
 
@@ -943,31 +1042,32 @@ fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
     # in [0, 1). A negative purr_f0 drove the phase down without bound, and one at
     # or past the sample rate up past 1, where it latched; either way the tract's
     # own JSON was then refused. The cat purr asks for 20-35 Hz.
-    if (f64_lt(purr_f0, 0) == 1) { return PRANI_ERR_INVALID_TRACT; }
-    if (f64_ge(purr_f0, sr) == 1) { return PRANI_ERR_INVALID_TRACT; }
+    if (pr_lt(purr_f0, 0)) { return PRANI_ERR_INVALID_TRACT; }
+    if (pr_ge(purr_f0, sr)) { return PRANI_ERR_INVALID_TRACT; }
     var tract = CreatureTract_tract(self);
     var rng = CreatureTract_rng(self);
-    var phase_inc = f64_div(purr_f0, sr);
+    var phase_inc = pr_div(purr_f0, sr);
     var output = out;
     vec_truncate(output, 0);
     var i = 0;
     while (i < num_samples) {
         var phase_frac = CreatureTract_phase(self);
         var excitation = 0;
-        if (f64_lt(phase_frac, PR_TR_0_4) == 1) {
+        if (pr_lt(phase_frac, PR_TR_0_4)) {
             # open phase: sharp glottal-like pulse burst (squared half-sine)
-            var t = f64_div(phase_frac, PR_TR_0_4);
-            var pulse = f64_sin(f64_mul(F64_PI, t));
-            excitation = f64_mul(pulse, pulse);   # squared for a sharper pulse
+            var t = pr_div(phase_frac, PR_TR_0_4);
+            var pulse = pr_sin(pr_mul(PR_PI, t));
+            excitation = pr_mul(pulse, pulse);   # squared for a sharper pulse
         } else {
             # closed phase: near silence with slight noise
-            excitation = f64_mul(prani_rng_next_f32(rng), PR_TR_0_02);
+            excitation = pr_mul(prani_rng_next_f32(rng), PR_TR_0_02);
         }
-        var ph = f64_add(CreatureTract_phase(self), phase_inc);
-        if (f64_ge(ph, F64_ONE) == 1) { ph = f64_sub(ph, F64_ONE); }
+        var ph = pr_add(CreatureTract_phase(self), phase_inc);
+        if (pr_ge(ph, PR_ONE)) { ph = pr_sub(ph, PR_ONE); }
         CreatureTract_set_phase(self, ph);
         # sharp pulse excites the vocal tract -> resonant harmonics
-        if (prani_vec_push(output, svara_tract_process_sample(tract, excitation)) < 0) { return PRANI_ERR_ALLOC; }
+        var ty = pr_of64(svara_tract_process_sample(tract, pr_to64(excitation)));
+        if (prani_vec_push(output, ty) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
@@ -984,7 +1084,7 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
     if (target <= 0) { return prani_handle_code(target, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (target_bw <= 0) { return prani_handle_code(target_bw, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var params = CreatureTract_params(self);
-    var bl = f64_clamp(blend, 0, F64_ONE);
+    var bl = pr_clamp(blend, 0, PR_ONE);
 
     var f0 = SpeciesParams_formant0(params);
     var f1 = SpeciesParams_formant1(params);
@@ -994,12 +1094,12 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
     var b2 = SpeciesParams_bandwidth2(params);
 
     # blended = base + (target - base) * blend
-    var bf0 = f64_add(f0, f64_mul(f64_sub(vec_get(target, 0), f0), bl));
-    var bf1 = f64_add(f1, f64_mul(f64_sub(vec_get(target, 1), f1), bl));
-    var bf2 = f64_add(f2, f64_mul(f64_sub(vec_get(target, 2), f2), bl));
-    var bb0 = f64_add(b0, f64_mul(f64_sub(vec_get(target_bw, 0), b0), bl));
-    var bb1 = f64_add(b1, f64_mul(f64_sub(vec_get(target_bw, 1), b1), bl));
-    var bb2 = f64_add(b2, f64_mul(f64_sub(vec_get(target_bw, 2), b2), bl));
+    var bf0 = pr_add(f0, pr_mul(pr_sub(vec_get(target, 0), f0), bl));
+    var bf1 = pr_add(f1, pr_mul(pr_sub(vec_get(target, 1), f1), bl));
+    var bf2 = pr_add(f2, pr_mul(pr_sub(vec_get(target, 2), f2), bl));
+    var bb0 = pr_add(b0, pr_mul(pr_sub(vec_get(target_bw, 0), b0), bl));
+    var bb1 = pr_add(b1, pr_mul(pr_sub(vec_get(target_bw, 1), b1), bl));
+    var bb2 = pr_add(b2, pr_mul(pr_sub(vec_get(target_bw, 2), b2), bl));
 
     # 2.2.0: the target is a stack SvVowelTarget (ten f64s, 80 bytes; the size is
     # pinned in tests/tract.tcyr) filled by svara_vowel_target_set. Through 2.1.2
@@ -1010,11 +1110,12 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
     # so nothing holds the pointer past this call, and the two forms share one
     # implementation in svara, so the formants are the same bits.
     var vt[80];
-    var ny = f64_mul(CreatureTract_sample_rate(self), F64_HALF);
-    var bf3e = crtract_in_band(f64_mul(bf2, PR_TR_1_3), bf2, ny);   # audit B2 (ADR-0009)
+    var ny = pr_mul(CreatureTract_sample_rate(self), PR_HALF);
+    var bf3e = crtract_in_band(pr_mul(bf2, PR_TR_1_3), bf2, ny);   # audit B2 (ADR-0009)
+    var bf4e = crtract_in_band(pr_mul(bf2, PR_TR_1_5), bf3e, ny);
     var vowel = svara_vowel_target_set(&vt,
-      bf0, bf1, bf2, bf3e, crtract_in_band(f64_mul(bf2, PR_TR_1_5), bf3e, ny),
-      bb0, bb1, bb2, f64_mul(bb2, PR_TR_1_2), f64_mul(bb2, PR_TR_1_4));
+      pr_to64(bf0), pr_to64(bf1), pr_to64(bf2), pr_to64(bf3e), pr_to64(bf4e),
+      pr_to64(bb0), pr_to64(bb1), pr_to64(bb2), pr_to64(pr_mul(bb2, PR_TR_1_2)), pr_to64(pr_mul(bb2, PR_TR_1_4)));
     # Rust used `.map_err(Into::into)` -- propagate svara error through prani.
     return prani_from_svara(svara_tract_set_formants_from_target(CreatureTract_tract(self), vowel));
 }
@@ -1045,17 +1146,17 @@ fn crtract_apply_spectral_tilt(samples, tilt_db, sample_rate) {
 fn crtract_apply_spectral_tilt_from(samples, tilt_db, sample_rate, state) {
     if (samples <= 0) { return prani_handle_code(samples, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_finite(tilt_db) == 0) { return PRANI_ERR_INVALID_TRACT; }
-    if (f64_lt(f64_abs(tilt_db), PR_TR_0_1) == 1) { return 0; }
+    if (pr_lt(pr_abs(tilt_db), PR_TR_0_1)) { return 0; }
     # dB/octave -> coefficient: a = clamp(-tilt_db/12, 0, 0.85)
-    var a = f64_clamp(f64_div(f64_neg(tilt_db), PR_TR_12_0), 0, PR_TR_0_85);
-    if (f64_lt(a, PR_TR_0_01) == 1) { return 0; }
-    var one_minus_a = f64_sub(F64_ONE, a);
+    var a = pr_clamp(pr_div(pr_neg(tilt_db), PR_TR_12_0), 0, PR_TR_0_85);
+    if (pr_lt(a, PR_TR_0_01)) { return 0; }
+    var one_minus_a = pr_sub(PR_ONE, a);
     var prev = load64(state);
     var n = vec_len(samples);
     var i = 0;
     while (i < n) {
         # *s = (1-a)*x + a*prev; prev = *s
-        var y = f64_add(f64_mul(one_minus_a, vec_get(samples, i)), f64_mul(a, prev));
+        var y = pr_add(pr_mul(one_minus_a, vec_get(samples, i)), pr_mul(a, prev));
         vec_set(samples, i, y);
         prev = y;
         i = i + 1;
@@ -1073,3 +1174,6 @@ fn crtract_reset(self) {
     CreatureTract_set_clock(self, 0);
     dcblocker_reset(CreatureTract_dc_blocker(self));
 }
+
+# prani:real-source-end
+#endif

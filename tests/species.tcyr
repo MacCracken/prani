@@ -10,19 +10,37 @@
 # crvoice_vocalize_with_intent (voice.cyr, not included here), which is UNREACHABLE
 # in this unit. That one undefined-fn WARNING is EXPECTED and fine (not a link error).
 
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
+include "tests/realt.cyr"
 
 # ---- test constants (IEEE-754 hex) -----------------------------------------
 # The bout-template table's non-integer seconds, transcribed from the oracle's
 # own match arms (git show 2.0.3:rust-old/src/species.rs, bout_template). Held
 # here rather than reusing src/species.cyr's PR_DUR_*/PR_TS_* so the expected
 # values are independent of the constants the implementation happens to name.
+#ifdef PRANI_F32
+var T_0_15 = 0x3E19999A;           # 0.15
+var T_0_2  = 0x3E4CCCCD;           # 0.2
+var T_0_25 = 0x3E800000;           # 0.25
+var T_0_3  = 0x3E99999A;           # 0.3
+var T_0_5  = 0x3F000000;           # 0.5
+var T_0_6  = 0x3F19999A;           # 0.6
+var T_0_8  = 0x3F4CCCCD;           # 0.8
+var T_1_5  = 0x3FC00000;           # 1.5
+var T_2_5  = 0x40200000;           # 2.5
+#else
 var T_0_15 = 0x3fc3333333333333;   # 0.15
 var T_0_2  = 0x3fc999999999999a;   # 0.2
 var T_0_25 = 0x3fd0000000000000;   # 0.25
@@ -32,9 +50,21 @@ var T_0_6  = 0x3fe3333333333333;   # 0.6
 var T_0_8  = 0x3fe999999999999a;   # 0.8
 var T_1_5  = 0x3ff8000000000000;   # 1.5
 var T_2_5  = 0x4004000000000000;   # 2.5
+#endif
 
 # Range-guard test values (2.0.5). Held here, not reused from src/species.cyr's
 # PR_SP_*_MAX, so a boundary assertion cannot pass by agreeing with itself.
+#ifdef PRANI_F32
+var T_NAN     = 0x7FC00000;           # a quiet NaN
+var T_1_0     = 0x3F800000;           # 1.0   breathiness ceiling
+var T_0_05    = 0x3D4CCCCD;           # 0.05  jitter ceiling (crvoice_with_jitter clamps here)
+var T_0_06    = 0x3D75C28F;           # 0.06  one step over the jitter ceiling
+var T_0_1     = 0x3DCCCCCD;           # 0.1   shimmer ceiling (crvoice_with_shimmer clamps here)
+var T_0_2     = 0x3E4CCCCD;           # 0.2   over the shimmer ceiling
+var T_100_0   = 0x42C80000;           # 100.0 tract_scale ceiling
+var T_20000_0 = 0x469C4000;           # 20000.0 Hz -- f0 / formant / bandwidth ceiling
+var T_NEG_1E300 = 0xFF7FFFFF;         # -1e300 -- huge but FINITE spectral tilt
+#else
 var T_NAN     = 0x7ff8000000000000;   # a quiet NaN
 var T_1_0     = 0x3ff0000000000000;   # 1.0   breathiness ceiling
 var T_0_05    = 0x3fa999999999999a;   # 0.05  jitter ceiling (crvoice_with_jitter clamps here)
@@ -44,6 +74,7 @@ var T_0_2     = 0x3fc999999999999a;   # 0.2   over the shimmer ceiling
 var T_100_0   = 0x4059000000000000;   # 100.0 tract_scale ceiling
 var T_20000_0 = 0x40d3880000000000;   # 20000.0 Hz -- f0 / formant / bandwidth ceiling
 var T_NEG_1E300 = 0xfe37e43c8800759c; # -1e300 -- huge but FINITE spectral tilt
+#endif
 var T_I64_MIN = (0 - 9223372036854775807) - 1;   # i64::MIN, a legal PCG seed
 
 alloc_init();
@@ -83,47 +114,47 @@ assert_eq(PRANI_APP_NOISE_ONLY, 4, "NoiseOnly == 4");
 test_group("params -- Wolf (laryngeal, f0 150-1200/400, tilt -3)");
 var wolf = species_params(PRANI_SP_WOLF);
 assert_eq(SpeciesParams_apparatus(wolf), PRANI_APP_LARYNGEAL, "wolf laryngeal");
-assert_eq(SpeciesParams_f0_min(wolf), f64_from(150), "wolf f0_min 150");
-assert_eq(SpeciesParams_f0_max(wolf), f64_from(1200), "wolf f0_max 1200");
-assert_eq(SpeciesParams_f0_default(wolf), f64_from(400), "wolf f0_default 400");
+assert_eq(SpeciesParams_f0_min(wolf), pr_from(150), "wolf f0_min 150");
+assert_eq(SpeciesParams_f0_max(wolf), pr_from(1200), "wolf f0_max 1200");
+assert_eq(SpeciesParams_f0_default(wolf), pr_from(400), "wolf f0_default 400");
 assert_eq(SpeciesParams_tract_scale(wolf), PR_TS_1_2, "wolf tract_scale 1.2");
-assert_eq(SpeciesParams_formant0(wolf), f64_from(420), "wolf F1 420");
-assert_eq(SpeciesParams_bandwidth2(wolf), f64_from(150), "wolf B3 150");
+assert_eq(SpeciesParams_formant0(wolf), pr_from(420), "wolf F1 420");
+assert_eq(SpeciesParams_bandwidth2(wolf), pr_from(150), "wolf B3 150");
 assert_eq(SpeciesParams_breathiness(wolf), PR_BR_0_05, "wolf breathiness 0.05");
-assert_eq(SpeciesParams_spectral_tilt(wolf), f64_neg(f64_from(3)), "wolf tilt -3");
+assert_eq(SpeciesParams_spectral_tilt(wolf), pr_neg(pr_from(3)), "wolf tilt -3");
 
 # ================================================================
 test_group("params -- Lion (laryngeal, infrasonic f0 40-200/80, tilt -6)");
 var lion = species_params(PRANI_SP_LION);
 assert_eq(SpeciesParams_apparatus(lion), PRANI_APP_LARYNGEAL, "lion laryngeal");
-assert_eq(SpeciesParams_f0_min(lion), f64_from(40), "lion f0_min 40");
-assert_eq(SpeciesParams_f0_default(lion), f64_from(80), "lion f0_default 80");
-assert_eq(SpeciesParams_tract_scale(lion), f64_from(2), "lion tract_scale 2.0");
-assert_eq(SpeciesParams_formant0(lion), f64_from(250), "lion F1 250");
+assert_eq(SpeciesParams_f0_min(lion), pr_from(40), "lion f0_min 40");
+assert_eq(SpeciesParams_f0_default(lion), pr_from(80), "lion f0_default 80");
+assert_eq(SpeciesParams_tract_scale(lion), pr_from(2), "lion tract_scale 2.0");
+assert_eq(SpeciesParams_formant0(lion), pr_from(250), "lion F1 250");
 assert_eq(SpeciesParams_breathiness(lion), PR_BR_0_1, "lion breathiness 0.1");
-assert_eq(SpeciesParams_spectral_tilt(lion), f64_neg(f64_from(6)), "lion tilt -6 (steep)");
+assert_eq(SpeciesParams_spectral_tilt(lion), pr_neg(pr_from(6)), "lion tilt -6 (steep)");
 
 # ================================================================
 test_group("params -- Songbird (syringeal, high f0 1000-8000/3000, tilt -1)");
 var bird = species_params(PRANI_SP_SONGBIRD);
 assert_eq(SpeciesParams_apparatus(bird), PRANI_APP_SYRINGEAL, "songbird syringeal");
-assert_eq(SpeciesParams_f0_max(bird), f64_from(8000), "songbird f0_max 8000");
-assert_eq(SpeciesParams_f0_default(bird), f64_from(3000), "songbird f0_default 3000");
+assert_eq(SpeciesParams_f0_max(bird), pr_from(8000), "songbird f0_max 8000");
+assert_eq(SpeciesParams_f0_default(bird), pr_from(3000), "songbird f0_default 3000");
 assert_eq(SpeciesParams_tract_scale(bird), PR_TS_0_15, "songbird tract_scale 0.15");
-assert_eq(SpeciesParams_formant2(bird), f64_from(10500), "songbird F3 10500");
-assert_eq(SpeciesParams_bandwidth0(bird), f64_from(500), "songbird B1 500 (wide)");
-assert_eq(SpeciesParams_spectral_tilt(bird), f64_neg(f64_from(1)), "songbird tilt -1 (flat)");
+assert_eq(SpeciesParams_formant2(bird), pr_from(10500), "songbird F3 10500");
+assert_eq(SpeciesParams_bandwidth0(bird), pr_from(500), "songbird B1 500 (wide)");
+assert_eq(SpeciesParams_spectral_tilt(bird), pr_neg(pr_from(1)), "songbird tilt -1 (flat)");
 
 # ================================================================
 test_group("params -- Snake (noise-only, no f0, full breathiness)");
 var snake = species_params(PRANI_SP_SNAKE);
 assert_eq(SpeciesParams_apparatus(snake), PRANI_APP_NOISE_ONLY, "snake noise-only");
-assert_eq(SpeciesParams_f0_min(snake), f64_from(0), "snake f0_min 0");
-assert_eq(SpeciesParams_f0_default(snake), f64_from(0), "snake f0_default 0");
+assert_eq(SpeciesParams_f0_min(snake), pr_from(0), "snake f0_min 0");
+assert_eq(SpeciesParams_f0_default(snake), pr_from(0), "snake f0_default 0");
 assert_eq(SpeciesParams_tract_scale(snake), PR_TS_0_4, "snake tract_scale 0.4");
-assert_eq(SpeciesParams_breathiness(snake), f64_from(1), "snake breathiness 1.0 (full)");
-assert_eq(SpeciesParams_jitter(snake), f64_from(0), "snake jitter 0");
-assert_eq(SpeciesParams_spectral_tilt(snake), f64_from(0), "snake tilt 0 (neutral)");
+assert_eq(SpeciesParams_breathiness(snake), pr_from(1), "snake breathiness 1.0 (full)");
+assert_eq(SpeciesParams_jitter(snake), pr_from(0), "snake jitter 0");
+assert_eq(SpeciesParams_spectral_tilt(snake), pr_from(0), "snake tilt 0 (neutral)");
 
 # ================================================================
 test_group("resonance_seed -- precomputed f32-bit-pattern parity");
@@ -163,8 +194,8 @@ test_group("bout_template -- Wolf / Dog / Lion");
 var wolf_bout = species_bout_template(PRANI_SP_WOLF);
 assert_eq(CallBout_vocalization(wolf_bout), PRANI_VOC_HOWL, "wolf bout howls");
 assert_eq(CallBout_count(wolf_bout), 3, "wolf bout count 3");
-assert_eq(CallBout_call_duration(wolf_bout), f64_from(3), "wolf bout call_duration 3.0");
-assert_eq(CallBout_interval(wolf_bout), f64_from(2), "wolf bout interval 2.0");
+assert_eq(CallBout_call_duration(wolf_bout), pr_from(3), "wolf bout call_duration 3.0");
+assert_eq(CallBout_interval(wolf_bout), pr_from(2), "wolf bout interval 2.0");
 assert_eq(CallBout_intent(wolf_bout), PRANI_INTENT_SOCIAL, "wolf bout social");
 
 var dog_bout = species_bout_template(PRANI_SP_DOG);
@@ -177,7 +208,7 @@ assert_eq(CallBout_intent(dog_bout), PRANI_INTENT_ALARM, "dog bout alarm");
 var lion_bout = species_bout_template(PRANI_SP_LION);
 assert_eq(CallBout_vocalization(lion_bout), PRANI_VOC_ROAR, "lion bout roars");
 assert_eq(CallBout_count(lion_bout), 4, "lion bout count 4");
-assert_eq(CallBout_call_duration(lion_bout), f64_from(2), "lion bout call_duration 2.0");
+assert_eq(CallBout_call_duration(lion_bout), pr_from(2), "lion bout call_duration 2.0");
 assert_eq(CallBout_interval(lion_bout), T_1_5, "lion bout interval 1.5");
 assert_eq(CallBout_intent(lion_bout), PRANI_INTENT_TERRITORIAL, "lion bout territorial");
 
@@ -187,7 +218,7 @@ var cat_bout = species_bout_template(PRANI_SP_CAT);
 assert_eq(CallBout_vocalization(cat_bout), PRANI_VOC_HOWL, "cat bout howls (meow)");
 assert_eq(CallBout_count(cat_bout), 2, "cat bout count 2");
 assert_eq(CallBout_call_duration(cat_bout), T_0_6, "cat bout call_duration 0.6");
-assert_eq(CallBout_interval(cat_bout), f64_from(1), "cat bout interval 1.0");
+assert_eq(CallBout_interval(cat_bout), pr_from(1), "cat bout interval 1.0");
 assert_eq(CallBout_intent(cat_bout), PRANI_INTENT_SOCIAL, "cat bout social");
 
 var bird_bout = species_bout_template(PRANI_SP_SONGBIRD);
@@ -215,7 +246,7 @@ var snake_bout = species_bout_template(PRANI_SP_SNAKE);
 assert_eq(CallBout_vocalization(snake_bout), PRANI_VOC_HISS, "snake bout hisses");
 assert_eq(CallBout_count(snake_bout), 1, "snake bout count 1 (single call)");
 assert_eq(CallBout_call_duration(snake_bout), T_1_5, "snake bout call_duration 1.5");
-assert_eq(CallBout_interval(snake_bout), f64_from(0), "snake bout interval 0.0 (no gap)");
+assert_eq(CallBout_interval(snake_bout), pr_from(0), "snake bout interval 0.0 (no gap)");
 assert_eq(CallBout_intent(snake_bout), PRANI_INTENT_THREAT, "snake bout threat");
 
 # ================================================================
@@ -224,7 +255,7 @@ var croc_bout = species_bout_template(PRANI_SP_CROCODILIAN);
 assert_eq(CallBout_vocalization(croc_bout), PRANI_VOC_RUMBLE, "crocodilian bout rumbles");
 assert_eq(CallBout_count(croc_bout), 3, "crocodilian bout count 3");
 assert_eq(CallBout_call_duration(croc_bout), T_2_5, "crocodilian bout call_duration 2.5");
-assert_eq(CallBout_interval(croc_bout), f64_from(2), "crocodilian bout interval 2.0");
+assert_eq(CallBout_interval(croc_bout), pr_from(2), "crocodilian bout interval 2.0");
 assert_eq(CallBout_intent(croc_bout), PRANI_INTENT_TERRITORIAL, "crocodilian bout territorial");
 
 var cricket_bout = species_bout_template(PRANI_SP_CRICKET);
@@ -237,15 +268,15 @@ assert_eq(CallBout_intent(cricket_bout), PRANI_INTENT_MATING, "cricket bout mati
 var bee_bout = species_bout_template(PRANI_SP_BEE);
 assert_eq(CallBout_vocalization(bee_bout), PRANI_VOC_BUZZ, "bee bout buzzes");
 assert_eq(CallBout_count(bee_bout), 1, "bee bout count 1 (continuous)");
-assert_eq(CallBout_call_duration(bee_bout), f64_from(2), "bee bout call_duration 2.0");
-assert_eq(CallBout_interval(bee_bout), f64_from(0), "bee bout interval 0.0 (no gap)");
+assert_eq(CallBout_call_duration(bee_bout), pr_from(2), "bee bout call_duration 2.0");
+assert_eq(CallBout_interval(bee_bout), pr_from(0), "bee bout interval 0.0 (no gap)");
 assert_eq(CallBout_intent(bee_bout), PRANI_INTENT_IDLE, "bee bout idle");
 
 var dragon_bout = species_bout_template(PRANI_SP_DRAGON);
 assert_eq(CallBout_vocalization(dragon_bout), PRANI_VOC_ROAR, "dragon bout roars");
 assert_eq(CallBout_count(dragon_bout), 2, "dragon bout count 2");
-assert_eq(CallBout_call_duration(dragon_bout), f64_from(3), "dragon bout call_duration 3.0");
-assert_eq(CallBout_interval(dragon_bout), f64_from(2), "dragon bout interval 2.0");
+assert_eq(CallBout_call_duration(dragon_bout), pr_from(3), "dragon bout call_duration 3.0");
+assert_eq(CallBout_interval(dragon_bout), pr_from(2), "dragon bout interval 2.0");
 assert_eq(CallBout_intent(dragon_bout), PRANI_INTENT_THREAT, "dragon bout threat");
 
 # Fantasy is the fallthrough arm of species_bout_template -- assert it explicitly
@@ -253,8 +284,8 @@ assert_eq(CallBout_intent(dragon_bout), PRANI_INTENT_THREAT, "dragon bout threat
 var fantasy_bout = species_bout_template(PRANI_SP_FANTASY);
 assert_eq(CallBout_vocalization(fantasy_bout), PRANI_VOC_GROWL, "fantasy bout growls");
 assert_eq(CallBout_count(fantasy_bout), 3, "fantasy bout count 3");
-assert_eq(CallBout_call_duration(fantasy_bout), f64_from(1), "fantasy bout call_duration 1.0");
-assert_eq(CallBout_interval(fantasy_bout), f64_from(1), "fantasy bout interval 1.0");
+assert_eq(CallBout_call_duration(fantasy_bout), pr_from(1), "fantasy bout call_duration 1.0");
+assert_eq(CallBout_interval(fantasy_bout), pr_from(1), "fantasy bout interval 1.0");
 assert_eq(CallBout_intent(fantasy_bout), PRANI_INTENT_IDLE, "fantasy bout idle");
 
 # ================================================================
@@ -316,7 +347,7 @@ assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
 test_group("SpeciesParams serde roundtrip -- one species per apparatus");
 var rt_bird = t_sp_roundtrip(PRANI_SP_SONGBIRD);
 assert_eq(SpeciesParams_apparatus(rt_bird), PRANI_APP_SYRINGEAL, "songbird apparatus roundtrips (1 syringeal)");
-assert_eq(SpeciesParams_f0_default(rt_bird), f64_from(3000), "songbird f0_default roundtrips (3000)");
+assert_eq(SpeciesParams_f0_default(rt_bird), pr_from(3000), "songbird f0_default roundtrips (3000)");
 assert_eq(SpeciesParams_resonance_seed(rt_bird), PR_SEED_SONGBIRD, "songbird resonance_seed roundtrips");
 assert_eq(SpeciesParams_apparatus(t_sp_roundtrip(PRANI_SP_CRICKET)), PRANI_APP_STRIDULATORY,
   "cricket apparatus roundtrips (2 stridulatory)");
@@ -376,9 +407,9 @@ assert_eq(prani_is_err(species_params_validate(ap_lo)), 1, "apparatus -1 rejecte
 test_group("2.0.5 range guard -- f0 is finite, non-negative and ordered");
 var f0_w = species_params(PRANI_SP_WOLF);
 # MEASURED, 2026-08-31 -- the two facts the f0 guard rests on.
-assert_eq(prani_is_finite(f64_clamp(T_NAN, SpeciesParams_f0_min(f0_w), SpeciesParams_f0_max(f0_w))), 0,
+assert_eq(prani_is_finite(pr_clamp(T_NAN, SpeciesParams_f0_min(f0_w), SpeciesParams_f0_max(f0_w))), 0,
   "pin: NaN survives the species' own f0 clamp (F11)");
-assert_eq(f64_clamp(f64_from(300), f64_from(1200), f64_from(150)), f64_from(1200),
+assert_eq(pr_clamp(pr_from(300), pr_from(1200), pr_from(150)), pr_from(1200),
   "pin: f64_clamp with lo > hi silently returns LO (the oracle's f32::clamp panics)");
 assert_eq(prani_is_err(species_params_validate(species_params(PRANI_SP_SNAKE))), 0,
   "f0 0/0/0 accepted -- the snake ships it, and the oracle's zero-duration rule says 0 is data");
@@ -386,7 +417,7 @@ var f0_nan = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_f0_min(f0_nan, T_NAN);
 assert_eq(prani_is_err(species_params_validate(f0_nan)), 1, "NaN f0_min rejected");
 var f0_neg = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_f0_min(f0_neg, f64_neg(f64_from(1)));
+SpeciesParams_set_f0_min(f0_neg, pr_neg(pr_from(1)));
 assert_eq(prani_is_err(species_params_validate(f0_neg)), 1, "negative f0_min rejected");
 var f0_inf = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_f0_max(f0_inf, PRANI_POS_INF);
@@ -395,13 +426,13 @@ var f0_top = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_f0_max(f0_top, T_20000_0);
 assert_eq(prani_is_err(species_params_validate(f0_top)), 0, "f0_max 20000 accepted -- upper boundary");
 var f0_over = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_f0_max(f0_over, f64_from(20001));
+SpeciesParams_set_f0_max(f0_over, pr_from(20001));
 assert_eq(prani_is_err(species_params_validate(f0_over)), 1, "f0_max 20001 rejected");
 var f0_inv = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_f0_min(f0_inv, f64_from(1300));
+SpeciesParams_set_f0_min(f0_inv, pr_from(1300));
 assert_eq(prani_is_err(species_params_validate(f0_inv)), 1, "f0_min > f0_max rejected");
 var f0_def = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_f0_default(f0_def, f64_from(1300));
+SpeciesParams_set_f0_default(f0_def, pr_from(1300));
 assert_eq(prani_is_err(species_params_validate(f0_def)), 1, "f0_default above f0_max rejected");
 
 # ================================================================
@@ -412,7 +443,7 @@ var ts_zero = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_tract_scale(ts_zero, 0);
 assert_eq(prani_is_err(species_params_validate(ts_zero)), 1, "tract_scale 0.0 rejected");
 var ts_neg = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_tract_scale(ts_neg, f64_neg(T_1_0));
+SpeciesParams_set_tract_scale(ts_neg, pr_neg(T_1_0));
 assert_eq(prani_is_err(species_params_validate(ts_neg)), 1, "negative tract_scale rejected");
 var ts_inf = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_tract_scale(ts_inf, PRANI_POS_INF);
@@ -421,7 +452,7 @@ var ts_top = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_tract_scale(ts_top, T_100_0);
 assert_eq(prani_is_err(species_params_validate(ts_top)), 0, "tract_scale 100.0 accepted -- upper boundary");
 var ts_over = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_tract_scale(ts_over, f64_from(101));
+SpeciesParams_set_tract_scale(ts_over, pr_from(101));
 assert_eq(prani_is_err(species_params_validate(ts_over)), 1, "tract_scale 101.0 rejected");
 
 # ================================================================
@@ -435,7 +466,7 @@ var fm_nan = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_formant1(fm_nan, T_NAN);
 assert_eq(prani_is_err(species_params_validate(fm_nan)), 1, "NaN formant1 rejected");
 var fm_over = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_formant2(fm_over, f64_from(20001));
+SpeciesParams_set_formant2(fm_over, pr_from(20001));
 assert_eq(prani_is_err(species_params_validate(fm_over)), 1, "formant2 20001 Hz rejected");
 assert_eq(prani_is_err(species_params_validate(species_params(PRANI_SP_CRICKET))), 0,
   "cricket F3 13500 Hz accepted -- the widest formant prani ships");
@@ -443,7 +474,7 @@ var bw_zero = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_bandwidth0(bw_zero, 0);
 assert_eq(prani_is_err(species_params_validate(bw_zero)), 1, "bandwidth0 0 Hz rejected (infinite-Q pole)");
 var bw_neg = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_bandwidth1(bw_neg, f64_neg(f64_from(10)));
+SpeciesParams_set_bandwidth1(bw_neg, pr_neg(pr_from(10)));
 assert_eq(prani_is_err(species_params_validate(bw_neg)), 1, "negative bandwidth1 rejected");
 var bw_nan = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_bandwidth2(bw_nan, T_NAN);
@@ -459,10 +490,10 @@ var br_one = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_breathiness(br_one, T_1_0);
 assert_eq(prani_is_err(species_params_validate(br_one)), 0, "breathiness 1.0 accepted -- the snake ships it");
 var br_over = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_breathiness(br_over, f64_from(2));
+SpeciesParams_set_breathiness(br_over, pr_from(2));
 assert_eq(prani_is_err(species_params_validate(br_over)), 1, "breathiness 2.0 rejected");
 var br_neg = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_breathiness(br_neg, f64_neg(T_1_0));
+SpeciesParams_set_breathiness(br_neg, pr_neg(T_1_0));
 assert_eq(prani_is_err(species_params_validate(br_neg)), 1, "negative breathiness rejected");
 var br_nan = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_breathiness(br_nan, T_NAN);
@@ -521,7 +552,7 @@ var nd_nan = species_params(PRANI_SP_WOLF);
 SpeciesParams_set_tract_scale(nd_nan, T_NAN);
 assert_eq(prani_is_err(t_sp_via_node(nd_nan)), 1, "a document with a NaN tract_scale -> error");
 var nd_inv = species_params(PRANI_SP_WOLF);
-SpeciesParams_set_f0_min(nd_inv, f64_from(1300));
+SpeciesParams_set_f0_min(nd_inv, pr_from(1300));
 assert_eq(prani_is_err(t_sp_via_node(nd_inv)), 1, "a document with f0_min > f0_max -> error");
 # from_node's failure is a negative code, so a caller that forwards it into
 # species_params_validate must not dereference it. Pinning that keeps the

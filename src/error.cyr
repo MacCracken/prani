@@ -11,15 +11,16 @@
 # the prani distlib coexists with svara + naad bundles in one flat namespace
 # (svara exports svara_*, naad exports validate_*/flush_denormal/ERR_NONE).
 #
-# FLOATS: prani's Rust was f32; the Cyrius port is f64 throughout (svara/naad/
-# hisab are f64-only, widening is forced and improves precision). PRANI_EPSILON
-# preserves the f32::EPSILON (2^-23) tolerance the Rust tests used, promoted to
-# f64. Test tolerances loosened vs the f32 oracle where bit-exactness isn't
-# meaningful.
+# FLOATS: a real is the build's float, f64 or f32 (ADR-0010; src/real.cyr). The
+# constants below are pairs, one per format. PRANI_EPSILON is f32::EPSILON (2^-23),
+# the tolerance the Rust tests used, in the build's format.
 
 # ================================================================
 # Error codes (was `enum PraniError`). One per Rust variant, in order.
 # ================================================================
+
+# prani:real-source
+#ifdef PRANI_F32
 var PRANI_ERR_NONE                 = 0;
 var PRANI_ERR_INVALID_TRACT        = (0 - 1);   # vocal tract parameter out of range
 var PRANI_ERR_INVALID_VOCALIZATION = (0 - 2);   # vocalization parameter invalid
@@ -35,9 +36,15 @@ var PRANI_ERR_ALLOC                = (0 - 6);   # an allocation prani made was r
 # Shared f64 tolerances / sentinels (IEEE-754 bit patterns). Exported for
 # consumers (tract clamps, tests). PRANI_EPSILON = f32::EPSILON promoted.
 # ================================================================
+#ifdef PRANI_F32
+var PRANI_EPSILON = 0x34000000;           # f32::EPSILON = 2^-23 ~ 1.192e-7
+var PRANI_POS_INF = 0x7F800000;           # +inf
+var PRANI_NEG_INF = 0xFF800000;           # -inf
+#else
 var PRANI_EPSILON = 0x3E80000000000000;   # f32::EPSILON = 2^-23 ~ 1.192e-7
 var PRANI_POS_INF = 0x7FF0000000000000;   # +inf
 var PRANI_NEG_INF = 0xFFF0000000000000;   # -inf
+#endif
 
 # 1 if `code` is an error (negative), 0 otherwise.
 #must_use
@@ -168,7 +175,7 @@ fn prani_from_svara(svara_code) {
 # compare is false). Mirrors Rust `f32::is_finite`.
 #must_use
 fn prani_is_finite(x) {
-    return f64_lt(f64_abs(x), PRANI_POS_INF);
+    return pr_lt(pr_abs(x), PRANI_POS_INF);
 }
 
 # ================================================================
@@ -230,7 +237,7 @@ fn prani_json_int_ok(node, key) {
 # 2.0.5 decided to accept, but passes NaN through every clamp unchanged.
 #must_use
 fn prani_is_nan(x) {
-    if (f64_le(x, x) == 1) { return 0; }
+    if (pr_le(x, x)) { return 0; }
     return 1;
 }
 
@@ -253,8 +260,8 @@ fn prani_finite3(a, b, c) {
 #must_use
 fn prani_in_range(x, lo, hi) {
     if (prani_is_finite(x) == 0) { return 0; }
-    if (f64_ge(x, lo) == 0) { return 0; }
-    return f64_le(x, hi);
+    if (pr_ge(x, lo) == 0) { return 0; }
+    return pr_le(x, hi);
 }
 
 # 1 iff x is finite and strictly greater than 0. The common case for a
@@ -262,7 +269,7 @@ fn prani_in_range(x, lo, hi) {
 #must_use
 fn prani_is_positive(x) {
     if (prani_is_finite(x) == 0) { return 0; }
-    return f64_gt(x, 0);
+    return pr_gt(x, 0);
 }
 
 # 1 iff x is finite and >= 0 (a duration of exactly 0 is legal -- the oracle's
@@ -270,12 +277,16 @@ fn prani_is_positive(x) {
 #must_use
 fn prani_is_non_negative(x) {
     if (prani_is_finite(x) == 0) { return 0; }
-    return f64_ge(x, 0);
+    return pr_ge(x, 0);
 }
 
 # 2^53 == 9007199254740992: the largest sample count an f64 represents exactly.
 # At 44.1 kHz that is ~6470 years of audio.
+#ifdef PRANI_F32
+var PRANI_MAX_SAMPLE_COUNT = 0x5A000000;
+#else
 var PRANI_MAX_SAMPLE_COUNT = 0x4340000000000000;
+#endif
 
 # 1 iff `raw`, a sample count still in f64, may be cast with f64_to: finite and
 # within [0, PRANI_MAX_SAMPLE_COUNT]. Call it BEFORE the cast -- after it, NaN is
@@ -301,7 +312,7 @@ fn prani_sample_count_ok(raw) {
 # ends the process, which is why this check comes first.
 #must_use
 fn prani_buffer_count_ok(raw) {
-    return prani_in_range(raw, 0, f64_from(VEC_CAP_MAX));
+    return prani_in_range(raw, 0, pr_from(VEC_CAP_MAX));
 }
 
 # prani_buffer_count_ok for a count that is already an integer.
@@ -311,3 +322,6 @@ fn prani_buffer_len_ok(n) {
     if (n > VEC_CAP_MAX) { return 0; }
     return 1;
 }
+
+# prani:real-source-end
+#endif

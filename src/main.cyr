@@ -28,7 +28,7 @@ fn main() {
         println("prani: voice init failed");
         return 1;
     }
-    var samples = crvoice_vocalize(voice, PRANI_VOC_HOWL, f64_from(8000), 0x3FA999999999999A);   # 0.05 s
+    var samples = crvoice_vocalize(voice, PRANI_VOC_HOWL, pr_from(8000), pr_of64(0x3FA999999999999A));   # 0.05 s
     if (prani_is_err(samples) == 1) {
         println("prani: vocalize failed");
         return 1;

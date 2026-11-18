@@ -8,8 +8,8 @@
 # (PRANI_VOC_* / PRANI_INTENT_* consts) + stdlib alloc/math. This file has no
 # `include` lines.
 #
-# f32 -> f64 throughout. Non-integer literals -> module-top hex constants
-# (IEEE-754 bit patterns, decimals in comments). Zone enums (ValenceZone,
+# A real is the build's float, f64 or f32 (ADR-0010). Non-integer literals ->
+# module-top constant pairs (decimals in comments). Zone enums (ValenceZone,
 # ArousalZone) were private Rust enums -> local integer var consts. serde
 # RESTORED on PrEmotion + PrEmotionOut via #derive(Serialize) (i64 bit-pattern
 # fields, lossless roundtrip). Display tests dropped (no Display in Cyrius).
@@ -17,6 +17,27 @@
 # ================================================================
 # Float constants (IEEE-754 hex bit patterns; decimals in comments).
 # ================================================================
+# prani:real-source
+#ifdef PRANI_F32
+#ifdef PRANI_F32
+
+var PRE_NEG_1_0  = 0xBF800000;           # -1.0  (valence clamp lo)
+var PRE_1_0      = 0x3F800000;           #  1.0  (valence/arousal clamp hi; pitch base)
+var PRE_0_0      = 0x00000000;           #  0.0  (arousal clamp lo; neutral valence; no breath)
+var PRE_0_95     = 0x3F733333;           #  0.95 (smoothing clamp hi)
+var PRE_0_2      = 0x3E4CCCCD;           #  0.2  (default arousal; effort base; breath lo thresh)
+var PRE_0_1      = 0x3DCCCCCD;           #  0.1  (default smoothing)
+var PRE_0_7      = 0x3F333333;           #  0.7  (arousal->effort gain)
+var PRE_0_15     = 0x3E19999A;           #  0.15 (valence->pitch gain)
+var PRE_0_8      = 0x3F4CCCCD;           #  0.8  (breath hi thresh)
+var PRE_0_75     = 0x3F400000;           #  0.75 (breath hi gain)
+var PRE_0_5      = 0x3F000000;           #  0.5  (breath lo gain; zone bound +/-0.5)
+var PRE_0_33     = 0x3EA8F5C3;           #  0.33 (arousal Low<->Mid bound)
+var PRE_0_66     = 0x3F28F5C3;           #  0.66 (arousal Mid<->High bound)
+var PRE_NEG_0_2  = 0xBE4CCCCD;           # -0.2  (valence Negative<->Neutral bound)
+var PRE_NEG_0_5  = 0xBF000000;           # -0.5  (screech vs bark bound)
+var PRE_NEG_0_7  = 0xBF333333;           # -0.7  (distress vs alarm bound)
+#else
 var PRE_NEG_1_0  = 0xbff0000000000000;   # -1.0  (valence clamp lo)
 var PRE_1_0      = 0x3ff0000000000000;   #  1.0  (valence/arousal clamp hi; pitch base)
 var PRE_0_0      = 0x0000000000000000;   #  0.0  (arousal clamp lo; neutral valence; no breath)
@@ -33,6 +54,7 @@ var PRE_0_66     = 0x3fe51eb851eb851f;   #  0.66 (arousal Mid<->High bound)
 var PRE_NEG_0_2  = 0xbfc999999999999a;   # -0.2  (valence Negative<->Neutral bound)
 var PRE_NEG_0_5  = 0xbfe0000000000000;   # -0.5  (screech vs bark bound)
 var PRE_NEG_0_7  = 0xbfe6666666666666;   # -0.7  (distress vs alarm bound)
+#endif
 
 # ================================================================
 # ValenceZone / ArousalZone -- private Rust enums used only inside the
@@ -58,6 +80,58 @@ var PRE_AZ_HIGH = 2;
 # Typing them f64 would use the derive's 6-decimal float writer (lossy). Auto-
 # generates PrEmotion_to_json / _from_json_str, restoring the Rust
 # `#[derive(Serialize, Deserialize)]` on EmotionState.
+#ifdef PRANI_F32
+#derive(accessors)
+struct PrEmotion {
+    valence: i64;
+    arousal: i64;
+    smoothing: i64;
+}
+
+# Pr64PrEmotion -- PrEmotion as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of PrEmotion's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64PrEmotion {
+    valence: i64;
+    arousal: i64;
+    smoothing: i64;
+}
+
+# PrEmotion_to_json(self, sb) -- the f64 build's document for this PrEmotion: each real widened,
+# which is exact (ADR-0010).
+fn PrEmotion_to_json(self, sb) {
+    var w[24];
+    Pr64PrEmotion_set_valence(&w, pr_to64(PrEmotion_valence(self)));
+    Pr64PrEmotion_set_arousal(&w, pr_to64(PrEmotion_arousal(self)));
+    Pr64PrEmotion_set_smoothing(&w, pr_to64(PrEmotion_smoothing(self)));
+    return Pr64PrEmotion_to_json(&w, sb);
+}
+
+# pr64_pr_emotion_narrow(w) -- a new PrEmotion from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_pr_emotion_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(PrEmotion));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    PrEmotion_set_valence(self, pr_of64(Pr64PrEmotion_valence(w)));
+    PrEmotion_set_arousal(self, pr_of64(Pr64PrEmotion_arousal(w)));
+    PrEmotion_set_smoothing(self, pr_of64(Pr64PrEmotion_smoothing(w)));
+    return self;
+}
+
+# PrEmotion_from_json_str(json) -- PrEmotion from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn PrEmotion_from_json_str(json) {
+    return pr64_pr_emotion_narrow(Pr64PrEmotion_from_json_str(json));
+}
+
+# PrEmotion_from_json(pairs) -- the pairs form, likewise.
+fn PrEmotion_from_json(pairs) {
+    return pr64_pr_emotion_narrow(Pr64PrEmotion_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct PrEmotion {
@@ -65,6 +139,7 @@ struct PrEmotion {
     arousal: i64;
     smoothing: i64;
 }
+#endif
 
 # new() -- neutral point (idle, calm): valence 0.0, arousal 0.2, smoothing 0.1.
 # Also serves as Default (impl Default -> Self::new()).
@@ -87,8 +162,8 @@ fn emotion_with_values(valence, arousal) {
     if (prani_is_nan(arousal) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var self = prani_alloc(sizeof(PrEmotion));
     if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
-    PrEmotion_set_valence(self, f64_clamp(valence, PRE_NEG_1_0, PRE_1_0));
-    PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
+    PrEmotion_set_valence(self, pr_clamp(valence, PRE_NEG_1_0, PRE_1_0));
+    PrEmotion_set_arousal(self, pr_clamp(arousal, PRE_0_0, PRE_1_0));
     PrEmotion_set_smoothing(self, PRE_0_1);
     return self;
 }
@@ -100,7 +175,7 @@ fn emotion_with_values(valence, arousal) {
 fn emotion_with_smoothing(self, smoothing) {
     if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_nan(smoothing) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }   # NaN passes the clamp (2.2.0)
-    PrEmotion_set_smoothing(self, f64_clamp(smoothing, PRE_0_0, PRE_0_95));
+    PrEmotion_set_smoothing(self, pr_clamp(smoothing, PRE_0_0, PRE_0_95));
     return self;
 }
 
@@ -123,19 +198,19 @@ fn emotion_arousal(self) {
 #   valence = valence*s + tv*(1-s);  arousal = arousal*s + ta*(1-s)
 fn emotion_update(self, target_valence, target_arousal) {
     if (self <= 0) { return 0; }   # ADR-0008
-    var tv = f64_clamp(target_valence, PRE_NEG_1_0, PRE_1_0);
-    var ta = f64_clamp(target_arousal, PRE_0_0, PRE_1_0);
+    var tv = pr_clamp(target_valence, PRE_NEG_1_0, PRE_1_0);
+    var ta = pr_clamp(target_arousal, PRE_0_0, PRE_1_0);
     var s = PrEmotion_smoothing(self);
-    var one_minus_s = f64_sub(PRE_1_0, s);
-    PrEmotion_set_valence(self, f64_add(f64_mul(PrEmotion_valence(self), s), f64_mul(tv, one_minus_s)));
-    PrEmotion_set_arousal(self, f64_add(f64_mul(PrEmotion_arousal(self), s), f64_mul(ta, one_minus_s)));
+    var one_minus_s = pr_sub(PRE_1_0, s);
+    PrEmotion_set_valence(self, pr_add(pr_mul(PrEmotion_valence(self), s), pr_mul(tv, one_minus_s)));
+    PrEmotion_set_arousal(self, pr_add(pr_mul(PrEmotion_arousal(self), s), pr_mul(ta, one_minus_s)));
 }
 
 # set(self, valence, arousal) -- direct (no smoothing), clamped.
 fn emotion_set(self, valence, arousal) {
     if (self <= 0) { return 0; }   # ADR-0008
-    PrEmotion_set_valence(self, f64_clamp(valence, PRE_NEG_1_0, PRE_1_0));
-    PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
+    PrEmotion_set_valence(self, pr_clamp(valence, PRE_NEG_1_0, PRE_1_0));
+    PrEmotion_set_arousal(self, pr_clamp(arousal, PRE_0_0, PRE_1_0));
 }
 
 # ================================================================
@@ -234,8 +309,8 @@ fn emotion_state_in_range(self) {
 #must_use
 fn emotion_valence_zone_unchecked(self) {
     var v = PrEmotion_valence(self);
-    if (f64_lt(v, PRE_NEG_0_2)) { return PRE_VZ_NEGATIVE; }
-    if (f64_gt(v, PRE_0_2))     { return PRE_VZ_POSITIVE; }
+    if (pr_lt(v, PRE_NEG_0_2)) { return PRE_VZ_NEGATIVE; }
+    if (pr_gt(v, PRE_0_2))     { return PRE_VZ_POSITIVE; }
     return PRE_VZ_NEUTRAL;
 }
 
@@ -257,8 +332,8 @@ fn emotion_valence_zone(self) {
 #must_use
 fn emotion_arousal_zone_unchecked(self) {
     var a = PrEmotion_arousal(self);
-    if (f64_lt(a, PRE_0_33)) { return PRE_AZ_LOW; }
-    if (f64_gt(a, PRE_0_66)) { return PRE_AZ_HIGH; }
+    if (pr_lt(a, PRE_0_33)) { return PRE_AZ_LOW; }
+    if (pr_gt(a, PRE_0_66)) { return PRE_AZ_HIGH; }
     return PRE_AZ_MID;
 }
 
@@ -286,7 +361,7 @@ fn emotion_select_vocalization_unchecked(self) {
     # High arousal, negative valence -> alarm/threat sounds
     if (vz == PRE_VZ_NEGATIVE) {
         if (az == PRE_AZ_HIGH) {
-            if (f64_lt(v, PRE_NEG_0_5)) { return PRANI_VOC_SCREECH; }
+            if (pr_lt(v, PRE_NEG_0_5)) { return PRANI_VOC_SCREECH; }
             return PRANI_VOC_BARK;
         }
         # Low arousal, negative -> sullen; Mid arousal, negative -> threat
@@ -295,7 +370,7 @@ fn emotion_select_vocalization_unchecked(self) {
     if (vz == PRE_VZ_POSITIVE) {
         # High arousal, positive valence -> excited sounds
         if (az == PRE_AZ_HIGH) {
-            if (f64_gt(v, PRE_0_5)) { return PRANI_VOC_TRILL; }
+            if (pr_gt(v, PRE_0_5)) { return PRANI_VOC_TRILL; }
             return PRANI_VOC_CHIRP;
         }
         # Low arousal, positive -> content
@@ -333,7 +408,7 @@ fn emotion_select_intent_unchecked(self) {
 
     if (vz == PRE_VZ_NEGATIVE) {
         if (az == PRE_AZ_HIGH) {
-            if (f64_lt(v, PRE_NEG_0_7)) { return PRANI_INTENT_DISTRESS; }
+            if (pr_lt(v, PRE_NEG_0_7)) { return PRANI_INTENT_DISTRESS; }
             return PRANI_INTENT_ALARM;
         }
         # Low arousal, negative -> Threat; Mid arousal, negative -> Threat
@@ -374,6 +449,66 @@ fn emotion_select_intent(self) {
 # patterns, so they serialize as those bits and roundtrip exactly. Auto-generates PrEmotionOut_to_json /
 # PrEmotionOut_from_json_str, restoring the Rust `#[derive(Serialize,
 # Deserialize)]` on EmotionOutput.
+#ifdef PRANI_F32
+#derive(accessors)
+struct PrEmotionOut {
+    vocalization: i64;
+    intent: i64;
+    vocal_effort: i64;
+    pitch_scale: i64;
+    breathiness_delta: i64;
+}
+
+# Pr64PrEmotionOut -- PrEmotionOut as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of PrEmotionOut's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64PrEmotionOut {
+    vocalization: i64;
+    intent: i64;
+    vocal_effort: i64;
+    pitch_scale: i64;
+    breathiness_delta: i64;
+}
+
+# PrEmotionOut_to_json(self, sb) -- the f64 build's document for this PrEmotionOut: each real widened,
+# which is exact (ADR-0010).
+fn PrEmotionOut_to_json(self, sb) {
+    var w[40];
+    Pr64PrEmotionOut_set_vocalization(&w, PrEmotionOut_vocalization(self));
+    Pr64PrEmotionOut_set_intent(&w, PrEmotionOut_intent(self));
+    Pr64PrEmotionOut_set_vocal_effort(&w, pr_to64(PrEmotionOut_vocal_effort(self)));
+    Pr64PrEmotionOut_set_pitch_scale(&w, pr_to64(PrEmotionOut_pitch_scale(self)));
+    Pr64PrEmotionOut_set_breathiness_delta(&w, pr_to64(PrEmotionOut_breathiness_delta(self)));
+    return Pr64PrEmotionOut_to_json(&w, sb);
+}
+
+# pr64_pr_emotion_out_narrow(w) -- a new PrEmotionOut from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_pr_emotion_out_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(PrEmotionOut));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    PrEmotionOut_set_vocalization(self, Pr64PrEmotionOut_vocalization(w));
+    PrEmotionOut_set_intent(self, Pr64PrEmotionOut_intent(w));
+    PrEmotionOut_set_vocal_effort(self, pr_of64(Pr64PrEmotionOut_vocal_effort(w)));
+    PrEmotionOut_set_pitch_scale(self, pr_of64(Pr64PrEmotionOut_pitch_scale(w)));
+    PrEmotionOut_set_breathiness_delta(self, pr_of64(Pr64PrEmotionOut_breathiness_delta(w)));
+    return self;
+}
+
+# PrEmotionOut_from_json_str(json) -- PrEmotionOut from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn PrEmotionOut_from_json_str(json) {
+    return pr64_pr_emotion_out_narrow(Pr64PrEmotionOut_from_json_str(json));
+}
+
+# PrEmotionOut_from_json(pairs) -- the pairs form, likewise.
+fn PrEmotionOut_from_json(pairs) {
+    return pr64_pr_emotion_out_narrow(Pr64PrEmotionOut_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct PrEmotionOut {
@@ -383,6 +518,7 @@ struct PrEmotionOut {
     pitch_scale: i64;
     breathiness_delta: i64;
 }
+#endif
 
 # evaluate(self) -- core mapping from the 2D emotion space to concrete
 # vocalization choices and parameter values. Returns a fresh PrEmotionOut, or
@@ -449,22 +585,25 @@ fn emotion_evaluate_write(self, out) {
     var valence = PrEmotion_valence(self);
 
     # Vocal effort driven primarily by arousal: 0.2 + arousal*0.7
-    PrEmotionOut_set_vocal_effort(out, f64_add(PRE_0_2, f64_mul(arousal, PRE_0_7)));
+    PrEmotionOut_set_vocal_effort(out, pr_add(PRE_0_2, pr_mul(arousal, PRE_0_7)));
 
     # Pitch scale from valence: 1.0 + valence*0.15
-    PrEmotionOut_set_pitch_scale(out, f64_add(PRE_1_0, f64_mul(valence, PRE_0_15)));
+    PrEmotionOut_set_pitch_scale(out, pr_add(PRE_1_0, pr_mul(valence, PRE_0_15)));
 
     # Breathiness rises at arousal extremes.
     var breath = PRE_0_0;
-    if (f64_gt(arousal, PRE_0_8)) {
+    if (pr_gt(arousal, PRE_0_8)) {
         # up to +0.15 at max arousal: (arousal - 0.8) * 0.75
-        breath = f64_mul(f64_sub(arousal, PRE_0_8), PRE_0_75);
+        breath = pr_mul(pr_sub(arousal, PRE_0_8), PRE_0_75);
     } else {
-        if (f64_lt(arousal, PRE_0_2)) {
+        if (pr_lt(arousal, PRE_0_2)) {
             # up to +0.1 at min arousal: (0.2 - arousal) * 0.5
-            breath = f64_mul(f64_sub(PRE_0_2, arousal), PRE_0_5);
+            breath = pr_mul(pr_sub(PRE_0_2, arousal), PRE_0_5);
         }
     }
     PrEmotionOut_set_breathiness_delta(out, breath);
     return out;
 }
+
+# prani:real-source-end
+#endif

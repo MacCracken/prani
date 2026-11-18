@@ -58,6 +58,23 @@ it is reported as `PRANI_ERR_ALLOC` since 2.2.0
 ([ADR-0008](../adr/0008-a-refused-allocation-is-reported.md)); past it, the stdlib still
 ends the process, which is why the count is checked first.
 
+### In the f32 build (2.3.0)
+
+The table above holds in both float formats ([ADR-0010](../adr/0010-two-float-formats.md)):
+`pr_clamp` passes a NaN through and bounds an infinity, and `pr_to` saturates, exactly
+as `f64_clamp` and `f64_to` do (`tests/real.tcyr`). What differs is the range of the
+format itself:
+
+- **A finite f64 beyond f32's range is an infinity in the f32 build.** An f64 document
+  holding 1e300 reads as +inf and is refused as non-finite, where the f64 build ranges
+  it as a finite value. The guards are the same; the value they see is the format's.
+- **f32 holds every integer to 2^24 and then every other one.** A sample count past
+  2^24 (6.3 minutes at 44.1 kHz) is what f32 can represent, so a request at the edge of
+  a limit is the format's nearest count. The boundary tests state the next count past
+  each limit per format: 2^28 + 1 in f64, 2^28 + 32 in f32.
+- **The tiniest positive value is the format's.** 1e-300 is 0 in f32. The "a tiny rate
+  is accepted, not floored" control uses f32's smallest normal, 2^-126, there.
+
 ## Guards
 
 ### `src/dsp.cyr`

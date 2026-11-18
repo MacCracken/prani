@@ -46,6 +46,22 @@ var PRANI_INTENT_COUNT = 7;         # number of CallIntent variants
 # ================================================================
 # Intent modifier float constants (IEEE-754 hex; decimals in comments).
 # ================================================================
+#ifdef PRANI_F32
+var PR_F_0_0 = 0x00000000;           # 0.0
+var PR_F_0_2 = 0x3E4CCCCD;           # 0.2
+var PR_F_0_3 = 0x3E99999A;           # 0.3
+var PR_F_0_5 = 0x3F000000;           # 0.5
+var PR_F_0_7 = 0x3F333333;           # 0.7
+var PR_F_0_8 = 0x3F4CCCCD;           # 0.8
+var PR_F_0_9 = 0x3F666666;           # 0.9
+var PR_F_1_0 = 0x3F800000;           # 1.0
+var PR_F_1_1 = 0x3F8CCCCD;           # 1.1
+var PR_F_1_2 = 0x3F99999A;           # 1.2
+var PR_F_1_3 = 0x3FA66666;           # 1.3
+var PR_F_1_4 = 0x3FB33333;           # 1.4
+var PR_F_1_5 = 0x3FC00000;           # 1.5
+var PR_F_2_0 = 0x40000000;           # 2.0
+#else
 var PR_F_0_0 = 0x0000000000000000;   # 0.0
 var PR_F_0_2 = 0x3FC999999999999A;   # 0.2
 var PR_F_0_3 = 0x3FD3333333333333;   # 0.3
@@ -60,6 +76,7 @@ var PR_F_1_3 = 0x3FF4CCCCCCCCCCCD;   # 1.3
 var PR_F_1_4 = 0x3FF6666666666666;   # 1.4
 var PR_F_1_5 = 0x3FF8000000000000;   # 1.5
 var PR_F_2_0 = 0x4000000000000000;   # 2.0
+#endif
 
 # ================================================================
 # IntentModifiers -- prosodic modifiers applied to synthesis for an intent.
@@ -73,6 +90,62 @@ var PR_F_2_0 = 0x4000000000000000;   # 2.0
 # the derive's 6-decimal float writer, which is lossy). Auto-generates
 # IntentModifiers_to_json(self, sb) + IntentModifiers_from_json_str(json),
 # restoring the Rust `#[derive(Serialize, Deserialize)]` on IntentModifiers.
+#ifdef PRANI_F32
+#derive(accessors)
+struct IntentModifiers {
+    pitch_scale: i64;
+    amplitude_scale: i64;
+    duration_scale: i64;
+    urgency: i64;
+}
+
+# Pr64IntentModifiers -- IntentModifiers as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of IntentModifiers's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64IntentModifiers {
+    pitch_scale: i64;
+    amplitude_scale: i64;
+    duration_scale: i64;
+    urgency: i64;
+}
+
+# IntentModifiers_to_json(self, sb) -- the f64 build's document for this IntentModifiers: each real widened,
+# which is exact (ADR-0010).
+fn IntentModifiers_to_json(self, sb) {
+    var w[32];
+    Pr64IntentModifiers_set_pitch_scale(&w, pr_to64(IntentModifiers_pitch_scale(self)));
+    Pr64IntentModifiers_set_amplitude_scale(&w, pr_to64(IntentModifiers_amplitude_scale(self)));
+    Pr64IntentModifiers_set_duration_scale(&w, pr_to64(IntentModifiers_duration_scale(self)));
+    Pr64IntentModifiers_set_urgency(&w, pr_to64(IntentModifiers_urgency(self)));
+    return Pr64IntentModifiers_to_json(&w, sb);
+}
+
+# pr64_intent_modifiers_narrow(w) -- a new IntentModifiers from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_intent_modifiers_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(IntentModifiers));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    IntentModifiers_set_pitch_scale(self, pr_of64(Pr64IntentModifiers_pitch_scale(w)));
+    IntentModifiers_set_amplitude_scale(self, pr_of64(Pr64IntentModifiers_amplitude_scale(w)));
+    IntentModifiers_set_duration_scale(self, pr_of64(Pr64IntentModifiers_duration_scale(w)));
+    IntentModifiers_set_urgency(self, pr_of64(Pr64IntentModifiers_urgency(w)));
+    return self;
+}
+
+# IntentModifiers_from_json_str(json) -- IntentModifiers from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn IntentModifiers_from_json_str(json) {
+    return pr64_intent_modifiers_narrow(Pr64IntentModifiers_from_json_str(json));
+}
+
+# IntentModifiers_from_json(pairs) -- the pairs form, likewise.
+fn IntentModifiers_from_json(pairs) {
+    return pr64_intent_modifiers_narrow(Pr64IntentModifiers_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct IntentModifiers {
@@ -81,6 +154,7 @@ struct IntentModifiers {
     duration_scale: i64;
     urgency: i64;
 }
+#endif
 
 # intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urgency)
 # -- construct an IntentModifiers. Ports the Rust struct literal in

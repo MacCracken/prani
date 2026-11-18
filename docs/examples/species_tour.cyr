@@ -27,8 +27,13 @@ include "dist/prani.cyr"
 # f64_from(n), and everything else is written as its IEEE-754 bit pattern with
 # the decimal value in the comment.
 # ---------------------------------------------------------------------------
+#ifdef PRANI_F32
+var EX_DUR_0_25 = 0x3E800000;           # 0.25 s -- the per-apparatus calls
+var EX_DUR_0_1  = 0x3DCCCCCD;           # 0.10 s -- the 13-species sweep
+#else
 var EX_DUR_0_25 = 0x3fd0000000000000;   # 0.25 s -- the per-apparatus calls
 var EX_DUR_0_1  = 0x3fb999999999999a;   # 0.10 s -- the 13-species sweep
+#endif
 
 # ---------------------------------------------------------------------------
 # Output helpers. There is no printf here, so lines get assembled piece by
@@ -116,8 +121,8 @@ fn ex_peak(samples) {
     var i = 0;
     var n = vec_len(samples);
     while (i < n) {
-        var a = f64_abs(vec_get(samples, i));
-        if (f64_gt(a, peak) == 1) { peak = a; }
+        var a = pr_abs(vec_get(samples, i));
+        if (pr_gt(a, peak) == 1) { peak = a; }
         i = i + 1;
     }
     return peak;
@@ -135,8 +140,8 @@ fn ex_zero_crossings(samples) {
     while (i < n) {
         var a = vec_get(samples, i - 1);
         var b = vec_get(samples, i);
-        if ((f64_lt(a, 0) == 1) & (f64_ge(b, 0) == 1)) { count = count + 1; }
-        if ((f64_ge(a, 0) == 1) & (f64_lt(b, 0) == 1)) { count = count + 1; }
+        if ((pr_lt(a, 0) == 1) & (pr_ge(b, 0) == 1)) { count = count + 1; }
+        if ((pr_ge(a, 0) == 1) & (pr_lt(b, 0) == 1)) { count = count + 1; }
         i = i + 1;
     }
     return count;
@@ -169,15 +174,15 @@ fn ex_apparatus_block(sp, voc, note, sr, dur) {
     # f0 is the periodic source. A noise-only apparatus has none, and the table
     # says so honestly with 0 Hz rather than with a fake pitch.
     ex_label("f0 default");
-    fmt_float(SpeciesParams_f0_default(params), 1);
+    fmt_float(pr_to64(SpeciesParams_f0_default(params)), 1);
     ex_out(" Hz  (range ");
-    fmt_float(SpeciesParams_f0_min(params), 1); ex_out(" - ");
-    fmt_float(SpeciesParams_f0_max(params), 1); ex_out(" Hz)"); ex_nl();
+    fmt_float(pr_to64(SpeciesParams_f0_min(params)), 1); ex_out(" - ");
+    fmt_float(pr_to64(SpeciesParams_f0_max(params)), 1); ex_out(" Hz)"); ex_nl();
 
     # tract_scale is vocal-tract length, 1.0 = human male. It is what makes a
     # cricket's filter a different object from a crocodile's.
     ex_label("tract scale");
-    fmt_float(SpeciesParams_tract_scale(params), 2);
+    fmt_float(pr_to64(SpeciesParams_tract_scale(params)), 2);
     ex_out(" x human-male reference"); ex_nl();
 
     # 2.0.5 added range guards. species_params_validate is the cheap way to find
@@ -202,12 +207,12 @@ fn ex_apparatus_block(sp, voc, note, sr, dur) {
         return 1;
     }
     fmt_int(vec_len(samples));
-    ex_out(" samples @ "); fmt_float(sr, 1); ex_out(" Hz = ");
-    fmt_float(dur, 2); ex_out(" s"); ex_nl();
+    ex_out(" samples @ "); fmt_float(pr_to64(sr), 1); ex_out(" Hz = ");
+    fmt_float(pr_to64(dur), 2); ex_out(" s"); ex_nl();
 
-    ex_label("peak amplitude"); fmt_float(ex_peak(samples), 4); ex_nl();
+    ex_label("peak amplitude"); fmt_float(pr_to64(ex_peak(samples)), 4); ex_nl();
     ex_label("zero crossings");
-    fmt_float(f64_div(f64_from(ex_zero_crossings(samples)), dur), 1);
+    fmt_float(pr_to64(pr_div(pr_from(ex_zero_crossings(samples)), dur)), 1);
     ex_out(" /s"); ex_nl();
     return 0;
 }
@@ -270,7 +275,7 @@ fn ex_sweep_row(sp, sr, dur) {
         return 1;
     }
     ex_int_w(vec_len(samples), 7); ex_out("  ");
-    fmt_float(ex_peak(samples), 4);
+    fmt_float(pr_to64(ex_peak(samples)), 4);
     ex_nl();
     return 0;
 }
@@ -282,7 +287,7 @@ fn main() {
     # bandpass, and a filter centre at or above nyquist is refused -- so a rate
     # at or below 1200 Hz cannot build a tract and comes back as a negative code
     # instead of samples. Any real audio rate is clear of that edge.
-    var sr = f64_from(44100);
+    var sr = pr_from(44100);
     var fails = 0;
 
     println("prani -- a tour of the five vocal apparatus");

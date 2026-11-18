@@ -37,9 +37,15 @@ include "dist/prani.cyr"
 # in the comment); whole numbers come from f64_from(n).
 # EX_SR is 44100.0 Hz. A rate at or below svara's ~1200 Hz floor is refused by
 # stream_new itself (since 2.2.1, which builds the tract at construction).
+#ifdef PRANI_F32
+var EX_SR      = 0x472C4400;
+var EX_DUR     = 0x3D4CCCCD;           # 0.05 s -> 2205 samples at 44100 Hz
+var EX_DUR_NEG = 0xBF800000;           # -1.0 s -- a host bug, used as a guard demo
+#else
 var EX_SR      = 0x40e5888000000000;
 var EX_DUR     = 0x3fa999999999999a;   # 0.05 s -> 2205 samples at 44100 Hz
 var EX_DUR_NEG = 0xbff0000000000000;   # -1.0 s -- a host bug, used as a guard demo
+#endif
 # EX_BLOCK is the host's callback block size. A real host is handed this number;
 # it is not prani's to choose.
 var EX_BLOCK   = 512;
@@ -74,8 +80,8 @@ fn ex_peak_abs(v) {
     var i = 0;
     var n = vec_len(v);
     while (i < n) {
-        var a = f64_abs(vec_get(v, i));
-        if (f64_gt(a, p) == 1) { p = a; }
+        var a = pr_abs(vec_get(v, i));
+        if (pr_gt(a, p) == 1) { p = a; }
         i = i + 1;
     }
     return p;
@@ -207,7 +213,7 @@ fn main() {
     say("  accumulated "); fmt_int(total); line(" samples");
     if (finite == 1) { line("  every sample is finite"); }
     if (finite == 0) { line("  NOT ALL SAMPLES FINITE -- see the FAIL below"); }
-    say("  peak |sample| "); fmt_float(ex_peak_abs(acc), 6); nl();
+    say("  peak |sample| "); fmt_float(pr_to64(ex_peak_abs(acc)), 6); nl();
     expect_eq(fills, 5, "drained in 5 fills (4 x 512 + 157)");
     expect_eq(total, 2205, "drain total == total_samples");
     expect_eq(stream_is_finished(stream), 1, "stream finished after the drain");
@@ -228,7 +234,7 @@ fn main() {
     if (total == vec_len(batch)) {
         line("  MATCH -- draining a stream yields exactly the one-shot length");
     }
-    say("  peak |sample|    "); fmt_float(ex_peak_abs(batch), 6); line("  (one-shot)");
+    say("  peak |sample|    "); fmt_float(pr_to64(ex_peak_abs(batch)), 6); line("  (one-shot)");
     # The LENGTH is the contract the two share, and the only one. The one-shot
     # path runs a post chain the stream does not (subharmonics, biphonation,
     # nasal anti-formant, AM, envelope), so the two are not sample-for-sample
@@ -236,7 +242,7 @@ fn main() {
     say("  differing samples "); fmt_int(ex_count_diffs(acc, batch));
     say(" of "); fmt_int(total); line("  <- expected: different post chains");
     say("  The two peaks above are the practical consequence: the streamed peak is ");
-    fmt_float(f64_div(ex_peak_abs(acc), ex_peak_abs(batch)), 2); line("x");
+    fmt_float(pr_to64(pr_div(ex_peak_abs(acc), ex_peak_abs(batch))), 2); line("x");
     line("  the one-shot's, because the one-shot envelope and AM stages never run on");
     line("  it. A host swapping one path for the other has to re-gain, not just");
     line("  re-buffer.");
@@ -250,7 +256,7 @@ fn main() {
     # Where those bytes come from, measured rather than asserted: one svara glottal
     # source, built the way prani builds one for each block it renders.
     var g_before = alloc_used();
-    var gsrc = svara_glottal_new(f64_from(400), EX_SR);
+    var gsrc = svara_glottal_new(f64_from(400), pr_to64(EX_SR));   # svara is f64 in both formats
     var glottal = alloc_used() - g_before;
     if (svara_is_err(gsrc) == 1) {
         line("svara_glottal_new failed -- cannot attribute the drain's bytes");

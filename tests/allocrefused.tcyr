@@ -37,22 +37,37 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/spatial.cyr"
+include "src/f64/spatial.cyr"
 include "src/vocalization.cyr"
 include "src/fatigue.cyr"
+include "src/f64/fatigue.cyr"
 include "src/emotion.cyr"
+include "src/f64/emotion.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/preset.cyr"
+include "src/f64/preset.cyr"
 include "src/stream.cyr"
+include "src/f64/stream.cyr"
 include "src/ffi.cyr"
+include "tests/realt.cyr"
 
 var FI_OFF = 0;
 var FI_ONE = 1;
@@ -192,10 +207,15 @@ fn vecs_same(a, b) {
     return 1;
 }
 
-var SR8 = f64_from(8000);
+var SR8 = pr_from(8000);
+#ifdef PRANI_F32
+var D005 = 0x3D4CCCCD;            # 0.05 s
+var HALF = 0x3F000000;            # 0.5
+#else
 var D005 = 0x3FA999999999999A;    # 0.05 s
 var HALF = 0x3FE0000000000000;    # 0.5
-var F220 = f64_from(220);
+#endif
+var F220 = pr_from(220);
 
 # ---- the cases: each makes every allocation of one public path, from scratch ----
 
@@ -246,7 +266,7 @@ fn case_synth(sp) {
     if (prani_is_err(t) == 1) { return t; }
     var o = crtract_options_new(0, HALF);
     if (prani_is_err(o) == 1) { return o; }
-    return crtract_synthesize(t, f64_from(species_params_f0(sp)), 400, o);
+    return crtract_synthesize(t, pr_from(species_params_f0(sp)), 400, o);
 }
 # species_params_f0(sp) is below; these bind case_synth to one species each.
 fn case_synth_wolf() { return case_synth(PRANI_SP_WOLF); }
@@ -262,12 +282,12 @@ fn case_synth_bee() { return case_synth(PRANI_SP_BEE); }
 fn case_purr() {
     var t = crtract_new(species_params(PRANI_SP_CAT), SR8);
     if (prani_is_err(t) == 1) { return t; }
-    return crtract_synthesize_purr(t, 400, f64_from(27));
+    return crtract_synthesize_purr(t, 400, pr_from(27));
 }
 # species_params_f0(sp) -- the species' default f0 as an integer Hz, for case_synth.
 fn species_params_f0(sp) {
     var row[128];
-    return f64_to(SpeciesParams_f0_default(species_params_into(&row, sp)));
+    return pr_to(SpeciesParams_f0_default(species_params_into(&row, sp)));
 }
 # A voice, then one vocalization, from scratch: VOC_SP / VOC_V select it.
 var VOC_SP = 0;
@@ -304,7 +324,7 @@ fn case_chorus() {
     var b = crvoice_new(PRANI_SP_DOG);
     if (prani_is_err(b) == 1) { return b; }
     if (prani_vec_push(vs, b) < 0) { return PRANI_ERR_ALLOC; }
-    return sequence_synthesize_chorus(vs, PRANI_VOC_GROWL, PRANI_INTENT_SOCIAL, SR8, D005, 0x3F847AE147AE147B);
+    return sequence_synthesize_chorus(vs, PRANI_VOC_GROWL, PRANI_INTENT_SOCIAL, SR8, D005, pr_of64(0x3F847AE147AE147B));
 }
 # Every preset, then one built and rendered.
 fn case_presets() {
@@ -316,9 +336,9 @@ fn case_presets() {
 fn case_spatial() {
     var s = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, SR8, D005);
     if (prani_is_err(s) == 1) { return s; }
-    var a = spatial_apply_distance_attenuation(s, f64_from(20), F64_ONE, SR8);
+    var a = spatial_apply_distance_attenuation(s, pr_from(20), PR_ONE, SR8);
     if (prani_is_err(a) == 1) { return a; }
-    return spatial_apply_doppler_shift(a, f64_from(10), SR8);
+    return spatial_apply_doppler_shift(a, pr_from(10), SR8);
 }
 # The JSON documents the decoders read, written once, unarmed, below.
 var J_VOICE = 0;
@@ -426,10 +446,10 @@ assert_eq(vec_len(fz_v), 16, "and leaves the vec as it was");
 assert_eq(vec_get(fz_v, 15), 15, "control: with its contents intact");
 assert_eq(prani_vec_push(fz_v, 99), PRANI_ERR_NONE, "control: the next push, unrefused, grows it");
 ga_arm(FI_ONE, 0);
-var fz_raw = svara_glottal_new(F220, SR8);
+var fz_raw = svara_glottal_new(pr_to64(F220), pr_to64(SR8));
 var fz_svara = ga_disarm();
 fi_arm(FI_ONE, 0);
-var fz_raw2 = svara_glottal_new(F220, SR8);
+var fz_raw2 = svara_glottal_new(pr_to64(F220), pr_to64(SR8));
 assert_eq(fi_disarm(), 0, "svara's allocations do not pass through prani's allocator");
 assert_gt(fz_svara, 0, "control: while the stdlib's does see them");
 assert_eq(streq(prani_err_name(PRANI_ERR_ALLOC), "allocation refused"), 1, "the code has its name");
@@ -538,10 +558,11 @@ assert_eq(fi_past(&case_ffi, ffi_n), vec_len(FILL_BUF), "control: unrefused, the
 test_group("naad's refusal in crtract_new's bandpass is PRANI_ERR_ALLOC");
 var nb_params = species_params(PRANI_SP_SNAKE);
 ga_arm(FI_ONE, 0);
-var nb_tr = svara_tract_new(SR8);
+var nb_tr = svara_tract_new(pr_to64(SR8));
 var nb_svara = ga_disarm();
 ga_arm(FI_ONE, 0);
-var nb_f = filter_biquad_new(NAAD_FILTER_BANDPASS, SR8, SpeciesParams_formant0(nb_params), f64_from(2));
+var nb_f0 = pr_to64(SpeciesParams_formant0(nb_params));
+var nb_f = filter_biquad_new(NAAD_FILTER_BANDPASS, pr_to64(SR8), nb_f0, f64_from(2));
 var nb_naad = ga_disarm();
 assert_gt(nb_naad, 0, "control: naad's bandpass allocates");
 assert_gt(nb_svara, 0, "control: and svara's tract does, first");
@@ -572,13 +593,13 @@ test_group("naad's refusal in svara's glottal source is reported, not rendered")
 # svara_glottal_new: its source and rng (svara's own), then noise_new and
 # modulation_lfo_new (naad's), which svara 3.6.4+ reports as SVARA_ERR_COMPUTATION.
 ga_arm(FI_ONE, 0);
-var ng_g = svara_glottal_new(F220, SR8);
+var ng_g = svara_glottal_new(pr_to64(F220), pr_to64(SR8));
 var ng_all = ga_disarm();
 ga_arm(FI_ONE, 0);
 var ng_nz = noise_new(NOISE_WHITE, 42);
 var ng_noise = ga_disarm();
 ga_arm(FI_ONE, 0);
-var ng_lf = modulation_lfo_new(MODULATION_LFO_SINE, 0x3F50624DD2F1A9FC, SR8);
+var ng_lf = modulation_lfo_new(MODULATION_LFO_SINE, pr_of64(0x3F50624DD2F1A9FC), SR8);
 var ng_lfo = ga_disarm();
 var ng_own = ng_all - ng_noise - ng_lfo;
 assert_gt(ng_noise + ng_lfo, 0, "control: naad's two constructors allocate");

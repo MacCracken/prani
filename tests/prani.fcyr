@@ -27,21 +27,35 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/preset.cyr"
+include "src/f64/preset.cyr"
 
 var FZ_ROUNDS = 1500;
 var FZ_CAP = 4096;            # bytes per mutated input, NUL and strlen's slack included
+#ifdef PRANI_F32
+var FZ_SR = 0x45FA0000;           # 8000.0
+#else
 var FZ_SR = 0x40BF400000000000;   # 8000.0
+#endif
 var fz_rng = 0;
 var fz_buf = 0;
 var fz_tmp = 0;
@@ -110,10 +124,10 @@ fn fz_name(kind) {
 fn fz_render(kind, h) {
     var out = 0;
     if (kind == 0) {
-        out = crvoice_vocalize(h, PRANI_VOC_GROWL, FZ_SR, 0x3F60624DD2F1A9FC);   # 0.002 s
+        out = crvoice_vocalize(h, PRANI_VOC_GROWL, FZ_SR, pr_of64(0x3F60624DD2F1A9FC));   # 0.002 s
     }
     if (kind == 2) {
-        out = crtract_synthesize(h, f64_from(200), 64, crtract_options_default());
+        out = crtract_synthesize(h, pr_from(200), 64, crtract_options_default());
     }
     if (kind == 1) { out = preset_build(h); }
     if (out == 0) { return 1; }
@@ -210,8 +224,8 @@ fn main() {
     vec_push(seeds, fz_encode(1, preset_alpha_wolf()));
     vec_push(seeds, fz_encode(2, crtract_new(species_params(PRANI_SP_CROW), FZ_SR)));
     var els = vec_new();
-    vec_push(els, sequence_call_element_new(PRANI_VOC_GROWL, 0x3FB999999999999A, 0x3FA999999999999A));
-    vec_push(els, sequence_call_element_new(PRANI_VOC_BARK, 0x3FA999999999999A, 0));
+    vec_push(els, sequence_call_element_new(PRANI_VOC_GROWL, pr_of64(0x3FB999999999999A), pr_of64(0x3FA999999999999A)));
+    vec_push(els, sequence_call_element_new(PRANI_VOC_BARK, pr_of64(0x3FA999999999999A), 0));
     vec_push(seeds, fz_encode(3, sequence_call_phrase_new(els, PRANI_INTENT_THREAT)));
 
     # Control: every unmutated seed is accepted by its own decoder, so the rounds

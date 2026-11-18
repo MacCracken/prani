@@ -30,6 +30,7 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0007](0007-the-corrected-pulse-at-the-oracles-level.md) | svara's corrected pulse, at the oracle's level | Accepted |
 | [0008](0008-a-refused-allocation-is-reported.md) | A refused allocation is reported | Accepted |
 | [0009](0009-renders-do-not-depend-on-how-they-are-cut.md) | A render does not depend on how it is cut | Accepted |
+| [0010](0010-two-float-formats.md) | prani builds in either float format: f64, or f32 | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
@@ -64,3 +65,8 @@ whose retirement rule it keeps while adding a way to ask why a stream retired.
 ([`docs/audit/2026-11-17-audit.md`](../audit/2026-11-17-audit.md)). It is the first
 ADR to repair the oracle itself: six render defects that parity had carried over
 faithfully, five of them making the audio depend on where a render was cut.
+
+0010 is roadmap 2.3.0. It adds a second float format rather than replacing the first:
+the f64 build stays 2.2.1's arithmetic, bit for bit, and an f32 build is one define
+away. It also states the bar the f32 build is held to: accuracy against the f64 build,
+not the Rust's f32 bits, since the Rust defined what prani does and not its numbers.

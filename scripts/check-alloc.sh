@@ -58,8 +58,11 @@ hits() {
 fail=0
 # Every .cyr under src/, at any depth: src/ is flat today, and a module moved into
 # a subdirectory must not leave the gate by moving (audit 2026-11-17).
+# The funnel is src/error.cyr and its generated f64 build, src/f64/error.cyr
+# (ADR-0010): the same three calls, in each.
+FUNNEL="src/error.cyr src/f64/error.cyr"
 for f in $(find src -name '*.cyr' | sort); do
-    [ "$f" = "src/error.cyr" ] && continue
+    case " $FUNNEL " in *" $f "*) continue ;; esac
     hits=$(hits "$f")
     if [ -n "$hits" ]; then
         echo "$hits" | sed "s|^|$f:|"
@@ -67,20 +70,22 @@ for f in $(find src -name '*.cyr' | sort); do
     fi
 done
 
-# src/error.cyr: exactly one of each, the helpers' own calls.
-for pat in 'alloc\(size\)' \
-           'vec_new_a\(prani_allocator\(\)\)' 'vec_push_a\(prani_allocator\(\), v, x\)'; do
-    n=$(code src/error.cyr | grep -c -E "(^|[^A-Za-z0-9_])$pat" || true)
-    if [ "$n" != "1" ]; then
-        echo "src/error.cyr: expected exactly one '$pat', found $n"
+# Each funnel file: exactly one of each, the helpers' own calls.
+for ff in $FUNNEL; do
+    for pat in 'alloc\(size\)' \
+               'vec_new_a\(prani_allocator\(\)\)' 'vec_push_a\(prani_allocator\(\), v, x\)'; do
+        n=$(code "$ff" | grep -c -E "(^|[^A-Za-z0-9_])$pat" || true)
+        if [ "$n" != "1" ]; then
+            echo "$ff: expected exactly one '$pat', found $n"
+            fail=1
+        fi
+    done
+    others=$(hits "$ff" | grep -v -E 'alloc\(size\)|vec_new_a\(prani_allocator|vec_push_a\(prani_allocator' || true)
+    if [ -n "$others" ]; then
+        echo "$others" | sed "s|^|$ff:|"
         fail=1
     fi
 done
-others=$(hits src/error.cyr | grep -v -E 'alloc\(size\)|vec_new_a\(prani_allocator|vec_push_a\(prani_allocator' || true)
-if [ -n "$others" ]; then
-    echo "$others" | sed 's|^|src/error.cyr:|'
-    fail=1
-fi
 
 # The comment stripping above must not be hiding a call behind a `#` in a string.
 strs=$(find src -name '*.cyr' -exec grep -n -E '"[^"]*#[^"]*"' {} + | grep -E "$BAN" || true)

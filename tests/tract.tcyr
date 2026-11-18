@@ -20,16 +20,35 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
+include "tests/realt.cyr"
 
 # test constants (IEEE-754 hex)
+#ifdef PRANI_F32
+var T_SR       = 0x472C4400;           # 44100.0 sample rate
+var T_TILT_N6  = 0xC0C00000;           # -6.0 dB/oct
+var T_0_5      = 0x3F000000;           # 0.5
+var T_0_25     = 0x3E800000;           # 0.25
+var T_0_125    = 0x3E000000;           # 0.125
+var T_220      = 0x435C0000;           # 220.0
+var T_2500     = 0x451C4000;           # 2500.0 (unused sentinel; see below)
+var T_TOL_1EM6 = 0x358637BD;           # 1e-6
+var T_1EM3     = 0x3A83126F;           # 0.001 (the oracle's near-silence bar)
+#else
 var T_SR       = 0x40e5888000000000;   # 44100.0 sample rate
 var T_TILT_N6  = 0xc018000000000000;   # -6.0 dB/oct
 var T_0_5      = 0x3fe0000000000000;   # 0.5
@@ -39,6 +58,7 @@ var T_220      = 0x406b800000000000;   # 220.0
 var T_2500     = 0x40a3880000000000;   # 2500.0 (unused sentinel; see below)
 var T_TOL_1EM6 = 0x3eb0c6f7a0b5ed8d;   # 1e-6
 var T_1EM3     = 0x3f50624dd2f1a9fc;   # 0.001 (the oracle's near-silence bar)
+#endif
 
 alloc_init();
 
@@ -71,7 +91,7 @@ fn t_vecs_equal(a, b) {
 # approx(a, b, eps) -- |a-b| < eps.
 #must_use
 fn t_approx(a, b, eps) {
-    return f64_lt(f64_abs(f64_sub(a, b)), eps);
+    return pr_lt(pr_abs(pr_sub(a, b)), eps);
 }
 
 # max_abs_range(v, lo, hi) -- peak |s| over v[lo..hi).
@@ -80,8 +100,8 @@ fn t_max_abs_range(v, lo, hi) {
     var m = 0;
     var i = lo;
     while (i < hi) {
-        var a = f64_abs(vec_get(v, i));
-        if (f64_gt(a, m) == 1) { m = a; }
+        var a = pr_abs(vec_get(v, i));
+        if (pr_gt(a, m) == 1) { m = a; }
         i = i + 1;
     }
     return m;
@@ -93,7 +113,7 @@ fn t_count_below(v, eps, lo, hi) {
     var n = 0;
     var i = lo;
     while (i < hi) {
-        if (f64_lt(f64_abs(vec_get(v, i)), eps) == 1) { n = n + 1; }
+        if (pr_lt(pr_abs(vec_get(v, i)), eps) == 1) { n = n + 1; }
         i = i + 1;
     }
     return n;
@@ -103,7 +123,7 @@ fn t_count_below(v, eps, lo, hi) {
 # the literal an attacker would write into a JSON field (see t_tract_json).
 #must_use
 fn t_nan() {
-    return f64_div(0, 0);
+    return pr_div(0, 0);
 }
 
 # t_tract_json(sr, phase, x, y, r, params) -- a CreatureTract document whose
@@ -115,19 +135,19 @@ fn t_nan() {
 fn t_tract_json(sr, phase, x, y, r, params) {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"sample_rate\":");
-    str_builder_add_int(sb, sr);
+    str_builder_add_int(sb, pr_to64(sr));   # a document holds f64 bits in both builds (ADR-0010)
     str_builder_add_cstr(sb, ",\"phase\":");
-    str_builder_add_int(sb, phase);
+    str_builder_add_int(sb, pr_to64(phase));
     str_builder_add_cstr(sb, ",\"rng_state\":");
     str_builder_add_int(sb, 12345);
     str_builder_add_cstr(sb, ",\"rng_inc\":");
     str_builder_add_int(sb, 67891);
     str_builder_add_cstr(sb, ",\"dcb_x_prev\":");
-    str_builder_add_int(sb, x);
+    str_builder_add_int(sb, pr_to64(x));
     str_builder_add_cstr(sb, ",\"dcb_y_prev\":");
-    str_builder_add_int(sb, y);
+    str_builder_add_int(sb, pr_to64(y));
     str_builder_add_cstr(sb, ",\"dcb_r\":");
-    str_builder_add_int(sb, r);
+    str_builder_add_int(sb, pr_to64(r));
     str_builder_add_cstr(sb, ",\"params\":");
     SpeciesParams_to_json(params, sb);
     str_builder_add_cstr(sb, "}");
@@ -160,7 +180,7 @@ test_group("syringeal low-freq (<=2000) -- glottal path (songbird @ 1500)");
 var bird = species_params(PRANI_SP_SONGBIRD);
 var ct_bird = crtract_new(bird, T_SR);
 # songbird f0 range 1000-8000; 1500 clamps in-range and <=2000 -> glottal path
-var out_syr_lo = crtract_synthesize(ct_bird, f64_from(1500), 64, opts);
+var out_syr_lo = crtract_synthesize(ct_bird, pr_from(1500), 64, opts);
 assert_eq(prani_is_err(out_syr_lo), 0, "syringeal low-freq non-error");
 assert_eq(vec_len(out_syr_lo), 64, "syringeal low-freq length 64");
 assert_eq(t_all_finite(out_syr_lo), 1, "syringeal low-freq all finite");
@@ -168,7 +188,7 @@ assert_eq(t_all_finite(out_syr_lo), 1, "syringeal low-freq all finite");
 # ================================================================
 test_group("syringeal high-freq (>2000) -- dual-source path (songbird @ 3000)");
 var ct_bird2 = crtract_new(bird, T_SR);
-var out_syr_hi = crtract_synthesize(ct_bird2, f64_from(3000), 96, opts);
+var out_syr_hi = crtract_synthesize(ct_bird2, pr_from(3000), 96, opts);
 assert_eq(prani_is_err(out_syr_hi), 0, "syringeal high-freq non-error");
 assert_eq(vec_len(out_syr_hi), 96, "syringeal high-freq length 96");
 assert_eq(t_all_finite(out_syr_hi), 1, "syringeal high-freq all finite");
@@ -179,7 +199,7 @@ var snake = species_params(PRANI_SP_SNAKE);
 var ct_snake = crtract_new(snake, T_SR);
 # noise_filter must be present (NoiseOnly pre-builds the naad bandpass)
 assert_neq(CreatureTract_noise_filter(ct_snake), 0, "snake has a noise_filter");
-var out_noise = crtract_synthesize(ct_snake, f64_from(0), 80, opts);
+var out_noise = crtract_synthesize(ct_snake, pr_from(0), 80, opts);
 assert_eq(prani_is_err(out_noise), 0, "noise path non-error");
 assert_eq(vec_len(out_noise), 80, "noise length 80");
 assert_eq(t_all_finite(out_noise), 1, "noise all finite");
@@ -189,7 +209,7 @@ test_group("stridulatory high-carrier chirps (cricket, f0 > 1000)");
 var cricket = species_params(PRANI_SP_CRICKET);
 var ct_cricket = crtract_new(cricket, T_SR);
 # cricket f0 range 3000-8000 -> f0 > 1000 -> discrete pulse-train chirps
-var out_strid = crtract_synthesize(ct_cricket, f64_from(4500), 128, opts);
+var out_strid = crtract_synthesize(ct_cricket, pr_from(4500), 128, opts);
 assert_eq(prani_is_err(out_strid), 0, "stridulatory non-error");
 assert_eq(vec_len(out_strid), 128, "stridulatory length 128");
 assert_eq(t_all_finite(out_strid), 1, "stridulatory all finite");
@@ -223,7 +243,7 @@ test_group("stridulatory inter-chirp silence (direct call past chirp_active)");
 # At 44100: chirp_period = 44100/2.5 = 17640, chirp_active = (44100/30)*4 = 5880.
 # 12000 samples therefore spans one full active chirp then 6120 samples of gap.
 var ct_gap = crtract_new(cricket, T_SR);
-var out_gap = crtract_synthesize_stridulatory(ct_gap, f64_from(4500), 12000, opts);
+var out_gap = crtract_synthesize_stridulatory(ct_gap, pr_from(4500), 12000, opts);
 assert_eq(prani_is_err(out_gap), 0, "gap-spanning stridulatory non-error");
 assert_eq(vec_len(out_gap), 12000, "gap-spanning stridulatory length 12000");
 assert_eq(t_all_finite(out_gap), 1, "gap-spanning stridulatory all finite");
@@ -235,13 +255,13 @@ assert_eq(t_count_below(out_gap, T_1EM3, 10000, 12000), 2000, "inter-chirp gap i
 # Control, same window width inside the active chirp: if the branch were never
 # taken, or the whole buffer were silent, this would match the count above.
 assert_lt(t_count_below(out_gap, T_1EM3, 1000, 3000), 2000, "active chirp is NOT silent (control)");
-assert_eq(f64_gt(t_max_abs_range(out_gap, 1000, 3000), T_1EM3), 1, "active chirp carries real signal (control)");
+assert_eq(pr_gt(t_max_abs_range(out_gap, 1000, 3000), T_1EM3), 1, "active chirp carries real signal (control)");
 
 # ================================================================
 test_group("vibratile -- continuous wing-beat AM (bee)");
 var bee = species_params(PRANI_SP_BEE);
 var ct_bee = crtract_new(bee, T_SR);
-var out_vib = crtract_synthesize(ct_bee, f64_from(300), 64, opts);
+var out_vib = crtract_synthesize(ct_bee, pr_from(300), 64, opts);
 assert_eq(prani_is_err(out_vib), 0, "vibratile non-error");
 assert_eq(vec_len(out_vib), 64, "vibratile length 64");
 assert_eq(t_all_finite(out_vib), 1, "vibratile all finite");
@@ -252,7 +272,7 @@ assert_eq(vec_get(out_vib, 0), 0, "vibratile sample[0] == 0 (t=0)");
 test_group("synthesize_purr -- non-error, finite, phase advances");
 var cat = species_params(PRANI_SP_CAT);
 var ct_cat = crtract_new(cat, T_SR);
-var out_purr = crtract_synthesize_purr(ct_cat, 100, f64_from(25));
+var out_purr = crtract_synthesize_purr(ct_cat, 100, pr_from(25));
 assert_eq(prani_is_err(out_purr), 0, "purr non-error");
 assert_eq(vec_len(out_purr), 100, "purr length 100");
 assert_eq(t_all_finite(out_purr), 1, "purr all finite");
@@ -269,8 +289,8 @@ assert_eq(t_vecs_equal(out_a, out_b), 1, "laryngeal deterministic (bit-identical
 # noise path leans on the rng directly -- also deterministic across fresh tracts.
 var ct_sa = crtract_new(species_params(PRANI_SP_SNAKE), T_SR);
 var ct_sb = crtract_new(species_params(PRANI_SP_SNAKE), T_SR);
-var out_sa = crtract_synthesize(ct_sa, f64_from(0), 48, opts);
-var out_sb = crtract_synthesize(ct_sb, f64_from(0), 48, opts);
+var out_sa = crtract_synthesize(ct_sa, pr_from(0), 48, opts);
+var out_sb = crtract_synthesize(ct_sb, pr_from(0), 48, opts);
 assert_eq(t_vecs_equal(out_sa, out_sb), 1, "noise deterministic (bit-identical)");
 
 # ================================================================
@@ -281,7 +301,7 @@ test_group("apply_spectral_tilt -- hand-computed one-pole (tilt=-6 -> a=0.5)");
 #   y2 = 0.5*0 + 0.5*0.25 = 0.125
 # All exactly representable in f64.
 var buf = vec_new();
-vec_push(buf, F64_ONE);
+vec_push(buf, PR_ONE);
 vec_push(buf, 0);
 vec_push(buf, 0);
 crtract_apply_spectral_tilt(buf, T_TILT_N6, T_SR);
@@ -291,10 +311,10 @@ assert_eq(vec_get(buf, 2), T_0_125, "tilt y[2] == 0.125");
 
 # neutral tilt (|tilt_db| < 0.1) is a no-op -- buffer unchanged.
 var buf2 = vec_new();
-vec_push(buf2, F64_ONE);
+vec_push(buf2, PR_ONE);
 vec_push(buf2, T_0_5);
 crtract_apply_spectral_tilt(buf2, 0, T_SR);
-assert_eq(vec_get(buf2, 0), F64_ONE, "neutral tilt leaves x[0] unchanged");
+assert_eq(vec_get(buf2, 0), PR_ONE, "neutral tilt leaves x[0] unchanged");
 assert_eq(vec_get(buf2, 1), T_0_5, "neutral tilt leaves x[1] unchanged");
 
 # ================================================================
@@ -318,8 +338,8 @@ assert_eq(SynthesisOptions_perturbation_scale(od), 0, "default perturbation_scal
 # CreatureTract). The opaque svara tract + naad filter are rebuilt from params;
 # rng/phase/dc_blocker/sample_rate/params roundtrip exactly (bit patterns).
 test_group("CreatureTract serde roundtrip");
-var tser = crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000));
-var tser_out = crtract_synthesize_purr(tser, 100, f64_from(27));   # advances phase + rng + dc_blocker
+var tser = crtract_new(species_params(PRANI_SP_WOLF), pr_from(8000));
+var tser_out = crtract_synthesize_purr(tser, 100, pr_from(27));   # advances phase + rng + dc_blocker
 assert_eq(prani_is_err(tser_out), 0, "control: the purr that advances the state succeeded");
 var tsb = str_builder_new();
 crtract_to_json(tser, tsb);
@@ -351,7 +371,7 @@ var tjson2 = str_data(str_builder_build(tsb2));
 assert_eq(strlen(tjson2), strlen(tjson), "tract json same length (prefix compare alone is not enough)");
 assert_eq(memeq(tjson, tjson2, strlen(tjson)), 1, "tract json idempotent");
 # the rebuilt svara tract produces finite output post-restore
-var post = crtract_synthesize_purr(t2, 16, f64_from(27));
+var post = crtract_synthesize_purr(t2, 16, pr_from(27));
 assert_eq(prani_is_finite(vec_get(post, 8)), 1, "rebuilt tract synthesizes finite output");
 
 # ================================================================
@@ -370,20 +390,20 @@ var s_rinc = PrRng_inc(CreatureTract_rng(tser));
 var s_xp = DcBlocker_x_prev(CreatureTract_dc_blocker(tser));
 var s_yp = DcBlocker_y_prev(CreatureTract_dc_blocker(tser));
 var s_r = DcBlocker_r(CreatureTract_dc_blocker(tser));
-var t3 = crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000));
+var t3 = crtract_new(species_params(PRANI_SP_WOLF), pr_from(8000));
 CreatureTract_set_phase(t3, s_phase);
 PrRng_set_state(CreatureTract_rng(t3), s_rstate);
 PrRng_set_inc(CreatureTract_rng(t3), s_rinc);
 DcBlocker_set_x_prev(CreatureTract_dc_blocker(t3), s_xp);
 DcBlocker_set_y_prev(CreatureTract_dc_blocker(t3), s_yp);
 DcBlocker_set_r(CreatureTract_dc_blocker(t3), s_r);
-var post3 = crtract_synthesize_purr(t3, 16, f64_from(27));
+var post3 = crtract_synthesize_purr(t3, 16, pr_from(27));
 assert_eq(t_vecs_equal(post, post3), 1, "deserialized tract == fresh tract + restored scalars (svara side rebuilt)");
 # Control: the ORIGINAL, continued from its own live svara filter memory, must
 # DIFFER -- otherwise the assertion above would hold vacuously for a tract whose
 # synthesis never touched svara state at all. crtract_synthesize_purr routes every
 # sample through svara_tract_process_sample, so it does.
-var post_orig = crtract_synthesize_purr(tser, 16, f64_from(27));
+var post_orig = crtract_synthesize_purr(tser, 16, pr_from(27));
 assert_eq(t_vecs_equal(post, post_orig), 0, "control: the original's live svara memory does NOT survive the roundtrip");
 
 # ================================================================
@@ -423,9 +443,9 @@ assert_eq(crtract_synthesize(g_bee, t_nan(), 32, opts), PRANI_ERR_INVALID_TRACT,
 assert_eq(CreatureTract_phase(g_wolf), 0, "control: a rejected call left phase untouched");
 var g_ok = crtract_synthesize(g_wolf, T_220, 16, opts);
 assert_eq(prani_is_err(g_ok), 0, "control: the same tract still synthesizes after a rejection");
-assert_eq(prani_is_err(crtract_synthesize(g_bee, f64_from(0), 8, opts)), 0,
+assert_eq(prani_is_err(crtract_synthesize(g_bee, pr_from(0), 8, opts)), 0,
   "control: f0 = 0 is VALID (the oracle accepted it)");
-assert_eq(prani_is_err(crtract_synthesize(g_bee, f64_neg(f64_from(300)), 8, opts)), 0,
+assert_eq(prani_is_err(crtract_synthesize(g_bee, pr_neg(pr_from(300)), 8, opts)), 0,
   "control: a negative f0 is VALID (mirrored tone, as in the oracle)");
 
 # ================================================================
@@ -446,15 +466,15 @@ test_group("2.0.14 num_samples -- past one vec's limit is refused, not a process
 var n_over = VEC_CAP_MAX + 1;
 assert_eq(crtract_synthesize(crtract_new(wolf, T_SR), T_220, n_over, opts), PRANI_ERR_INVALID_VOCALIZATION,
   "laryngeal");
-assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), n_over, opts),
+assert_eq(crtract_synthesize(crtract_new(bird, T_SR), pr_from(3000), n_over, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "syringeal");
-assert_eq(crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), n_over, opts),
+assert_eq(crtract_synthesize(crtract_new(snake, T_SR), pr_from(0), n_over, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "noise");
-assert_eq(crtract_synthesize(crtract_new(cricket, T_SR), f64_from(4500), n_over, opts),
+assert_eq(crtract_synthesize(crtract_new(cricket, T_SR), pr_from(4500), n_over, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "stridulatory");
-assert_eq(crtract_synthesize(crtract_new(bee, T_SR), f64_from(300), n_over, opts),
+assert_eq(crtract_synthesize(crtract_new(bee, T_SR), pr_from(300), n_over, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "vibratile");
-assert_eq(crtract_synthesize_purr(crtract_new(wolf, T_SR), n_over, f64_from(27)),
+assert_eq(crtract_synthesize_purr(crtract_new(wolf, T_SR), n_over, pr_from(27)),
   PRANI_ERR_INVALID_VOCALIZATION, "purr");
 
 test_group("2.0.5 num_samples -- negative rejected, zero still VALID");
@@ -468,30 +488,30 @@ assert_eq(crtract_synthesize(n_wolf, T_220, 0 - 1, opts), PRANI_ERR_INVALID_VOCA
   "laryngeal: negative num_samples -> INVALID_VOCALIZATION");
 assert_eq(crtract_synthesize(n_wolf, T_220, (0 - 9223372036854775807) - 1, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: i64::MIN count -> INVALID_VOCALIZATION (was: empty buffer)");
-assert_eq(f64_to(t_nan()), 0, "a NaN-derived count is 0 at this layer -- why callers range the f64 first");
-assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), 0 - 1, opts),
+assert_eq(pr_to(t_nan()), 0, "a NaN-derived count is 0 at this layer -- why callers range the f64 first");
+assert_eq(crtract_synthesize(crtract_new(bird, T_SR), pr_from(3000), 0 - 1, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "syringeal: negative num_samples -> INVALID_VOCALIZATION");
-assert_eq(crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), 0 - 1, opts),
+assert_eq(crtract_synthesize(crtract_new(snake, T_SR), pr_from(0), 0 - 1, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "noise: negative num_samples -> INVALID_VOCALIZATION");
-assert_eq(crtract_synthesize(crtract_new(cricket, T_SR), f64_from(4500), 0 - 1, opts),
+assert_eq(crtract_synthesize(crtract_new(cricket, T_SR), pr_from(4500), 0 - 1, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "stridulatory: negative num_samples -> INVALID_VOCALIZATION");
-assert_eq(crtract_synthesize(crtract_new(bee, T_SR), f64_from(300), 0 - 1, opts),
+assert_eq(crtract_synthesize(crtract_new(bee, T_SR), pr_from(300), 0 - 1, opts),
   PRANI_ERR_INVALID_VOCALIZATION, "vibratile: negative num_samples -> INVALID_VOCALIZATION");
-assert_eq(crtract_synthesize_purr(crtract_new(cat, T_SR), 0 - 1, f64_from(25)),
+assert_eq(crtract_synthesize_purr(crtract_new(cat, T_SR), 0 - 1, pr_from(25)),
   PRANI_ERR_INVALID_VOCALIZATION, "purr: negative num_samples -> INVALID_VOCALIZATION");
 # zero-duration controls, one per apparatus -- the oracle's contract
 var z_lar = crtract_synthesize(n_wolf, T_220, 0, opts);
 assert_eq(prani_is_err(z_lar), 0, "laryngeal: 0 samples is NOT an error");
 assert_eq(vec_len(z_lar), 0, "laryngeal: 0 samples -> empty buffer (oracle parity)");
-var z_syr = crtract_synthesize(crtract_new(bird, T_SR), f64_from(3000), 0, opts);
+var z_syr = crtract_synthesize(crtract_new(bird, T_SR), pr_from(3000), 0, opts);
 assert_eq(vec_len(z_syr), 0, "syringeal: 0 samples -> empty buffer");
-var z_noi = crtract_synthesize(crtract_new(snake, T_SR), f64_from(0), 0, opts);
+var z_noi = crtract_synthesize(crtract_new(snake, T_SR), pr_from(0), 0, opts);
 assert_eq(vec_len(z_noi), 0, "noise: 0 samples -> empty buffer");
-var z_str = crtract_synthesize(crtract_new(cricket, T_SR), f64_from(4500), 0, opts);
+var z_str = crtract_synthesize(crtract_new(cricket, T_SR), pr_from(4500), 0, opts);
 assert_eq(vec_len(z_str), 0, "stridulatory: 0 samples -> empty buffer");
-var z_vib = crtract_synthesize(crtract_new(bee, T_SR), f64_from(300), 0, opts);
+var z_vib = crtract_synthesize(crtract_new(bee, T_SR), pr_from(300), 0, opts);
 assert_eq(vec_len(z_vib), 0, "vibratile: 0 samples -> empty buffer");
-var z_purr = crtract_synthesize_purr(crtract_new(cat, T_SR), 0, f64_from(25));
+var z_purr = crtract_synthesize_purr(crtract_new(cat, T_SR), 0, pr_from(25));
 assert_eq(prani_is_err(z_purr), 0, "purr: 0 samples is NOT an error");
 assert_eq(vec_len(z_purr), 0, "purr: 0 samples -> empty buffer");
 
@@ -510,7 +530,7 @@ assert_eq(crtract_synthesize(o_wolf, T_220, 32, crtract_options_new(0, t_nan()))
   PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: NaN perturbation_scale -> INVALID_VOCALIZATION");
 assert_eq(crtract_synthesize(o_wolf, T_220, 32, crtract_options_new(PRANI_POS_INF, 0)),
   PRANI_ERR_INVALID_VOCALIZATION, "laryngeal: +inf subharmonic_amp -> INVALID_VOCALIZATION");
-assert_eq(crtract_synthesize(crtract_new(bird, T_SR), f64_from(1500), 32, crtract_options_new(0, t_nan())),
+assert_eq(crtract_synthesize(crtract_new(bird, T_SR), pr_from(1500), 32, crtract_options_new(0, t_nan())),
   PRANI_ERR_INVALID_VOCALIZATION, "syringeal: NaN perturbation_scale -> INVALID_VOCALIZATION");
 assert_eq(CreatureTract_phase(o_wolf), 0, "control: a rejected options call left phase untouched");
 assert_eq(prani_is_err(crtract_synthesize(o_wolf, T_220, 16, crtract_options_new(T_0_25, T_0_5))), 0,
@@ -518,7 +538,7 @@ assert_eq(prani_is_err(crtract_synthesize(o_wolf, T_220, 16, crtract_options_new
 # NOT guarded on the stridulatory path: it never reads options (the oracle writes
 # `let _ = options;`), so there is nothing there to be out of range.
 var st_nan = crtract_new(cricket, T_SR);
-var st_out = crtract_synthesize_stridulatory(st_nan, f64_from(4500), 16,
+var st_out = crtract_synthesize_stridulatory(st_nan, pr_from(4500), 16,
   crtract_options_new(t_nan(), t_nan()));
 assert_eq(prani_is_err(st_out), 0,
   "stridulatory: NaN options accepted -- the path never reads them");
@@ -540,7 +560,7 @@ assert_eq(CreatureTract_phase(p_cat), 0, "purr: phase is still exactly 0 after t
 assert_eq(crtract_synthesize_purr(p_cat, 32, PRANI_POS_INF), PRANI_ERR_INVALID_TRACT,
   "purr: +inf purr_f0 -> INVALID_TRACT");
 assert_eq(CreatureTract_phase(p_cat), 0, "purr: +inf did not reach the phase either");
-var p_ok = crtract_synthesize_purr(p_cat, 32, f64_from(27));
+var p_ok = crtract_synthesize_purr(p_cat, 32, pr_from(27));
 assert_eq(prani_is_err(p_ok), 0, "control: a 27 Hz purr still succeeds");
 assert_neq(CreatureTract_phase(p_cat), 0, "control: the valid purr DID advance the phase");
 assert_eq(t_all_finite(p_ok), 1, "control: valid purr output all finite");
@@ -552,23 +572,23 @@ test_group("2.0.5 tilt_db -- all three non-finite tilts were silent, differently
 # (a = clamp(-inf/12) = 0); -inf applied a = 0.85, the maximum lowpass the filter
 # can make -- a real, plausible-sounding filter fabricated out of an accident.
 var tl = vec_new();
-vec_push(tl, F64_ONE);
+vec_push(tl, PR_ONE);
 vec_push(tl, T_0_5);
 assert_eq(crtract_apply_spectral_tilt(tl, t_nan(), T_SR), PRANI_ERR_INVALID_TRACT,
   "tilt: NaN tilt_db -> INVALID_TRACT");
-assert_eq(vec_get(tl, 0), F64_ONE, "tilt: the rejected NaN left the buffer untouched (x[0])");
+assert_eq(vec_get(tl, 0), PR_ONE, "tilt: the rejected NaN left the buffer untouched (x[0])");
 assert_eq(vec_get(tl, 1), T_0_5, "tilt: the rejected NaN left the buffer untouched (x[1])");
 assert_eq(crtract_apply_spectral_tilt(tl, PRANI_POS_INF, T_SR), PRANI_ERR_INVALID_TRACT,
   "tilt: +inf tilt_db -> INVALID_TRACT (was: a silent no-op)");
 assert_eq(crtract_apply_spectral_tilt(tl, PRANI_NEG_INF, T_SR), PRANI_ERR_INVALID_TRACT,
   "tilt: -inf tilt_db -> INVALID_TRACT (was: a silent a = 0.85 lowpass)");
-assert_eq(vec_get(tl, 0), F64_ONE, "tilt: neither infinity touched the buffer");
+assert_eq(vec_get(tl, 0), PR_ONE, "tilt: neither infinity touched the buffer");
 # controls: the two valid outcomes still return PRANI_ERR_NONE and still filter
 assert_eq(crtract_apply_spectral_tilt(tl, 0, T_SR), PRANI_ERR_NONE,
   "control: neutral tilt returns PRANI_ERR_NONE");
-assert_eq(vec_get(tl, 0), F64_ONE, "control: neutral tilt left the buffer alone");
+assert_eq(vec_get(tl, 0), PR_ONE, "control: neutral tilt left the buffer alone");
 var tl2 = vec_new();
-vec_push(tl2, F64_ONE);
+vec_push(tl2, PR_ONE);
 vec_push(tl2, 0);
 assert_eq(crtract_apply_spectral_tilt(tl2, T_TILT_N6, T_SR), PRANI_ERR_NONE,
   "control: -6 dB/oct returns PRANI_ERR_NONE");
@@ -578,7 +598,7 @@ assert_eq(vec_get(tl2, 0), T_0_5, "control: -6 dB/oct still filters (y[0] == 0.5
 # NaN in it cannot change the output -- and a guard would report a failure that
 # cannot happen.
 var tl3 = vec_new();
-vec_push(tl3, F64_ONE);
+vec_push(tl3, PR_ONE);
 vec_push(tl3, 0);
 assert_eq(crtract_apply_spectral_tilt(tl3, T_TILT_N6, t_nan()), PRANI_ERR_NONE,
   "tilt: a NaN sample_rate is accepted -- the function never reads it");
@@ -600,13 +620,13 @@ assert_eq(crtract_from_json_str(t_tract_json(T_SR, t_nan(), 0, 0, PRANI_DCBLOCK_
   PRANI_ERR_INVALID_TRACT, "json: NaN phase -> INVALID_TRACT");
 assert_eq(crtract_from_json_str(t_tract_json(T_SR, PRANI_POS_INF, 0, 0, PRANI_DCBLOCK_R, wolf)),
   PRANI_ERR_INVALID_TRACT, "json: +inf phase -> INVALID_TRACT");
-assert_eq(crtract_from_json_str(t_tract_json(T_SR, f64_neg(T_0_5), 0, 0, PRANI_DCBLOCK_R, wolf)),
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, pr_neg(T_0_5), 0, 0, PRANI_DCBLOCK_R, wolf)),
   PRANI_ERR_INVALID_TRACT, "json: phase = -0.5 -> INVALID_TRACT");
-assert_eq(crtract_from_json_str(t_tract_json(T_SR, f64_from(2), 0, 0, PRANI_DCBLOCK_R, wolf)),
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, pr_from(2), 0, 0, PRANI_DCBLOCK_R, wolf)),
   PRANI_ERR_INVALID_TRACT, "json: phase = 2.0 -> INVALID_TRACT");
 assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, T_0_5, 0, 0, PRANI_DCBLOCK_R, wolf))), 0,
   "json: phase = 0.5 accepted (in range)");
-assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, F64_ONE, 0, 0, PRANI_DCBLOCK_R, wolf))), 0,
+assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, PR_ONE, 0, 0, PRANI_DCBLOCK_R, wolf))), 0,
   "json: phase = 1.0 accepted (inclusive bound; it self-corrects on the first wrap)");
 # dc blocker memory: finite. A non-finite one poisons every sample the blocker
 # will ever emit -- dsp.cyr reports the latch, it cannot undo it.
@@ -614,16 +634,16 @@ assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, t_nan(), 0, PRANI_DCBLOCK_
   PRANI_ERR_INVALID_TRACT, "json: NaN dcb_x_prev -> INVALID_TRACT");
 assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, PRANI_NEG_INF, PRANI_DCBLOCK_R, wolf)),
   PRANI_ERR_INVALID_TRACT, "json: -inf dcb_y_prev -> INVALID_TRACT");
-var j_mem = t_tract_json(T_SR, 0, f64_neg(T_0_25), T_0_5, PRANI_DCBLOCK_R, wolf);
+var j_mem = t_tract_json(T_SR, 0, pr_neg(T_0_25), T_0_5, PRANI_DCBLOCK_R, wolf);
 assert_eq(prani_is_err(crtract_from_json_str(j_mem)), 0,
   "json: ordinary finite filter memory accepted (sign included)");
 # dcb_r: [0, 1). This one is a STABILITY bound, not a taste one --
 # y = x - x_prev + r*y_prev diverges for |r| >= 1.
-assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, F64_ONE, wolf)),
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, PR_ONE, wolf)),
   PRANI_ERR_INVALID_TRACT, "json: dcb_r = 1.0 -> INVALID_TRACT (marginally unstable)");
-assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, f64_from(2), wolf)),
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, pr_from(2), wolf)),
   PRANI_ERR_INVALID_TRACT, "json: dcb_r = 2.0 -> INVALID_TRACT (divergent)");
-assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, f64_neg(T_0_5), wolf)),
+assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, pr_neg(T_0_5), wolf)),
   PRANI_ERR_INVALID_TRACT, "json: dcb_r = -0.5 -> INVALID_TRACT");
 assert_eq(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, t_nan(), wolf)),
   PRANI_ERR_INVALID_TRACT, "json: NaN dcb_r -> INVALID_TRACT");
@@ -632,7 +652,7 @@ assert_eq(prani_is_err(crtract_from_json_str(t_tract_json(T_SR, 0, 0, 0, T_0_5, 
 # NOT range-checked, and each for its own reason:
 #   sample_rate -- svara owns the threshold and crtract_new reports it (ADR-0001)
 #   rng_state / rng_inc -- every 64-bit pattern is a reachable PCG32 state
-var j_slow = t_tract_json(f64_from(10), 0, 0, 0, PRANI_DCBLOCK_R, wolf);
+var j_slow = t_tract_json(pr_from(10), 0, 0, 0, PRANI_DCBLOCK_R, wolf);
 assert_eq(prani_is_err(crtract_from_json_str(j_slow)), 1,
   "json: a 10 Hz sample rate is still rejected -- by svara, via crtract_new");
 var j_rng = crtract_from_json_str(j_ok);
@@ -654,13 +674,13 @@ test_group("2.0.5 set_formant_blend -- NOT guarded here: svara already rejects i
 # is the whole point of pinning them.
 var fb_tract = crtract_new(wolf, T_SR);
 var fb_t = vec_new();
-vec_push(fb_t, f64_from(800));
-vec_push(fb_t, f64_from(1200));
-vec_push(fb_t, f64_from(2500));
+vec_push(fb_t, pr_from(800));
+vec_push(fb_t, pr_from(1200));
+vec_push(fb_t, pr_from(2500));
 var fb_b = vec_new();
-vec_push(fb_b, f64_from(80));
-vec_push(fb_b, f64_from(90));
-vec_push(fb_b, f64_from(120));
+vec_push(fb_b, pr_from(80));
+vec_push(fb_b, pr_from(90));
+vec_push(fb_b, pr_from(120));
 assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_b, T_0_5), PRANI_ERR_NONE,
   "control: a valid blend returns PRANI_ERR_NONE");
 assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_b, t_nan()), PRANI_ERR_SVARA,
@@ -670,9 +690,9 @@ assert_eq(prani_is_err(fb_after), 0, "blend: the tract still synthesizes after a
 assert_eq(t_all_finite(fb_after), 1, "blend: and its output is still finite (svara kept the old formants)");
 var fb_nan_t = vec_new();
 vec_push(fb_nan_t, t_nan());
-vec_push(fb_nan_t, f64_from(1200));
-vec_push(fb_nan_t, f64_from(2500));
-assert_eq(crtract_set_formant_blend(fb_tract, fb_nan_t, fb_b, F64_ONE), PRANI_ERR_SVARA,
+vec_push(fb_nan_t, pr_from(1200));
+vec_push(fb_nan_t, pr_from(2500));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_nan_t, fb_b, PR_ONE), PRANI_ERR_SVARA,
   "blend: a NaN target formant -> PRANI_ERR_SVARA (svara's rejection)");
 var fb_after2 = crtract_synthesize(fb_tract, T_220, 16, opts);
 assert_eq(t_all_finite(fb_after2), 1, "blend: still finite after a refused NaN target formant");
@@ -680,10 +700,10 @@ assert_eq(t_all_finite(fb_after2), 1, "blend: still finite after a refused NaN t
 # this same call returned PRANI_ERR_NONE and every sample after it was NaN:
 # measured on 2.1.0, 2205 of 2205 at 44.1 kHz.
 var fb_inf_b = vec_new();
-vec_push(fb_inf_b, f64_from(80));
+vec_push(fb_inf_b, pr_from(80));
 vec_push(fb_inf_b, PRANI_POS_INF);
-vec_push(fb_inf_b, f64_from(120));
-assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_inf_b, F64_ONE), PRANI_ERR_SVARA,
+vec_push(fb_inf_b, pr_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_inf_b, PR_ONE), PRANI_ERR_SVARA,
   "blend: an infinite target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.3)");
 var fb_after3 = crtract_synthesize(fb_tract, T_220, 16, opts);
 assert_eq(t_all_finite(fb_after3), 1, "blend: still finite after a refused infinite bandwidth");
@@ -693,16 +713,16 @@ assert_eq(t_all_finite(fb_after3), 1, "blend: still finite after a refused infin
 # 44.1 kHz, measured on 2.1.1. The bound itself is svara's and is not restated
 # here; these two are far past it at any sample rate.
 var fb_max_b = vec_new();
-vec_push(fb_max_b, f64_from(80));
-vec_push(fb_max_b, 0x7FEFFFFFFFFFFFFF);   # f64::MAX
-vec_push(fb_max_b, f64_from(120));
-assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_max_b, F64_ONE), PRANI_ERR_SVARA,
+vec_push(fb_max_b, pr_from(80));
+vec_push(fb_max_b, pr_of64(0x7FEFFFFFFFFFFFFF));   # f64::MAX
+vec_push(fb_max_b, pr_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_max_b, PR_ONE), PRANI_ERR_SVARA,
   "blend: an f64::MAX target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.5)");
 var fb_f32_b = vec_new();
-vec_push(fb_f32_b, f64_from(80));
-vec_push(fb_f32_b, 0x47EFFFFFE0000000);   # f32::MAX as an f64
-vec_push(fb_f32_b, f64_from(120));
-assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_f32_b, F64_ONE), PRANI_ERR_SVARA,
+vec_push(fb_f32_b, pr_from(80));
+vec_push(fb_f32_b, pr_of64(0x47EFFFFFE0000000));   # f32::MAX as an f64
+vec_push(fb_f32_b, pr_from(120));
+assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_f32_b, PR_ONE), PRANI_ERR_SVARA,
   "blend: an f32::MAX target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.5)");
 var fb_after4 = crtract_synthesize(fb_tract, T_220, 2205, opts);
 assert_eq(t_all_finite(fb_after4), 1, "blend: still finite after a refused huge finite bandwidth (2205 samples)");
@@ -717,15 +737,23 @@ test_group("2.1.2 the excitation level rests on two svara facts, and the helpers
 # changes either fails this group rather than silently mis-scaling every voice:
 #   1. a Rosenberg source's voiced pulse peaks at SV_G_ROSENBERG_GAIN;
 #   2. its sample is linear in breathiness: s(b) = s(0)*(1-b) + s(1)*b.
-var XL_TOL  = 0x3d719799812dea11;   # 1e-12
-var XL_0999 = 0x3feff7ced916872b;   # 0.999
-var XL_037  = 0x3fd7ae147ae147ae;   # 0.37
-var XL_F0   = 0x4059000000000000;   # 100.0 Hz: a 441-sample period at 44.1 kHz
+# The two svara facts are svara's, so they are checked in f64 in both builds (svara
+# is f64 in both, ADR-0010); the helpers are prani's and are checked in its format.
+var XL_TOL64 = 0x3d719799812dea11;   # 1e-12
+var XL_0999  = 0x3feff7ced916872b;   # 0.999
+var XL_037   = 0x3fd7ae147ae147ae;   # 0.37
+var XL_F0    = 0x4059000000000000;   # 100.0 Hz: a 441-sample period at 44.1 kHz
+#ifdef PRANI_F32
+var XL_TOL   = 0x358637BD;           # 1e-6: the helpers are 3-4 f32 roundings of values near 2.3
+#else
+var XL_TOL   = 0x3d719799812dea11;   # 1e-12
+#endif
+var XL_037R  = pr_of64(XL_037);      # 0.37 in the build's format
 
-# xl_source(b) -- a fresh svara source at 100 Hz / 44.1 kHz with breathiness b and
-# svara's default jitter and shimmer.
+# xl_source(b) -- a fresh svara source at 100 Hz / 44.1 kHz with breathiness b (an
+# f64) and svara's default jitter and shimmer.
 fn xl_source(b) {
-    var g = svara_glottal_new(XL_F0, T_SR);
+    var g = svara_glottal_new(XL_F0, pr_to64(T_SR));
     svara_glottal_set_breathiness(g, b);
     return g;
 }
@@ -742,7 +770,7 @@ while (xl_i < 2000) {
     xl_i = xl_i + 1;
 }
 assert_eq(svara_glottal_model(xl_p), SVARA_GLOTTAL_ROSENBERG, "svara_glottal_new builds a Rosenberg source");
-assert_eq(crtract_pulse_peak(xl_p), SV_G_ROSENBERG_GAIN, "crtract_pulse_peak reads svara's gain for it");
+assert_eq(crtract_pulse_peak(xl_p), pr_of64(SV_G_ROSENBERG_GAIN), "crtract_pulse_peak reads svara's gain for it");
 assert_eq(f64_le(xl_peak, SV_G_ROSENBERG_GAIN), 1, "fact 1: the pulse never exceeds SV_G_ROSENBERG_GAIN");
 assert_eq(f64_ge(xl_peak, f64_mul(SV_G_ROSENBERG_GAIN, XL_0999)), 1, "fact 1: and reaches it (within 0.1%)");
 assert_eq(f64_gt(SV_G_ROSENBERG_GAIN, F64_ONE), 1, "control: the gain is not 1, so the division is not vacuous");
@@ -766,29 +794,29 @@ while (xl_i < 2000) {
     if (f64_gt(f64_abs(xl_n), xl_noise) == 1) { xl_noise = f64_abs(xl_n); }
     xl_i = xl_i + 1;
 }
-assert_eq(f64_le(xl_worst, XL_TOL), 1, "fact 2: s(0.37) == s(0)*0.63 + s(1)*0.37, within 1e-12");
-assert_eq(f64_gt(xl_noise, T_1EM3), 1, "control: the b = 1 source is noise, not silence");
+assert_eq(f64_le(xl_worst, XL_TOL64), 1, "fact 2: s(0.37) == s(0)*0.63 + s(1)*0.37, within 1e-12");
+assert_eq(f64_gt(xl_noise, pr_to64(T_1EM3)), 1, "control: the b = 1 source is noise, not silence");
 
 # The helpers: with b' and k as tract.cyr computes them, svara's mix scaled by k is
 # the oracle's mix times PR_TR_EXC_GAIN -- pulse weight (1-b), noise weight b.
-var xl_g = SV_G_ROSENBERG_GAIN;
-var xl_bp = crtract_svara_breathiness(XL_037, xl_g);
-var xl_k = crtract_excitation_scale(XL_037, xl_g);
-var xl_pw = f64_mul(f64_mul(xl_k, xl_g), f64_sub(F64_ONE, xl_bp));
-var xl_nw = f64_mul(xl_k, xl_bp);
-assert_eq(f64_le(f64_abs(f64_sub(xl_pw, f64_mul(f64_sub(F64_ONE, XL_037), PR_TR_EXC_GAIN))), XL_TOL), 1,
+var xl_g = pr_of64(SV_G_ROSENBERG_GAIN);
+var xl_bp = crtract_svara_breathiness(XL_037R, xl_g);
+var xl_k = crtract_excitation_scale(XL_037R, xl_g);
+var xl_pw = pr_mul(pr_mul(xl_k, xl_g), pr_sub(PR_ONE, xl_bp));
+var xl_nw = pr_mul(xl_k, xl_bp);
+assert_eq(pr_le(pr_abs(pr_sub(xl_pw, pr_mul(pr_sub(PR_ONE, XL_037R), PR_TR_EXC_GAIN))), XL_TOL), 1,
   "helpers: the unit-peak pulse is weighted (1 - b) x PR_TR_EXC_GAIN");
-assert_eq(f64_le(f64_abs(f64_sub(xl_nw, f64_mul(XL_037, PR_TR_EXC_GAIN))), XL_TOL), 1,
+assert_eq(pr_le(pr_abs(pr_sub(xl_nw, pr_mul(XL_037R, PR_TR_EXC_GAIN))), XL_TOL), 1,
   "helpers: the noise is weighted b x PR_TR_EXC_GAIN, the oracle's balance");
 assert_eq(crtract_svara_breathiness(0, xl_g), 0, "helpers: b = 0 stays 0");
-assert_eq(crtract_svara_breathiness(F64_ONE, xl_g), F64_ONE, "helpers: b = 1 stays 1");
-assert_eq(crtract_excitation_scale(F64_ONE, xl_g), PR_TR_EXC_GAIN, "helpers: noise alone is scaled by the gain only");
-assert_eq(crtract_excitation_scale(0, F64_ONE), PR_TR_EXC_GAIN, "helpers: a unit-peak model needs no division");
+assert_eq(crtract_svara_breathiness(PR_ONE, xl_g), PR_ONE, "helpers: b = 1 stays 1");
+assert_eq(crtract_excitation_scale(PR_ONE, xl_g), PR_TR_EXC_GAIN, "helpers: noise alone is scaled by the gain only");
+assert_eq(crtract_excitation_scale(0, PR_ONE), PR_TR_EXC_GAIN, "helpers: a unit-peak model needs no division");
 # and crtract_glottal_new hands svara the converted breathiness, not the species'.
-var xl_gl = crtract_glottal_new(T_220, T_SR, wolf, F64_ONE);
+var xl_gl = crtract_glottal_new(T_220, T_SR, wolf, PR_ONE);
 var xl_wb = SpeciesParams_breathiness(wolf);
-assert_eq(f64_gt(xl_wb, 0), 1, "control: the wolf is breathy at all, so the conversion is visible");
-assert_eq(SvGlottalSource_breathiness(xl_gl), crtract_svara_breathiness(xl_wb, SV_G_ROSENBERG_GAIN),
+assert_eq(pr_gt(xl_wb, 0), 1, "control: the wolf is breathy at all, so the conversion is visible");
+assert_eq(pr_of64(SvGlottalSource_breathiness(xl_gl)), crtract_svara_breathiness(xl_wb, xl_g),
   "crtract_glottal_new gives svara g*b / (1 - b + g*b), not b");
 
 # ================================================================
@@ -825,14 +853,14 @@ while (aw_n < 4) {
         aw_x = crtract_synthesize_laryngeal(aw_a, T_220, 256, aw_o);
         aw_y = crtract_synthesize_laryngeal_into(aw_b, T_220, 256, aw_o, aw_y);
     } elif (aw_n == 1) {
-        aw_x = crtract_synthesize_syringeal(aw_a, f64_from(800), 256, aw_o);
-        aw_y = crtract_synthesize_syringeal_into(aw_b, f64_from(800), 256, aw_o, aw_y);
+        aw_x = crtract_synthesize_syringeal(aw_a, pr_from(800), 256, aw_o);
+        aw_y = crtract_synthesize_syringeal_into(aw_b, pr_from(800), 256, aw_o, aw_y);
     } elif (aw_n == 2) {
         aw_x = crtract_synthesize_noise(aw_a, 256);
         aw_y = crtract_synthesize_noise_into(aw_b, 256, aw_y);
     } else {
-        aw_x = crtract_synthesize_vibratile(aw_a, f64_from(250), 256);
-        aw_y = crtract_synthesize_vibratile_into(aw_b, f64_from(250), 256, aw_y);
+        aw_x = crtract_synthesize_vibratile(aw_a, pr_from(250), 256);
+        aw_y = crtract_synthesize_vibratile_into(aw_b, pr_from(250), 256, aw_y);
     }
     if (prani_is_err(aw_x) == 1) { aw_ok = 0; }
     if (prani_is_err(aw_y) == 1) { aw_ok = 0; }
@@ -842,6 +870,53 @@ while (aw_n < 4) {
     aw_n = aw_n + 1;
 }
 assert_eq(aw_ok, 1, "each of the four wrappers equals its _into, bit for bit");
+
+# ================================================================
+test_group("2.3.0 a raw oscillator's time base holds at any clock (ADR-0010)");
+# A cricket and a bee, rendered at their tract clock 0 and again 1000 s in (44.1e6
+# samples, past 2^24 and 2^25): at whole-number frequencies the waveform repeats
+# every second (the chirp and syllable periods divide 44100 too), so the two renders
+# are the same signal. f64 holds that time to its last bit. f32 cannot hold the
+# sample index past 2^24, nor the phase w*t anywhere near 1000 s (one f32 ulp at
+# 2.5e7 rad is 2 rad), so the f32 build computes both in f64 (real.cyr TIME AND PHASE
+# STAY f64). Without that, the f32 renders diverge by the whole signal.
+#ifdef PRANI_F32
+var TB_TOL = 0x358637BD;             # 1e-6: f32 rounding of the samples, measured below 2.5e-7
+#else
+var TB_TOL = 0x3e7ad7f29abcaf48;     # 1e-7: f64's sin at 2.5e7 rad, measured below 1e-8
+#endif
+var TB_LATE = 44100000;              # 1000 s at 44.1 kHz
+# tb_diff(a, b) -- the largest |a[i] - b[i]|.
+fn tb_diff(a, b) {
+    var m = 0;
+    var i = 0;
+    while (i < vec_len(a)) {
+        var d = pr_abs(pr_sub(vec_get(a, i), vec_get(b, i)));
+        if (pr_gt(d, m)) { m = d; }
+        i = i + 1;
+    }
+    return m;
+}
+var tb_c0 = crtract_new(species_params(PRANI_SP_CRICKET), T_SR);
+var tb_c1 = crtract_new(species_params(PRANI_SP_CRICKET), T_SR);
+CreatureTract_set_clock(tb_c1, TB_LATE);
+var tb_ca = crtract_synthesize_stridulatory(tb_c0, pr_from(4000), 4000, opts);
+var tb_cb = crtract_synthesize_stridulatory(tb_c1, pr_from(4000), 4000, opts);
+assert_eq(pr_gt(t_max_abs_range(tb_ca, 0, 4000), pr_of64(0x3fb999999999999a)), 1,
+  "control: the cricket's first 4000 samples are a chirp, not silence");
+assert_eq(pr_le(tb_diff(tb_ca, tb_cb), TB_TOL), 1, "a cricket 1000 s into its clock renders what it did at 0");
+var tb_b0 = crtract_new(species_params(PRANI_SP_BEE), T_SR);
+var tb_b1 = crtract_new(species_params(PRANI_SP_BEE), T_SR);
+CreatureTract_set_clock(tb_b1, TB_LATE);
+var tb_ba = crtract_synthesize_vibratile(tb_b0, pr_from(200), 4000);
+var tb_bb = crtract_synthesize_vibratile(tb_b1, pr_from(200), 4000);
+assert_eq(pr_le(tb_diff(tb_ba, tb_bb), TB_TOL), 1, "and so does a bee's wing beat");
+var tb_s0 = crtract_new(species_params(PRANI_SP_BEE), T_SR);
+var tb_s1 = crtract_new(species_params(PRANI_SP_BEE), T_SR);
+CreatureTract_set_clock(tb_s1, TB_LATE);
+var tb_sa = crtract_synthesize_stridulatory(tb_s0, pr_from(200), 4000, opts);
+var tb_sb = crtract_synthesize_stridulatory(tb_s1, pr_from(200), 4000, opts);
+assert_eq(pr_le(tb_diff(tb_sa, tb_sb), TB_TOL), 1, "and the stridulatory path's low-carrier arm");
 
 var rc = assert_summary();
 syscall(60, rc);

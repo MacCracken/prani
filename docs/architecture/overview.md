@@ -8,8 +8,11 @@
 
 ## Module Map
 
-16 `.cyr` library modules under `src/` (dependency-ordered; bundled into
-`dist/prani.cyr`). `math.rs` folded into `f64_*` builtins; `lib.rs` had no logic.
+17 `.cyr` library modules under `src/` (dependency-ordered; bundled into
+`dist/prani.cyr`), the first being `real.cyr`, the float format
+([ADR-0010](../adr/0010-two-float-formats.md)): f64 by default, f32 under
+`PRANI_F32`. The 13 modules that do arithmetic each have a generated f64 build in
+`src/f64/`. `math.rs` folded into the `pr_*` primitives; `lib.rs` had no logic.
 
 ```text
 prani/ src/
@@ -61,7 +64,7 @@ crvoice_vocalize(voc, sample_rate, duration)   # or crvoice_vocalize_with_intent
     |     |-- nasal anti-formant (Cat/Wolf onset); AM (bird trills)
     |     |-- spectral tilt (species + vocalization + effort); amplitude; envelope
     v
-vec of f64 output samples   (or a negative PRANI_ERR_* on failure)
+vec of output samples, reals (f64, or f32 under PRANI_F32; or a negative PRANI_ERR_*)
     |
     |-- optional: spatial_apply_distance_attenuation / spatial_apply_doppler_shift
     |-- optional: sequence_call_bout_synthesize / _call_phrase_synthesize / _synthesize_chorus

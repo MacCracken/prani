@@ -9,10 +9,9 @@
 # Requires (from the build/test unit): error.cyr + logging.cyr + stdlib
 # alloc/math. The module file itself has no `include` lines.
 #
-# FLOATS: prani's Rust was f32; this port is f64 (svara/naad/hisab are f64-only,
-# widening is forced and improves precision). Non-integer literals -> module-top
-# IEEE-754 hex constants (decimal in comment). Integer floats via f64_from.
-# `.clamp(0,1)` -> f64_clamp(x,0,F64_ONE); `.max(0)` -> f64_max(x,0).
+# FLOATS: a real is the build's float, f64 or f32 (ADR-0010). Non-integer
+# literals -> module-top constant pairs (decimal in comment). Integer floats via
+# pr_from. `.clamp(0,1)` -> pr_clamp(x,0,PR_ONE); `.max(0)` -> pr_max(x,0).
 #
 # serde RESTORED on FatigueState + FatigueModifiers via #derive(Serialize)
 # (i64 bit-pattern fields, lossless roundtrip). Display tests dropped.
@@ -20,18 +19,38 @@
 # ================================================================
 # Rate + scale constants (IEEE-754 hex bit patterns; decimals in comments).
 # ================================================================
+# prani:real-source
+#ifdef PRANI_F32
+#ifdef PRANI_F32
+
+var PR_FAT_FATIGUE_RATE     = 0x3C75C28F;           # 0.015  per second of calling
+var PR_FAT_HAB_STEP         = 0x3DCCCCCD;           # 0.1    per unreinforced alarm
+var PR_FAT_RECOVERY_RATE    = 0x3D8F5C29;           # 0.07   fatigue recovery per second rest
+var PR_FAT_HAB_DECAY        = 0x3CBC6A7F;           # 0.023  habituation decay per second rest
+var PR_FAT_HAB_REINFORCE    = 0x3E99999A;           # 0.3    habituation drop on reinforcement
+var PR_FAT_BOUT_RESET_SECS  = 0x40A00000;           # 5.0    rest > 5s resets bout tracking
+#else
 var PR_FAT_FATIGUE_RATE     = 0x3f8eb851eb851eb8;   # 0.015  per second of calling
 var PR_FAT_HAB_STEP         = 0x3fb999999999999a;   # 0.1    per unreinforced alarm
 var PR_FAT_RECOVERY_RATE    = 0x3fb1eb851eb851ec;   # 0.07   fatigue recovery per second rest
 var PR_FAT_HAB_DECAY        = 0x3f978d4fdf3b645a;   # 0.023  habituation decay per second rest
 var PR_FAT_HAB_REINFORCE    = 0x3fd3333333333333;   # 0.3    habituation drop on reinforcement
 var PR_FAT_BOUT_RESET_SECS  = 0x4014000000000000;   # 5.0    rest > 5s resets bout tracking
+#endif
 
+#ifdef PRANI_F32
+var PR_FAT_PITCH_DROP_HZ    = 0x41A00000;           # 20.0   max downward pitch drift (Hz)
+var PR_FAT_BREATH_MAX       = 0x3E4CCCCD;           # 0.2    max breathiness delta
+var PR_FAT_AMP_FATIGUE_MAX  = 0x3ECCCCCD;           # 0.4    fatigue amplitude reduction span
+var PR_FAT_AMP_HAB_MAX      = 0x3F000000;           # 0.5    habituation amplitude reduction span
+var PR_FAT_JITTER_SPAN      = 0x3FC00000;           # 1.5    fatigue jitter increase span
+#else
 var PR_FAT_PITCH_DROP_HZ    = 0x4034000000000000;   # 20.0   max downward pitch drift (Hz)
 var PR_FAT_BREATH_MAX       = 0x3fc999999999999a;   # 0.2    max breathiness delta
 var PR_FAT_AMP_FATIGUE_MAX  = 0x3fd999999999999a;   # 0.4    fatigue amplitude reduction span
 var PR_FAT_AMP_HAB_MAX      = 0x3fe0000000000000;   # 0.5    habituation amplitude reduction span
 var PR_FAT_JITTER_SPAN      = 0x3ff8000000000000;   # 1.5    fatigue jitter increase span
+#endif
 
 # ================================================================
 # 2.0.5 input-range validation (audit F11). The accepted duration range for
@@ -65,7 +84,11 @@ var PR_FAT_JITTER_SPAN      = 0x3ff8000000000000;   # 1.5    fatigue jitter incr
 # reset a bout after 5 s) -- and it takes ~1.8e299 accepted calls at the bound
 # to drive the accumulator to +inf.
 # ================================================================
+#ifdef PRANI_F32
+var PR_FAT_MAX_DURATION_S   = 0x4E6E6B28;           # 1.0e9  seconds (~31.7 years)
+#else
 var PR_FAT_MAX_DURATION_S   = 0x41cdcd6500000000;   # 1.0e9  seconds (~31.7 years)
+#endif
 
 # ================================================================
 # FatigueState -- tracks vocal fatigue and call habituation.
@@ -81,6 +104,66 @@ var PR_FAT_MAX_DURATION_S   = 0x41cdcd6500000000;   # 1.0e9  seconds (~31.7 year
 # 6-decimal float writer, lossy). Auto-generates FatigueState_to_json(self, sb) +
 # FatigueState_from_json_str(json) — ports the Rust `#[derive(Serialize,
 # Deserialize)]` on FatigueState (state persistence).
+#ifdef PRANI_F32
+#derive(accessors)
+struct FatigueState {
+    fatigue: i64;
+    alarm_habituation: i64;
+    bout_calling_time: i64;
+    alarm_count: i64;
+    alarm_reinforced: i64;
+}
+
+# Pr64FatigueState -- FatigueState as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of FatigueState's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64FatigueState {
+    fatigue: i64;
+    alarm_habituation: i64;
+    bout_calling_time: i64;
+    alarm_count: i64;
+    alarm_reinforced: i64;
+}
+
+# FatigueState_to_json(self, sb) -- the f64 build's document for this FatigueState: each real widened,
+# which is exact (ADR-0010).
+fn FatigueState_to_json(self, sb) {
+    var w[40];
+    Pr64FatigueState_set_fatigue(&w, pr_to64(FatigueState_fatigue(self)));
+    Pr64FatigueState_set_alarm_habituation(&w, pr_to64(FatigueState_alarm_habituation(self)));
+    Pr64FatigueState_set_bout_calling_time(&w, pr_to64(FatigueState_bout_calling_time(self)));
+    Pr64FatigueState_set_alarm_count(&w, FatigueState_alarm_count(self));
+    Pr64FatigueState_set_alarm_reinforced(&w, FatigueState_alarm_reinforced(self));
+    return Pr64FatigueState_to_json(&w, sb);
+}
+
+# pr64_fatigue_state_narrow(w) -- a new FatigueState from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_fatigue_state_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(FatigueState));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    FatigueState_set_fatigue(self, pr_of64(Pr64FatigueState_fatigue(w)));
+    FatigueState_set_alarm_habituation(self, pr_of64(Pr64FatigueState_alarm_habituation(w)));
+    FatigueState_set_bout_calling_time(self, pr_of64(Pr64FatigueState_bout_calling_time(w)));
+    FatigueState_set_alarm_count(self, Pr64FatigueState_alarm_count(w));
+    FatigueState_set_alarm_reinforced(self, Pr64FatigueState_alarm_reinforced(w));
+    return self;
+}
+
+# FatigueState_from_json_str(json) -- FatigueState from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn FatigueState_from_json_str(json) {
+    return pr64_fatigue_state_narrow(Pr64FatigueState_from_json_str(json));
+}
+
+# FatigueState_from_json(pairs) -- the pairs form, likewise.
+fn FatigueState_from_json(pairs) {
+    return pr64_fatigue_state_narrow(Pr64FatigueState_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct FatigueState {
@@ -90,6 +173,7 @@ struct FatigueState {
     alarm_count: i64;
     alarm_reinforced: i64;
 }
+#endif
 
 # new() -- fresh (non-fatigued) state. Also serves as Default::default().
 #must_use
@@ -140,19 +224,19 @@ fn fatigue_record_call(self, duration, is_alarm) {
     }
 
     # bout_calling_time += duration
-    FatigueState_set_bout_calling_time(self, f64_add(FatigueState_bout_calling_time(self), duration));
+    FatigueState_set_bout_calling_time(self, pr_add(FatigueState_bout_calling_time(self), duration));
 
     # fatigue = (fatigue + duration * fatigue_rate).clamp(0.0, 1.0)
-    var f = f64_add(FatigueState_fatigue(self), f64_mul(duration, PR_FAT_FATIGUE_RATE));
-    FatigueState_set_fatigue(self, f64_clamp(f, 0, F64_ONE));
+    var f = pr_add(FatigueState_fatigue(self), pr_mul(duration, PR_FAT_FATIGUE_RATE));
+    FatigueState_set_fatigue(self, pr_clamp(f, 0, PR_ONE));
 
     if (is_alarm != 0) {
         # alarm_count += 1
         FatigueState_set_alarm_count(self, FatigueState_alarm_count(self) + 1);
         # if !alarm_reinforced { habituation = (habituation + 0.1).clamp(0,1) }
         if (FatigueState_alarm_reinforced(self) == 0) {
-            var h = f64_add(FatigueState_alarm_habituation(self), PR_FAT_HAB_STEP);
-            FatigueState_set_alarm_habituation(self, f64_clamp(h, 0, F64_ONE));
+            var h = pr_add(FatigueState_alarm_habituation(self), PR_FAT_HAB_STEP);
+            FatigueState_set_alarm_habituation(self, pr_clamp(h, 0, PR_ONE));
         }
     }
 }
@@ -175,15 +259,15 @@ fn fatigue_rest(self, duration) {
     }
 
     # fatigue = (fatigue - duration * recovery_rate).max(0.0)
-    var f = f64_sub(FatigueState_fatigue(self), f64_mul(duration, PR_FAT_RECOVERY_RATE));
-    FatigueState_set_fatigue(self, f64_max(f, 0));
+    var f = pr_sub(FatigueState_fatigue(self), pr_mul(duration, PR_FAT_RECOVERY_RATE));
+    FatigueState_set_fatigue(self, pr_max(f, 0));
 
     # alarm_habituation = (alarm_habituation - duration * habituation_decay).max(0.0)
-    var h = f64_sub(FatigueState_alarm_habituation(self), f64_mul(duration, PR_FAT_HAB_DECAY));
-    FatigueState_set_alarm_habituation(self, f64_max(h, 0));
+    var h = pr_sub(FatigueState_alarm_habituation(self), pr_mul(duration, PR_FAT_HAB_DECAY));
+    FatigueState_set_alarm_habituation(self, pr_max(h, 0));
 
     # if duration > 5.0 { bout_calling_time = 0.0 }
-    if (f64_gt(duration, PR_FAT_BOUT_RESET_SECS) == 1) {
+    if (pr_gt(duration, PR_FAT_BOUT_RESET_SECS)) {
         FatigueState_set_bout_calling_time(self, 0);
     }
 }
@@ -193,8 +277,8 @@ fn fatigue_rest(self, duration) {
 fn fatigue_reinforce_alarm(self) {
     if (self <= 0) { return 0; }   # ADR-0008
     FatigueState_set_alarm_reinforced(self, 1);
-    var h = f64_sub(FatigueState_alarm_habituation(self), PR_FAT_HAB_REINFORCE);
-    FatigueState_set_alarm_habituation(self, f64_max(h, 0));
+    var h = pr_sub(FatigueState_alarm_habituation(self), PR_FAT_HAB_REINFORCE);
+    FatigueState_set_alarm_habituation(self, pr_max(h, 0));
     FatigueState_set_alarm_count(self, 0);
 }
 
@@ -224,6 +308,62 @@ fn fatigue_reset(self) {
 # Fields TYPED i64 for #derive(Serialize) (each f64 as an exact bit pattern →
 # lossless) — auto-generates FatigueModifiers_to_json / _from_json_str, porting
 # the Rust `#[derive(Serialize, Deserialize)]` on FatigueModifiers.
+#ifdef PRANI_F32
+#derive(accessors)
+struct FatigueModifiers {
+    pitch_offset: i64;
+    breathiness_delta: i64;
+    amplitude_scale: i64;
+    jitter_scale: i64;
+}
+
+# Pr64FatigueModifiers -- FatigueModifiers as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of FatigueModifiers's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64FatigueModifiers {
+    pitch_offset: i64;
+    breathiness_delta: i64;
+    amplitude_scale: i64;
+    jitter_scale: i64;
+}
+
+# FatigueModifiers_to_json(self, sb) -- the f64 build's document for this FatigueModifiers: each real widened,
+# which is exact (ADR-0010).
+fn FatigueModifiers_to_json(self, sb) {
+    var w[32];
+    Pr64FatigueModifiers_set_pitch_offset(&w, pr_to64(FatigueModifiers_pitch_offset(self)));
+    Pr64FatigueModifiers_set_breathiness_delta(&w, pr_to64(FatigueModifiers_breathiness_delta(self)));
+    Pr64FatigueModifiers_set_amplitude_scale(&w, pr_to64(FatigueModifiers_amplitude_scale(self)));
+    Pr64FatigueModifiers_set_jitter_scale(&w, pr_to64(FatigueModifiers_jitter_scale(self)));
+    return Pr64FatigueModifiers_to_json(&w, sb);
+}
+
+# pr64_fatigue_modifiers_narrow(w) -- a new FatigueModifiers from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_fatigue_modifiers_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(FatigueModifiers));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    FatigueModifiers_set_pitch_offset(self, pr_of64(Pr64FatigueModifiers_pitch_offset(w)));
+    FatigueModifiers_set_breathiness_delta(self, pr_of64(Pr64FatigueModifiers_breathiness_delta(w)));
+    FatigueModifiers_set_amplitude_scale(self, pr_of64(Pr64FatigueModifiers_amplitude_scale(w)));
+    FatigueModifiers_set_jitter_scale(self, pr_of64(Pr64FatigueModifiers_jitter_scale(w)));
+    return self;
+}
+
+# FatigueModifiers_from_json_str(json) -- FatigueModifiers from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn FatigueModifiers_from_json_str(json) {
+    return pr64_fatigue_modifiers_narrow(Pr64FatigueModifiers_from_json_str(json));
+}
+
+# FatigueModifiers_from_json(pairs) -- the pairs form, likewise.
+fn FatigueModifiers_from_json(pairs) {
+    return pr64_fatigue_modifiers_narrow(Pr64FatigueModifiers_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct FatigueModifiers {
@@ -232,6 +372,7 @@ struct FatigueModifiers {
     amplitude_scale: i64;
     jitter_scale: i64;
 }
+#endif
 
 # modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) --
 # construct a FatigueModifiers. pitch_offset (Hz) and breathiness_delta are added to
@@ -279,14 +420,14 @@ fn fatigue_modifiers_into(self, out) {
     if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var fat = FatigueState_fatigue(self);
     var hab = FatigueState_alarm_habituation(self);
-    if (prani_in_range(fat, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    if (prani_in_range(hab, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var pitch_offset = f64_neg(f64_mul(fat, PR_FAT_PITCH_DROP_HZ));
-    var breathiness_delta = f64_mul(fat, PR_FAT_BREATH_MAX);
-    var fatigue_amp = f64_sub(F64_ONE, f64_mul(fat, PR_FAT_AMP_FATIGUE_MAX));
-    var habituation_amp = f64_sub(F64_ONE, f64_mul(hab, PR_FAT_AMP_HAB_MAX));
-    var amplitude_scale = f64_mul(fatigue_amp, habituation_amp);
-    var jitter_scale = f64_add(F64_ONE, f64_mul(fat, PR_FAT_JITTER_SPAN));
+    if (prani_in_range(fat, 0, PR_ONE) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_in_range(hab, 0, PR_ONE) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var pitch_offset = pr_neg(pr_mul(fat, PR_FAT_PITCH_DROP_HZ));
+    var breathiness_delta = pr_mul(fat, PR_FAT_BREATH_MAX);
+    var fatigue_amp = pr_sub(PR_ONE, pr_mul(fat, PR_FAT_AMP_FATIGUE_MAX));
+    var habituation_amp = pr_sub(PR_ONE, pr_mul(hab, PR_FAT_AMP_HAB_MAX));
+    var amplitude_scale = pr_mul(fatigue_amp, habituation_amp);
+    var jitter_scale = pr_add(PR_ONE, pr_mul(fat, PR_FAT_JITTER_SPAN));
     FatigueModifiers_set_pitch_offset(out, pitch_offset);
     FatigueModifiers_set_breathiness_delta(out, breathiness_delta);
     FatigueModifiers_set_amplitude_scale(out, amplitude_scale);
@@ -306,3 +447,6 @@ fn fatigue_modifiers(self) {
     if (out < 0) { return out; }   # PRANI_ERR_ALLOC (2.2.0)
     return fatigue_modifiers_into(self, out);
 }
+
+# prani:real-source-end
+#endif

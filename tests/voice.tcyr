@@ -22,18 +22,55 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
+include "tests/realt.cyr"
 
 # ---- test constants (IEEE-754 hex) -----------------------------------------
+#ifdef PRANI_F32
+var T_SR        = 0x472C4400;           # 44100.0 sample rate
+var T_DUR_005   = 0x3D4CCCCD;           # 0.05 s  -> 2205 samples @ 44100
+var T_DUR_003   = 0x3CF5C28F;           # 0.03 s  -> 1323 samples @ 44100
+var T_0_5       = 0x3F000000;           # 0.5
+var T_0_3       = 0x3E99999A;           # 0.3
+var T_0_7       = 0x3F333333;           # 0.7
+var T_0_8       = 0x3F4CCCCD;           # 0.8
+var T_1_0       = 0x3F800000;           # 1.0
+var T_400       = 0x43C80000;           # 400.0  wolf f0_default / effective_f0
+var T_200       = 0x43480000;           # 200.0  wolf effective_f0 @ size 2
+var T_1000      = 0x447A0000;           # 1000.0 contour base for f0_at asserts
+var T_3000      = 0x453B8000;           # 3000.0 songbird effective_f0
+var T_800       = 0x44480000;           # 800.0  HOWL f0_at(0) = base*0.8
+var T_1300      = 0x44A28000;           # 1300.0 HOWL f0_at(0.3) = base*1.3
+var T_1200      = 0x44960000;           # 1200.0 HOWL f0_at(0.7) = base*1.2
+var T_600       = 0x44160000;           # 600.0  HOWL f0_at(1.0) = base*0.6
+var T_NEG_2     = 0xC0000000;           # -2.0  growl/rumble spectral offset
+var T_2_0       = 0x40000000;           # 2.0   hiss spectral offset
+var T_0_2       = 0x3E4CCCCD;           # 0.2   cat nasal fraction; ALSO 0.2 s -> 8820 samples @ 44100
+var T_0_1       = 0x3DCCCCCD;           # 0.1   wolf nasal fraction
+var T_60_0      = 0x42700000;           # 60.0  quiet ambient (below Lombard baseline 40 -> boost)
+var T_30_0      = 0x41F00000;           # 30.0  ambient at/below Lombard baseline 40 -> no boost
+var T_LOMBARD_60 = 0x3DCCCCCD;          # (60-40)*0.005 = 0.1 lombard boost @ 60 dB
+var T_EFF_06    = 0x3F19999A;           # 0.5 + 0.1 = 0.6 effort after lombard @ 60 dB (start 0.5)
+var T_1E_3      = 0x3A83126F;           # 0.001   oracle audibility floor (2.0.3:rust-old/tests/integration.rs:12)
+#else
 var T_SR        = 0x40e5888000000000;   # 44100.0 sample rate
 var T_DUR_005   = 0x3fa999999999999a;   # 0.05 s  -> 2205 samples @ 44100
 var T_DUR_003   = 0x3f9eb851eb851eb8;   # 0.03 s  -> 1323 samples @ 44100
@@ -59,20 +96,41 @@ var T_30_0      = 0x403e000000000000;   # 30.0  ambient at/below Lombard baselin
 var T_LOMBARD_60 = 0x3fb999999999999a;  # (60-40)*0.005 = 0.1 lombard boost @ 60 dB
 var T_EFF_06    = 0x3fe3333333333333;   # 0.5 + 0.1 = 0.6 effort after lombard @ 60 dB (start 0.5)
 var T_1E_3      = 0x3f50624dd2f1a9fc;   # 0.001   oracle audibility floor (2.0.3:rust-old/tests/integration.rs:12)
+#endif
 # 0.0001  oracle cat-purr audibility floor (2.0.3:rust-old/tests/integration.rs:367)
+#ifdef PRANI_F32
+var T_1E_4      = 0x38D1B717;
+#else
 var T_1E_4      = 0x3f1a36e2eb1c432d;
+#endif
 # 0.01    oracle subharmonic audibility floor (2.0.3:rust-old/tests/integration.rs:390)
+#ifdef PRANI_F32
+var T_0_01      = 0x3C23D70A;
+var T_1_5       = 0x3FC00000;           # 1.5   screech / chirp spectral offset
+var T_NEG_1     = 0xBF800000;           # -1.0  roar spectral offset
+var T_0_45      = 0x3EE66666;           # 0.45  dog effective_tract_scale @ size 0.5 (0.9 * 0.5)
+var T_1_8       = 0x3FE66666;           # 1.8   dog effective_tract_scale @ size 2.0 (0.9 * 2)
+#else
 var T_0_01      = 0x3f847ae147ae147b;
 var T_1_5       = 0x3ff8000000000000;   # 1.5   screech / chirp spectral offset
 var T_NEG_1     = 0xbff0000000000000;   # -1.0  roar spectral offset
 var T_0_45      = 0x3fdccccccccccccd;   # 0.45  dog effective_tract_scale @ size 0.5 (0.9 * 0.5)
 var T_1_8       = 0x3ffccccccccccccd;   # 1.8   dog effective_tract_scale @ size 2.0 (0.9 * 2)
+#endif
 # ---- 2.0.5 input-range guard constants -------------------------------------
+#ifdef PRANI_F32
+var T_NAN       = 0x7FC00000;           # NaN -- the one value f64_clamp passes through
+var T_1E300     = 0x7F7FFFFF;           # 1e300 s: finite, but 1e300 * 44100 overflows f64_to
+var T_0_05      = 0x3D4CCCCD;           # 0.05  with_jitter's ceiling (== T_DUR_005's pattern)
+var T_1_2       = 0x3F99999A;           # 1.2   out of with_vocal_effort's [0,1]
+var T_8000      = 0x45FA0000;           # 8000.0 a LOW but perfectly valid sample rate
+#else
 var T_NAN       = 0x7ff8000000000000;   # NaN -- the one value f64_clamp passes through
 var T_1E300     = 0x7e37e43c8800759c;   # 1e300 s: finite, but 1e300 * 44100 overflows f64_to
 var T_0_05      = 0x3fa999999999999a;   # 0.05  with_jitter's ceiling (== T_DUR_005's pattern)
 var T_1_2       = 0x3ff3333333333333;   # 1.2   out of with_vocal_effort's [0,1]
 var T_8000      = 0x40bf400000000000;   # 8000.0 a LOW but perfectly valid sample rate
+#endif
 
 alloc_init();
 
@@ -99,8 +157,8 @@ fn t_max_abs(v) {
     var m = 0;
     var i = 0;
     while (i < n) {
-        var a = f64_abs(vec_get(v, i));
-        if (f64_gt(a, m) == 1) { m = a; }
+        var a = pr_abs(vec_get(v, i));
+        if (pr_gt(a, m) == 1) { m = a; }
         i = i + 1;
     }
     return m;
@@ -116,7 +174,7 @@ fn t_energy_range(v, lo, hi) {
     var i = lo;
     while (i < end) {
         var s = vec_get(v, i);
-        acc = f64_add(acc, f64_mul(s, s));
+        acc = pr_add(acc, pr_mul(s, s));
         i = i + 1;
     }
     return acc;
@@ -139,7 +197,7 @@ fn t_count_below(v, eps, lo, hi) {
     var c = 0;
     var i = lo;
     while (i < end) {
-        if (f64_lt(f64_abs(vec_get(v, i)), eps) == 1) { c = c + 1; }
+        if (pr_lt(pr_abs(vec_get(v, i)), eps) == 1) { c = c + 1; }
         i = i + 1;
     }
     return c;
@@ -169,11 +227,11 @@ fn t_voice_json(species, f0_offset, size_scale, vocal_effort, params) {
     str_builder_add_cstr(sb, "{\"species\":");
     str_builder_add_int(sb, species);
     str_builder_add_cstr(sb, ",\"f0_offset\":");
-    str_builder_add_int(sb, f0_offset);
+    str_builder_add_int(sb, pr_to64(f0_offset));   # f64 bits in both builds (ADR-0010)
     str_builder_add_cstr(sb, ",\"size_scale\":");
-    str_builder_add_int(sb, size_scale);
+    str_builder_add_int(sb, pr_to64(size_scale));
     str_builder_add_cstr(sb, ",\"vocal_effort\":");
-    str_builder_add_int(sb, vocal_effort);
+    str_builder_add_int(sb, pr_to64(vocal_effort));
     str_builder_add_cstr(sb, ",\"params\":");
     SpeciesParams_to_json(params, sb);
     str_builder_add_cstr(sb, "}");
@@ -238,12 +296,12 @@ assert_eq(crvoice_effective_f0(bird), T_3000, "songbird effective_f0 == 3000");
 test_group("individual variation -- Dog size ordering (unclamped)");
 var dog_s = crvoice_with_size(crvoice_new(PRANI_SP_DOG), T_0_5);
 var dog_l = crvoice_with_size(crvoice_new(PRANI_SP_DOG), T_2_0);
-assert_eq(crvoice_effective_f0(dog_s), f64_from(600), "dog @ size 0.5 -> 300/0.5 = 600 (unclamped)");
-assert_eq(crvoice_effective_f0(dog_l), f64_from(150), "dog @ size 2.0 -> 300/2 = 150 (unclamped)");
-assert_eq(f64_gt(crvoice_effective_f0(dog_s), crvoice_effective_f0(dog_l)), 1, "smaller dog -> higher effective_f0");
+assert_eq(crvoice_effective_f0(dog_s), pr_from(600), "dog @ size 0.5 -> 300/0.5 = 600 (unclamped)");
+assert_eq(crvoice_effective_f0(dog_l), pr_from(150), "dog @ size 2.0 -> 300/2 = 150 (unclamped)");
+assert_eq(pr_gt(crvoice_effective_f0(dog_s), crvoice_effective_f0(dog_l)), 1, "smaller dog -> higher effective_f0");
 assert_eq(crvoice_effective_tract_scale(dog_s), T_0_45, "dog tract_scale @ size 0.5 == 0.45");
 assert_eq(crvoice_effective_tract_scale(dog_l), T_1_8, "dog tract_scale @ size 2.0 == 1.8");
-assert_eq(f64_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_scale(dog_l)), 1,
+assert_eq(pr_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_scale(dog_l)), 1,
   "smaller dog -> shorter tract");
 
 # ================================================================
@@ -252,11 +310,11 @@ assert_eq(f64_lt(crvoice_effective_tract_scale(dog_s), crvoice_effective_tract_s
 # size. Dragon row: f0 30..500 default 70 -- 70/3 = 23.33 clamps UP to f0_min 30.
 test_group("individual variation -- Dragon size ordering (f0_min clamp)");
 var dr_small = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), T_0_5);
-var dr_large = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), f64_from(3));
+var dr_large = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), pr_from(3));
 assert_eq(CreatureVoice_f0_offset(dr_small), CreatureVoice_f0_offset(dr_large),
   "both dragons share one f0_offset (size isolated)");
-assert_eq(crvoice_effective_f0(dr_small), f64_from(140), "dragon @ size 0.5 -> 70/0.5 = 140");
-assert_eq(crvoice_effective_f0(dr_large), f64_from(30), "dragon @ size 3.0 -> 23.33 clamps up to f0_min 30");
+assert_eq(crvoice_effective_f0(dr_small), pr_from(140), "dragon @ size 0.5 -> 70/0.5 = 140");
+assert_eq(crvoice_effective_f0(dr_large), pr_from(30), "dragon @ size 3.0 -> 23.33 clamps up to f0_min 30");
 assert_lt(crvoice_effective_f0(dr_large), crvoice_effective_f0(dr_small), "bigger dragon has the lower f0");
 # ... and both still synthesize: the size-3 dragon's 30 Hz f0 sits far below its F1 of 170.
 var dr_s_out = crvoice_vocalize(dr_small, PRANI_VOC_ROAR, T_SR, T_DUR_003);
@@ -265,38 +323,38 @@ assert_eq(prani_is_err(dr_s_out), 0, "size-0.5 dragon roar non-error");
 assert_eq(prani_is_err(dr_l_out), 0, "size-3.0 dragon roar non-error");
 assert_eq(t_all_finite(dr_s_out), 1, "size-0.5 dragon roar all finite");
 assert_eq(t_all_finite(dr_l_out), 1, "size-3.0 dragon roar all finite");
-assert_eq(f64_gt(t_max_abs(dr_l_out), T_0_01), 1, "size-3.0 dragon roar audible (max |s| > 0.01)");
+assert_eq(pr_gt(t_max_abs(dr_l_out), T_0_01), 1, "size-3.0 dragon roar audible (max |s| > 0.01)");
 
 # ================================================================
 test_group("builder clamps");
 # with_size clamps to [0.1, 10.0]
 var too_small = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), 0);
 assert_eq(CreatureVoice_size_scale(too_small), PR_V_0_1, "with_size clamps 0 -> 0.1");
-var too_big = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), f64_from(100));
-assert_eq(CreatureVoice_size_scale(too_big), f64_from(10), "with_size clamps 100 -> 10");
+var too_big = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), pr_from(100));
+assert_eq(CreatureVoice_size_scale(too_big), pr_from(10), "with_size clamps 100 -> 10");
 # with_vocal_effort clamps to [0, 1]
-var v_hi = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), f64_from(5));
+var v_hi = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), pr_from(5));
 assert_eq(crvoice_vocal_effort(v_hi), T_1_0, "with_vocal_effort clamps 5 -> 1.0");
-var v_lo = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), f64_neg(f64_from(2)));
+var v_lo = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), pr_neg(pr_from(2)));
 assert_eq(crvoice_vocal_effort(v_lo), 0, "with_vocal_effort clamps -2 -> 0.0");
 # with_breathiness clamps to [0,1] (mutates params in place)
-var v_br = crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), f64_from(3));
+var v_br = crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), pr_from(3));
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_br)), T_1_0, "with_breathiness clamps 3 -> 1.0");
 # with_f0_offset clamps to +/-(f0_max - f0_min). Wolf range = 1200-150 = 1050.
-var v_off = crvoice_with_f0_offset(crvoice_new(PRANI_SP_WOLF), f64_from(5000));
-assert_eq(CreatureVoice_f0_offset(v_off), f64_from(1050), "with_f0_offset clamps 5000 -> 1050 (range)");
+var v_off = crvoice_with_f0_offset(crvoice_new(PRANI_SP_WOLF), pr_from(5000));
+assert_eq(CreatureVoice_f0_offset(v_off), pr_from(1050), "with_f0_offset clamps 5000 -> 1050 (range)");
 # with_size floor is a CLAMP, not an abs -- a negative scale lands on 0.1 too.
-var v_neg = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), f64_neg(T_1_0));
+var v_neg = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), pr_neg(T_1_0));
 assert_eq(CreatureVoice_size_scale(v_neg), PR_V_0_1, "with_size clamps -1 -> 0.1");
 # with_jitter clamps to [0, 0.05] (mutates params in place).
 var v_ji = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), T_1_0);
 assert_eq(SpeciesParams_jitter(CreatureVoice_params(v_ji)), PR_V_0_05, "with_jitter clamps 1.0 -> 0.05");
-var v_ji0 = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), f64_neg(T_1_0));
+var v_ji0 = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), pr_neg(T_1_0));
 assert_eq(SpeciesParams_jitter(CreatureVoice_params(v_ji0)), 0, "with_jitter clamps -1.0 -> 0.0");
 # with_shimmer clamps to [0, 0.1] (mutates params in place).
 var v_sh = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), T_1_0);
 assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh)), PR_V_0_1, "with_shimmer clamps 1.0 -> 0.1");
-var v_sh0 = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), f64_neg(T_1_0));
+var v_sh0 = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), pr_neg(T_1_0));
 assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh0)), 0, "with_shimmer clamps -1.0 -> 0.0");
 
 # ================================================================
@@ -305,8 +363,8 @@ assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh0)), 0, "with_shimmer c
 # above prove the fields land on the rail; this proves the railed voice still works.
 test_group("clamped extremes still synthesize");
 var v_ext = crvoice_new(PRANI_SP_WOLF);
-var _e1 = crvoice_with_breathiness(v_ext, f64_from(5));
-var _e2 = crvoice_with_size(v_ext, f64_neg(T_1_0));
+var _e1 = crvoice_with_breathiness(v_ext, pr_from(5));
+var _e2 = crvoice_with_size(v_ext, pr_neg(T_1_0));
 var _e3 = crvoice_with_jitter(v_ext, T_1_0);
 var _e4 = crvoice_with_shimmer(v_ext, T_1_0);
 assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v_ext)), T_1_0, "extreme voice breathiness railed to 1.0");
@@ -315,14 +373,14 @@ var ext_out = crvoice_vocalize(v_ext, PRANI_VOC_HOWL, T_SR, T_0_3);
 assert_eq(prani_is_err(ext_out), 0, "railed-parameter wolf howl non-error");
 assert_eq(vec_len(ext_out), 13230, "railed-parameter wolf howl length == 13230 (0.3s @ 44100)");
 assert_eq(t_all_finite(ext_out), 1, "railed-parameter wolf howl all finite");
-assert_eq(f64_gt(t_max_abs(ext_out), T_1E_3), 1, "railed-parameter wolf howl audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(ext_out), T_1E_3), 1, "railed-parameter wolf howl audible (max |s| > 0.001)");
 
 # ================================================================
 test_group("set_vocal_effort -- mutable, clamped");
 var v_set = crvoice_new(PRANI_SP_WOLF);
 crvoice_set_vocal_effort(v_set, T_0_8);
 assert_eq(crvoice_vocal_effort(v_set), T_0_8, "set_vocal_effort 0.8");
-crvoice_set_vocal_effort(v_set, f64_from(9));
+crvoice_set_vocal_effort(v_set, pr_from(9));
 assert_eq(crvoice_vocal_effort(v_set), T_1_0, "set_vocal_effort clamps 9 -> 1.0");
 
 # ================================================================
@@ -334,7 +392,7 @@ assert_eq(crvoice_vocal_effort(v_lom), T_0_5, "ambient 30 dB -> no boost (still 
 # ambient 60 -> boost (60-40)*0.005 = 0.1 -> effort 0.6
 crvoice_apply_lombard_effect(v_lom, T_60_0);
 assert_eq(crvoice_vocal_effort(v_lom), T_EFF_06, "ambient 60 dB -> effort 0.5 + 0.1 = 0.6");
-assert_eq(bridge_lombard_effort_boost(T_60_0), T_LOMBARD_60, "lombard boost @ 60 dB == 0.1");
+assert_real(bridge_lombard_effort_boost(T_60_0), T_LOMBARD_60, 1, "lombard boost @ 60 dB == 0.1");
 
 # ================================================================
 test_group("pitch_contour f0_at -- hand-computed HOWL (base 1000)");
@@ -347,7 +405,7 @@ assert_eq(crvoice_pitch_contour_f0_at(howl_c, T_1_0), T_600, "HOWL f0_at(1.0) ==
 var flat_c = crvoice_pitch_contour(PRANI_VOC_GROWL, T_1000);
 assert_eq(crvoice_pitch_contour_f0_at(flat_c, T_0_5), T_1000, "FLAT f0_at(0.5) == base == 1000");
 # clamp: t < 0 clamps to 0.
-assert_eq(crvoice_pitch_contour_f0_at(howl_c, f64_neg(T_1_0)), T_800, "HOWL f0_at(-1) clamps to t=0 -> 800");
+assert_eq(crvoice_pitch_contour_f0_at(howl_c, pr_neg(T_1_0)), T_800, "HOWL f0_at(-1) clamps to t=0 -> 800");
 # BARK/YELP: (0.0,1.2),(0.1,1.0),(1.0,0.8) -- the contour Alarm barks ride.
 var bark_c = crvoice_pitch_contour(PRANI_VOC_BARK, T_1000);
 assert_eq(crvoice_pitch_contour_f0_at(bark_c, 0), T_1200, "BARK f0_at(0) == base*1.2 == 1200");
@@ -356,9 +414,9 @@ assert_eq(crvoice_pitch_contour_f0_at(bark_c, T_1_0), T_800, "BARK f0_at(1.0) ==
 # SCREECH: (0.0,1.5),(0.3,1.2),(1.0,0.7) -- a descending sweep, so a raptor's
 # 2500 Hz f0 crosses the tract's 2000 Hz dual-source boundary mid-call.
 var scr_c = crvoice_pitch_contour(PRANI_VOC_SCREECH, T_1000);
-assert_eq(crvoice_pitch_contour_f0_at(scr_c, 0), f64_from(1500), "SCREECH f0_at(0) == base*1.5 == 1500");
+assert_eq(crvoice_pitch_contour_f0_at(scr_c, 0), pr_from(1500), "SCREECH f0_at(0) == base*1.5 == 1500");
 assert_eq(crvoice_pitch_contour_f0_at(scr_c, T_0_3), T_1200, "SCREECH f0_at(0.3) == base*1.2 == 1200");
-assert_eq(crvoice_pitch_contour_f0_at(scr_c, T_1_0), f64_from(700), "SCREECH f0_at(1.0) == base*0.7 == 700");
+assert_eq(crvoice_pitch_contour_f0_at(scr_c, T_1_0), pr_from(700), "SCREECH f0_at(1.0) == base*0.7 == 700");
 
 # ================================================================
 test_group("vocalization_spectral_offset -- table");
@@ -377,7 +435,9 @@ test_group("nasal_phase_fraction -- sentinel for None");
 assert_eq(crvoice_nasal_phase_fraction(PRANI_VOC_HOWL, PRANI_SP_CAT), T_0_2, "cat howl nasal 0.2");
 assert_eq(crvoice_nasal_phase_fraction(PRANI_VOC_HOWL, PRANI_SP_WOLF), T_0_1, "wolf howl nasal 0.1");
 # non-nasal pair -> negative sentinel (< 0).
-assert_lt(crvoice_nasal_phase_fraction(PRANI_VOC_ROAR, PRANI_SP_LION), 0, "lion roar -> nasal None sentinel < 0");
+# a negative REAL: compared as one, since an f32 real is a non-negative word (ADR-0010).
+var lion_nasal = crvoice_nasal_phase_fraction(PRANI_VOC_ROAR, PRANI_SP_LION);
+assert_eq(pr_lt(lion_nasal, 0), 1, "lion roar -> nasal None sentinel < 0");
 
 # ================================================================
 test_group("formant_transition_contour -- Some/None");
@@ -391,16 +451,16 @@ assert_eq(crvoice_formant_transition_contour(PRANI_VOC_ROAR, PRANI_SP_LION), 0, 
 var wolf_fc = crvoice_formant_transition_contour(PRANI_VOC_HOWL, PRANI_SP_WOLF);
 var fb0 = crvoice_formant_transition_at(wolf_fc, 0);
 assert_eq(FormantBlend_blend(fb0), 0, "wolf howl blend at t=0 == 0.0");
-assert_eq(FormantBlend_f0(fb0), f64_from(420), "wolf howl F1 at t=0 == 420");
+assert_eq(FormantBlend_f0(fb0), pr_from(420), "wolf howl F1 at t=0 == 420");
 # CAT_MEOW_HOWL first keyframe: (0.0, [400,2000,3500], [150,200,250], 0.8). The
 # cat table has only ever been checked for a non-null pointer; a wrong row here
 # would have been invisible where the wolf's equivalent is pinned.
 var cat_fc = crvoice_formant_transition_contour(PRANI_VOC_HOWL, PRANI_SP_CAT);
 var cfb0 = crvoice_formant_transition_at(cat_fc, 0);
 assert_eq(FormantBlend_blend(cfb0), T_0_8, "cat meow blend at t=0 == 0.8 (nonzero, unlike wolf's)");
-assert_eq(FormantBlend_f0(cfb0), f64_from(400), "cat meow F1 at t=0 == 400");
-assert_eq(FormantBlend_f1(cfb0), f64_from(2000), "cat meow F2 at t=0 == 2000");
-assert_eq(FormantBlend_b0(cfb0), f64_from(150), "cat meow B1 at t=0 == 150");
+assert_eq(FormantBlend_f0(cfb0), pr_from(400), "cat meow F1 at t=0 == 400");
+assert_eq(FormantBlend_f1(cfb0), pr_from(2000), "cat meow F2 at t=0 == 2000");
+assert_eq(FormantBlend_b0(cfb0), pr_from(150), "cat meow B1 at t=0 == 150");
 
 # ================================================================
 # All three of the oracle's rejection pairs (2.0.3:rust-old/tests/integration.rs:162-174),
@@ -427,14 +487,14 @@ assert_eq(t_all_finite(w_out), 1, "wolf howl all finite");
 # The oracle's own audibility bar (2.0.3:rust-old/tests/integration.rs:11-12).
 # non-error + length + all-finite are ALL satisfied by an all-zero buffer; this
 # is the only assertion in the group that is not.
-assert_eq(f64_gt(t_max_abs(w_out), T_1E_3), 1, "wolf howl audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(w_out), T_1E_3), 1, "wolf howl audible (max |s| > 0.001)");
 
 # Lion roar (subharmonics + chaos path).
 var l_out = crvoice_vocalize(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, T_SR, T_DUR_005);
 assert_eq(prani_is_err(l_out), 0, "lion roar non-error");
 assert_eq(vec_len(l_out), 2205, "lion roar length == 2205");
 assert_eq(t_all_finite(l_out), 1, "lion roar all finite");
-assert_eq(f64_gt(t_max_abs(l_out), T_0_01), 1, "lion roar audible (max |s| > 0.01)");
+assert_eq(pr_gt(t_max_abs(l_out), T_0_01), 1, "lion roar audible (max |s| > 0.01)");
 
 # Songbird trill (syringeal coupling + AM pattern path).
 var b_out = crvoice_vocalize(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_TRILL, T_SR, T_DUR_005);
@@ -454,7 +514,7 @@ assert_eq(prani_is_err(p_out), 0, "cat purr non-error");
 assert_eq(vec_len(p_out), 2205, "cat purr length == 2205");
 assert_eq(t_all_finite(p_out), 1, "cat purr all finite");
 # Oracle bar for the purr path is looser than the howl's (2.0.3:rust-old/tests/integration.rs:367).
-assert_eq(f64_gt(t_max_abs(p_out), T_1E_4), 1, "cat purr audible (max |s| > 1e-4)");
+assert_eq(pr_gt(t_max_abs(p_out), T_1E_4), 1, "cat purr audible (max |s| > 1e-4)");
 
 # Cat howl -- the ONLY pair that drives the cat nasal anti-formant (0.2 fraction)
 # and the CAT_MEOW_HOWL formant-transition table through a real synthesis.
@@ -464,7 +524,7 @@ var ch_out = crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_HOWL, T_SR, T
 assert_eq(prani_is_err(ch_out), 0, "cat howl non-error");
 assert_eq(vec_len(ch_out), 2205, "cat howl length == 2205");
 assert_eq(t_all_finite(ch_out), 1, "cat howl all finite");
-assert_eq(f64_gt(t_max_abs(ch_out), T_1E_3), 1, "cat howl audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(ch_out), T_1E_3), 1, "cat howl audible (max |s| > 0.001)");
 # Same species, same duration, different vocalization -> a different buffer.
 # (Control: proves the voc argument reaches the synthesis, not just the length.)
 assert_eq(t_vecs_equal(ch_out, p_out), 0, "cat howl differs from cat purr");
@@ -480,7 +540,7 @@ var d_out = crvoice_vocalize(crvoice_new(PRANI_SP_DRAGON), PRANI_VOC_ROAR, T_SR,
 assert_eq(prani_is_err(d_out), 0, "dragon roar non-error");
 assert_eq(vec_len(d_out), 1323, "dragon roar length == 1323 (0.03s @ 44100)");
 assert_eq(t_all_finite(d_out), 1, "dragon roar all finite");
-assert_eq(f64_gt(t_max_abs(d_out), T_0_01), 1, "dragon roar audible (max |s| > 0.01)");
+assert_eq(pr_gt(t_max_abs(d_out), T_0_01), 1, "dragon roar audible (max |s| > 0.01)");
 
 # Bee buzz (VIBRATILE apparatus -- the only species class with no voice-level
 # coverage before this line). Ports test_bee_buzz (2.0.3:rust-old/tests/integration.rs:279-285).
@@ -488,7 +548,7 @@ var bee_out = crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, T_SR, 
 assert_eq(prani_is_err(bee_out), 0, "bee buzz non-error");
 assert_eq(vec_len(bee_out), 2205, "bee buzz length == 2205");
 assert_eq(t_all_finite(bee_out), 1, "bee buzz all finite");
-assert_eq(f64_gt(t_max_abs(bee_out), T_1E_3), 1, "bee buzz audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(bee_out), T_1E_3), 1, "bee buzz audible (max |s| > 0.001)");
 
 # Crow screech (syringeal, f0 800 -> stays in the single-source sub-2000 branch).
 # Ports test_crow_screech (2.0.3:rust-old/tests/integration.rs:287-295).
@@ -496,18 +556,18 @@ var cw_out = crvoice_vocalize(crvoice_new(PRANI_SP_CROW), PRANI_VOC_SCREECH, T_S
 assert_eq(prani_is_err(cw_out), 0, "crow screech non-error");
 assert_eq(vec_len(cw_out), 2205, "crow screech length == 2205");
 assert_eq(t_all_finite(cw_out), 1, "crow screech all finite");
-assert_eq(f64_gt(t_max_abs(cw_out), T_1E_3), 1, "crow screech audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(cw_out), T_1E_3), 1, "crow screech audible (max |s| > 0.001)");
 
 # Raptor screech (syringeal, f0 2500 -> the dual-source above-2000 branch, and
 # the screech contour sweeps 1.5x..0.7x ACROSS the 2000 Hz boundary mid-call).
 # Ports test_raptor_screech (2.0.3:rust-old/tests/integration.rs:332-340).
-assert_eq(crvoice_effective_f0(crvoice_new(PRANI_SP_RAPTOR)), f64_from(2500),
+assert_eq(crvoice_effective_f0(crvoice_new(PRANI_SP_RAPTOR)), pr_from(2500),
   "raptor effective_f0 == 2500 (dual-source precondition)");
 var rp_out = crvoice_vocalize(crvoice_new(PRANI_SP_RAPTOR), PRANI_VOC_SCREECH, T_SR, T_DUR_005);
 assert_eq(prani_is_err(rp_out), 0, "raptor screech non-error");
 assert_eq(vec_len(rp_out), 2205, "raptor screech length == 2205");
 assert_eq(t_all_finite(rp_out), 1, "raptor screech all finite");
-assert_eq(f64_gt(t_max_abs(rp_out), T_1E_3), 1, "raptor screech audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(rp_out), T_1E_3), 1, "raptor screech audible (max |s| > 0.001)");
 # Same vocalization, different species row -> different audio.
 assert_eq(t_vecs_equal(rp_out, cw_out), 0, "raptor screech differs from crow screech");
 
@@ -518,7 +578,7 @@ var cr_out = crvoice_vocalize(crvoice_new(PRANI_SP_CROCODILIAN), PRANI_VOC_RUMBL
 assert_eq(prani_is_err(cr_out), 0, "crocodilian rumble non-error");
 assert_eq(vec_len(cr_out), 2205, "crocodilian rumble length == 2205");
 assert_eq(t_all_finite(cr_out), 1, "crocodilian rumble all finite");
-assert_eq(f64_gt(t_max_abs(cr_out), T_1E_3), 1, "crocodilian rumble audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(cr_out), T_1E_3), 1, "crocodilian rumble audible (max |s| > 0.001)");
 
 # Wolf growl and wolf screech -- one voice, two vocalizations, so the spectral
 # envelope is the only thing that differs. Ports test_spectral_envelope_per_vocalization
@@ -528,12 +588,12 @@ var g_out = crvoice_vocalize(env_v, PRANI_VOC_GROWL, T_SR, T_DUR_005);
 assert_eq(prani_is_err(g_out), 0, "wolf growl non-error");
 assert_eq(vec_len(g_out), 2205, "wolf growl length == 2205");
 assert_eq(t_all_finite(g_out), 1, "wolf growl all finite");
-assert_eq(f64_gt(t_max_abs(g_out), T_1E_3), 1, "wolf growl audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(g_out), T_1E_3), 1, "wolf growl audible (max |s| > 0.001)");
 var s_out = crvoice_vocalize(env_v, PRANI_VOC_SCREECH, T_SR, T_DUR_005);
 assert_eq(prani_is_err(s_out), 0, "wolf screech non-error");
 assert_eq(vec_len(s_out), 2205, "wolf screech length == 2205");
 assert_eq(t_all_finite(s_out), 1, "wolf screech all finite");
-assert_eq(f64_gt(t_max_abs(s_out), T_1E_3), 1, "wolf screech audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(s_out), T_1E_3), 1, "wolf screech audible (max |s| > 0.001)");
 # growl offset -2.0 vs screech +1.5 -- same voice, so the tilt must separate them.
 assert_eq(t_vecs_equal(g_out, s_out), 0, "growl and screech from one voice differ");
 
@@ -558,12 +618,12 @@ var c_long = crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_STRIDULAT
 assert_eq(prani_is_err(c_long), 0, "0.2s cricket stridulate non-error");
 assert_eq(vec_len(c_long), 8820, "0.2s cricket stridulate length == 8820");
 assert_eq(t_all_finite(c_long), 1, "0.2s cricket stridulate all finite");
-assert_eq(f64_gt(t_max_abs(c_long), T_1E_3), 1, "cricket chirp is audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(c_long), T_1E_3), 1, "cricket chirp is audible (max |s| > 0.001)");
 var c_ramp = t_energy_range(c_long, 2940, 3087);
 var c_flat = t_energy_range(c_long, 3087, 3234);
-assert_eq(f64_gt(c_ramp, 0), 1, "syllable ramp window is not silent (control)");
-assert_eq(f64_gt(c_flat, c_ramp), 1, "syllable plateau carries more energy than the ramp");
-assert_eq(f64_gt(c_flat, f64_mul(c_ramp, T_1_5)), 1,
+assert_eq(pr_gt(c_ramp, 0), 1, "syllable ramp window is not silent (control)");
+assert_eq(pr_gt(c_flat, c_ramp), 1, "syllable plateau carries more energy than the ramp");
+assert_eq(pr_gt(c_flat, pr_mul(c_ramp, T_1_5)), 1,
   "plateau energy > 1.5x ramp energy (hand bar; mean env^2 1 vs ~1/3)");
 # The silence after the chirp, unreachable here through 2.2.0. The tilt lowpass and
 # the DC blocker leave a short tail, so the window starts 600 samples in.
@@ -584,7 +644,7 @@ var long_out = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, T_SR
 assert_eq(prani_is_err(long_out), 0, "0.2s wolf howl non-error");
 assert_eq(vec_len(long_out), 8820, "0.2s wolf howl length == 8820 (last block starts at t = 7938/8820 = 0.9)");
 assert_eq(t_all_finite(long_out), 1, "0.2s wolf howl all finite");
-assert_eq(f64_gt(t_max_abs(long_out), T_1E_3), 1, "0.2s wolf howl audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(long_out), T_1E_3), 1, "0.2s wolf howl audible (max |s| > 0.001)");
 
 # ================================================================
 # Ports test_zero_duration_synthesis (2.0.3:rust-old/tests/integration.rs:260-265).
@@ -613,8 +673,8 @@ assert_eq(vec_len(pp_s), 2205, "size-0.5 cat purr length == 2205");
 assert_eq(vec_len(pp_l), 2205, "size-2.0 cat purr length == 2205");
 assert_eq(t_all_finite(pp_s), 1, "size-0.5 cat purr all finite");
 assert_eq(t_all_finite(pp_l), 1, "size-2.0 cat purr all finite");
-assert_eq(f64_gt(t_max_abs(pp_s), T_1E_4), 1, "size-0.5 cat purr audible (max |s| > 1e-4)");
-assert_eq(f64_gt(t_max_abs(pp_l), T_1E_4), 1, "size-2.0 cat purr audible (max |s| > 1e-4)");
+assert_eq(pr_gt(t_max_abs(pp_s), T_1E_4), 1, "size-0.5 cat purr audible (max |s| > 1e-4)");
+assert_eq(pr_gt(t_max_abs(pp_l), T_1E_4), 1, "size-2.0 cat purr audible (max |s| > 1e-4)");
 # purr_f0 35 vs 20 -- the size must actually reach the oscillator.
 assert_eq(t_vecs_equal(pp_s, pp_l), 0, "purr_f0 35 (size 0.5) and 20 (size 2.0) produce different audio");
 assert_eq(t_vecs_equal(pp_s, p_out), 0, "size-0.5 purr differs from the default-size purr");
@@ -643,7 +703,7 @@ while (sp < PRANI_SP_COUNT) {
         sp_ok = sp_ok + 1;
         if (vec_len(sp_out) == 2205) { sp_len = sp_len + 1; }
         if (t_all_finite(sp_out) == 1) { sp_finite = sp_finite + 1; }
-        if (f64_gt(t_max_abs(sp_out), T_1E_3) == 1) { sp_audible = sp_audible + 1; }
+        if (pr_gt(t_max_abs(sp_out), T_1E_3) == 1) { sp_audible = sp_audible + 1; }
     }
     sp = sp + 1;
 }
@@ -684,10 +744,10 @@ assert_eq(prani_is_err(a_out), 0, "wolf alarm howl non-error");
 assert_eq(vec_len(i_out), 2205, "idle (x1.0 duration) length == 2205");
 assert_eq(vec_len(a_out), 1543, "alarm (x0.7 duration) length == 1543");
 assert_eq(t_all_finite(a_out), 1, "alarm howl all finite");
-assert_eq(f64_gt(t_energy(a_out), t_energy(i_out)), 1, "alarm carries more energy than idle");
+assert_eq(pr_gt(t_energy(a_out), t_energy(i_out)), 1, "alarm carries more energy than idle");
 # Control: idle is not itself silent, so the comparison above is a real ordering
 # between two audible renders rather than "anything beats zero".
-assert_eq(f64_gt(t_energy(i_out), 0), 1, "idle energy > 0");
+assert_eq(pr_gt(t_energy(i_out), 0), 1, "idle energy > 0");
 
 # ================================================================
 # Ports test_non_stationary_perturbation (2.0.3:rust-old/tests/integration.rs:676-689).
@@ -700,7 +760,7 @@ var pb_alarm = crvoice_vocalize_with_intent(pv, PRANI_VOC_BARK, PRANI_INTENT_ALA
 assert_eq(prani_is_err(pb_alarm), 0, "wolf alarm bark non-error");
 assert_eq(vec_len(pb_alarm), 1543, "alarm bark (x0.7 duration) length == 1543");
 assert_eq(t_all_finite(pb_alarm), 1, "alarm bark all finite");
-assert_eq(f64_gt(t_max_abs(pb_alarm), T_1E_3), 1, "alarm bark audible (max |s| > 0.001)");
+assert_eq(pr_gt(t_max_abs(pb_alarm), T_1E_3), 1, "alarm bark audible (max |s| > 0.001)");
 var pb_idle = crvoice_vocalize_with_intent(pv, PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
 assert_eq(prani_is_err(pb_idle), 0, "wolf idle bark non-error");
 assert_eq(vec_len(pb_idle), 2205, "idle bark (x1.0 duration) length == 2205");
@@ -717,7 +777,7 @@ var crt_out = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_CROCODILIAN),
 assert_eq(prani_is_err(crt_out), 0, "territorial crocodilian rumble non-error");
 assert_eq(vec_len(crt_out), 3307, "territorial (x1.5 duration) length == 3307");
 assert_eq(t_all_finite(crt_out), 1, "territorial crocodilian rumble all finite");
-assert_eq(f64_gt(t_max_abs(crt_out), T_0_01), 1, "crocodilian rumble audible (max |s| > 0.01)");
+assert_eq(pr_gt(t_max_abs(crt_out), T_0_01), 1, "crocodilian rumble audible (max |s| > 0.01)");
 
 # ================================================================
 # Ports test_vocal_effort_whisper_vs_shout (2.0.3:rust-old/tests/integration.rs:693-707).
@@ -732,8 +792,8 @@ assert_eq(prani_is_err(wsp), 0, "whisper (effort 0.0) non-error");
 assert_eq(prani_is_err(sht), 0, "shout (effort 1.0) non-error");
 assert_eq(t_all_finite(wsp), 1, "whisper all finite");
 assert_eq(t_all_finite(sht), 1, "shout all finite");
-assert_eq(f64_gt(t_energy(wsp), 0), 1, "whisper energy > 0 (control -- it is quiet, not silent)");
-assert_eq(f64_gt(t_energy(sht), f64_mul(t_energy(wsp), T_2_0)), 1, "shout energy > 2x whisper energy");
+assert_eq(pr_gt(t_energy(wsp), 0), 1, "whisper energy > 0 (control -- it is quiet, not silent)");
+assert_eq(pr_gt(t_energy(sht), pr_mul(t_energy(wsp), T_2_0)), 1, "shout energy > 2x whisper energy");
 
 # ================================================================
 test_group("determinism -- same voice+args twice -> bit-identical");
@@ -756,7 +816,7 @@ test_group("effective_tract_scale");
 assert_eq(crvoice_effective_tract_scale(crvoice_new(PRANI_SP_WOLF)), PR_V_1_2, "wolf tract_scale 1.2 @ size 1");
 # size 2 -> 1.2 * 2 = 2.4.
 var w2 = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), T_2_0);
-assert_eq(crvoice_effective_tract_scale(w2), f64_mul(PR_V_1_2, T_2_0), "wolf tract_scale @ size 2 == 2.4");
+assert_eq(crvoice_effective_tract_scale(w2), pr_mul(PR_V_1_2, T_2_0), "wolf tract_scale @ size 2 == 2.4");
 
 # ================================================================
 test_group("vocalize does not mutate the voice's own params");
@@ -774,23 +834,23 @@ assert_eq(SpeciesParams_breathiness(CreatureVoice_params(vv)), br_before,
 # individual breathiness override preserved).
 test_group("CreatureVoice serde roundtrip");
 var vser = crvoice_new(PRANI_SP_WOLF);
-crvoice_with_size(vser, 0x3FF3333333333333);          # 1.2
-crvoice_with_vocal_effort(vser, 0x3FE6666666666666);  # 0.7
-crvoice_with_breathiness(vser, 0x3FC3333333333333);   # 0.15 (mutates params)
+crvoice_with_size(vser, pr_of64(0x3FF3333333333333));          # 1.2
+crvoice_with_vocal_effort(vser, pr_of64(0x3FE6666666666666));  # 0.7
+crvoice_with_breathiness(vser, pr_of64(0x3FC3333333333333));   # 0.15 (mutates params)
 # NON-DEFAULT f0_offset. At the default 0 the offset assertion below is 0 == 0,
 # which a codec that dropped the key entirely would still pass (bayan's value
 # accessors return 0 for a missing key). Wolf range is 1050, so 50 is unclamped.
-var _voff = crvoice_with_f0_offset(vser, f64_from(50));
+var _voff = crvoice_with_f0_offset(vser, pr_from(50));
 var vsb = str_builder_new();
 crvoice_to_json(vser, vsb);
 var vjson = str_data(str_builder_build(vsb));
 var v2 = crvoice_from_json_str(vjson);
 assert_eq(crvoice_species(v2), PRANI_SP_WOLF, "species roundtrips");
 assert_eq(CreatureVoice_f0_offset(v2), CreatureVoice_f0_offset(vser), "f0_offset roundtrips");
-assert_eq(CreatureVoice_f0_offset(v2), f64_from(50), "f0_offset is the non-default 50, not a dropped-key 0");
+assert_eq(CreatureVoice_f0_offset(v2), pr_from(50), "f0_offset is the non-default 50, not a dropped-key 0");
 assert_eq(CreatureVoice_size_scale(v2), CreatureVoice_size_scale(vser), "size_scale (1.2) roundtrips");
 assert_eq(CreatureVoice_vocal_effort(v2), CreatureVoice_vocal_effort(vser), "vocal_effort (0.7) roundtrips");
-assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v2)), 0x3FC3333333333333,
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(v2)), pr_of64(0x3FC3333333333333),
   "nested params breathiness override (0.15) roundtrips");
 assert_eq(SpeciesParams_resonance_seed(CreatureVoice_params(v2)), PR_SEED_WOLF,
   "nested params resonance_seed roundtrips");
@@ -799,10 +859,10 @@ assert_eq(SpeciesParams_resonance_seed(CreatureVoice_params(v2)), PR_SEED_WOLF,
 # f0_min/f0_max (the clamp) and tract_scale -- fields no direct assertion covers.
 # (400 + 50) / 1.2 = 375, clamp[150,1200] -> 375; 1.2 * 1.2 = 1.44.
 assert_eq(crvoice_effective_f0(v2), crvoice_effective_f0(vser), "effective_f0 survives the roundtrip");
-assert_eq(crvoice_effective_f0(v2), f64_from(375), "deserialized effective_f0 == 375 (hand-computed)");
+assert_eq(crvoice_effective_f0(v2), pr_from(375), "deserialized effective_f0 == 375 (hand-computed)");
 assert_eq(crvoice_effective_tract_scale(v2), crvoice_effective_tract_scale(vser),
   "effective_tract_scale survives the roundtrip");
-assert_eq(crvoice_effective_tract_scale(v2), 0x3ff70a3d70a3d70a,
+assert_eq(crvoice_effective_tract_scale(v2), pr_of64(0x3ff70a3d70a3d70a),
   "deserialized effective_tract_scale == 1.44 (hand-computed)");
 var vsb2 = str_builder_new();
 crvoice_to_json(v2, vsb2);
@@ -825,12 +885,12 @@ test_group("2.0.5 guards -- vocalization / intent tags out of range");
 # as a 2205-sample SUCCESS (measured). DELIBERATE DIVERGENCE, forced by the
 # enum -> int erasure.
 var gv = crvoice_new(PRANI_SP_WOLF);
-assert_eq(crvoice_vocalize(gv, f64_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag -1 rejected");
+assert_eq(crvoice_vocalize(gv, pr_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag -1 rejected");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "voc tag == PRANI_VOC_COUNT rejected");
 assert_eq(crvoice_vocalize(gv, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "voc tag 99 rejected (was a 2205-sample success)");
-assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, f64_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, pr_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "intent tag -1 rejected");
 assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, PRANI_INTENT_COUNT, T_SR, T_DUR_005),
   PRANI_ERR_INVALID_VOCALIZATION,
@@ -855,7 +915,7 @@ assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, PRANI_NEG_INF, T_DUR_005), PRANI_
   "-inf sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, 0, T_DUR_005), PRANI_ERR_INVALID_TRACT,
   "sample_rate 0 -> PRANI_ERR_INVALID_TRACT");
-assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, f64_neg(T_SR), T_DUR_005), PRANI_ERR_INVALID_TRACT,
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, pr_neg(T_SR), T_DUR_005), PRANI_ERR_INVALID_TRACT,
   "negative sample_rate -> PRANI_ERR_INVALID_TRACT");
 # CONTROL, and the reason the guard is `> 0` and not a threshold: ADR-0001 leaves
 # "too low to build a tract" to svara. 8000 Hz is below every rate this file
@@ -870,7 +930,7 @@ assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, T_NAN), PRANI_ERR_INVALID_V
   "NaN duration -> PRANI_ERR_INVALID_VOCALIZATION");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, PRANI_POS_INF), PRANI_ERR_INVALID_VOCALIZATION,
   "+inf duration -> PRANI_ERR_INVALID_VOCALIZATION");
-assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, f64_neg(T_1_0)), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, pr_neg(T_1_0)), PRANI_ERR_INVALID_VOCALIZATION,
   "negative duration -> PRANI_ERR_INVALID_VOCALIZATION");
 # num_samples overflow: 1e300 s is FINITE and passes the duration guard, but
 # 1e300 * 44100 does not fit an i64. f64_to saturates that to i64::MAX, past any
@@ -879,7 +939,9 @@ assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, T_SR, T_1E300), PRANI_ERR_INVALID
   "1e300 s (finite, overflows num_samples) -> PRANI_ERR_INVALID_VOCALIZATION");
 # And a product that fits an i64 but cannot be one vec: past VEC_CAP_MAX the
 # render ends in a process exit, so it is refused before it starts.
-assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, f64_from(VEC_CAP_MAX + 1), T_1_0),
+# The smallest count past the limit that the build's format can ask for: 2^28 + 1 in
+# f64, and 2^28 + 32 in f32, whose spacing at 2^28 is 32 (2^28 + 1 rounds to 2^28).
+assert_eq(crvoice_vocalize(gv, PRANI_VOC_HOWL, pr_from(VEC_CAP_MAX + t_per(1, 32)), T_1_0),
   PRANI_ERR_INVALID_VOCALIZATION, "one sample past VEC_CAP_MAX -> PRANI_ERR_INVALID_VOCALIZATION");
 # CONTROL -- the oracle's test_zero_duration_synthesis: duration 0 is VALID and
 # yields an EMPTY buffer, not an error. Re-asserted here because it is the one
@@ -910,7 +972,7 @@ assert_eq(CreatureVoice_vocal_effort(g_b), T_0_5, "and vocal_effort at 0.5");
 assert_eq(prani_is_err(crvoice_vocalize(g_b, PRANI_VOC_HOWL, T_SR, T_DUR_005)), 0,
   "control: the voice still renders");
 # An infinity is not the hazard at a clamp site: it clamps to the rail, as 2.0.5 decided.
-assert_eq(CreatureVoice_size_scale(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), PRANI_POS_INF)), f64_from(10),
+assert_eq(CreatureVoice_size_scale(crvoice_with_size(crvoice_new(PRANI_SP_WOLF), PRANI_POS_INF)), pr_from(10),
   "with_size(+inf) still clamps to 10");
 assert_eq(crvoice_with_size(PRANI_ERR_ALLOC, T_0_5), PRANI_ERR_ALLOC, "an error handle passes through a builder");
 assert_eq(crvoice_new(PRANI_SP_COUNT), PRANI_ERR_INVALID_SPECIES, "crvoice_new refuses an unknown species tag (2.2.0)");
@@ -1025,7 +1087,7 @@ assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_NAN, T_0_2),
   "nasal antiformant NaN sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_SR, T_NAN), PRANI_ERR_INVALID_VOCALIZATION,
   "nasal antiformant NaN fraction -> PRANI_ERR_INVALID_VOCALIZATION");
-assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_SR, f64_neg(T_0_2)), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_apply_nasal_antiformant(t_const_buf(10, T_1_0), T_SR, pr_neg(T_0_2)), PRANI_ERR_INVALID_VOCALIZATION,
   "nasal antiformant negative fraction -> PRANI_ERR_INVALID_VOCALIZATION");
 # CONTROL: the two fractions the module actually passes (cat 0.2, wolf 0.1) are
 # untouched, and fraction 0 is a legal no-op.
@@ -1069,15 +1131,15 @@ assert_eq(crvoice_from_json_str("{\"species\":0}"), PRANI_ERR_INVALID_SPECIES,
 assert_eq(crvoice_from_json_str(t_wolf_json(0, 0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
   "size_scale 0.0 rejected (ADR-0002's divide-by-zero)");
 assert_eq(crvoice_from_json_str(t_wolf_json(0, T_NAN, T_0_5)), PRANI_ERR_INVALID_SPECIES, "size_scale NaN rejected");
-assert_eq(crvoice_from_json_str(t_wolf_json(0, f64_from(100), T_0_5)), PRANI_ERR_INVALID_SPECIES,
+assert_eq(crvoice_from_json_str(t_wolf_json(0, pr_from(100), T_0_5)), PRANI_ERR_INVALID_SPECIES,
   "size_scale 100.0 rejected (above with_size's ceiling)");
 assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_0_1, T_0_5))), 0,
   "size_scale 0.1 accepted (with_size's floor, inclusive)");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, f64_from(10), T_0_5))), 0,
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, pr_from(10), T_0_5))), 0,
   "size_scale 10.0 accepted (with_size's ceiling, inclusive)");
 # vocal_effort -- with_vocal_effort's [0, 1].
 assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_2)), PRANI_ERR_INVALID_SPECIES, "vocal_effort 1.2 rejected");
-assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, f64_neg(T_1_0))), PRANI_ERR_INVALID_SPECIES,
+assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, pr_neg(T_1_0))), PRANI_ERR_INVALID_SPECIES,
   "vocal_effort -1.0 rejected");
 assert_eq(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_NAN)), PRANI_ERR_INVALID_SPECIES, "vocal_effort NaN rejected");
 assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, 0))), 0,
@@ -1085,16 +1147,16 @@ assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, 0))), 0,
 assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(0, T_1_0, T_1_0))), 0,
   "vocal_effort 1.0 accepted (inclusive ceiling)");
 # f0_offset -- with_f0_offset's +/-(f0_max - f0_min); Wolf is 1200 - 150 = 1050.
-assert_eq(crvoice_from_json_str(t_wolf_json(f64_from(5000), T_1_0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
+assert_eq(crvoice_from_json_str(t_wolf_json(pr_from(5000), T_1_0, T_0_5)), PRANI_ERR_INVALID_SPECIES,
   "f0_offset 5000 rejected (Wolf range is 1050)");
 assert_eq(crvoice_from_json_str(t_wolf_json(T_NAN, T_1_0, T_0_5)), PRANI_ERR_INVALID_SPECIES, "f0_offset NaN rejected");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(f64_from(1050), T_1_0, T_0_5))), 0,
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(pr_from(1050), T_1_0, T_0_5))), 0,
   "f0_offset +1050 accepted (exactly the Wolf range)");
-assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(f64_neg(f64_from(1050)), T_1_0, T_0_5))), 0,
+assert_eq(prani_is_err(crvoice_from_json_str(t_wolf_json(pr_neg(pr_from(1050)), T_1_0, T_0_5))), 0,
   "f0_offset -1050 accepted (exactly the Wolf range)");
 # The 16 nested SpeciesParams fields, one poked field per document.
 var g_jp = crvoice_clone_params(species_params(PRANI_SP_WOLF));
-SpeciesParams_set_breathiness(g_jp, f64_from(5));
+SpeciesParams_set_breathiness(g_jp, pr_from(5));
 assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jp)), PRANI_ERR_INVALID_SPECIES,
   "params breathiness 5.0 rejected (with_breathiness clamps to [0,1])");
 var g_jj = crvoice_clone_params(species_params(PRANI_SP_WOLF));
@@ -1106,7 +1168,7 @@ SpeciesParams_set_shimmer(g_js, T_1_0);
 assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_js)), PRANI_ERR_INVALID_SPECIES,
   "params shimmer 1.0 rejected (with_shimmer clamps to [0,0.1])");
 var g_jf = crvoice_clone_params(species_params(PRANI_SP_WOLF));
-SpeciesParams_set_f0_min(g_jf, f64_from(5000));
+SpeciesParams_set_f0_min(g_jf, pr_from(5000));
 assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jf)), PRANI_ERR_INVALID_SPECIES,
   "params f0_min > f0_max rejected");
 var g_jt = crvoice_clone_params(species_params(PRANI_SP_WOLF));
@@ -1118,7 +1180,7 @@ SpeciesParams_set_apparatus(g_ja, 9);
 assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_ja)), PRANI_ERR_INVALID_SPECIES,
   "params apparatus 9 rejected (five variants exist)");
 var g_jd = crvoice_clone_params(species_params(PRANI_SP_WOLF));
-SpeciesParams_set_f0_default(g_jd, f64_from(5000));
+SpeciesParams_set_f0_default(g_jd, pr_from(5000));
 assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jd)), PRANI_ERR_INVALID_SPECIES,
   "params f0_default outside [f0_min, f0_max] rejected");
 var g_jb = crvoice_clone_params(species_params(PRANI_SP_WOLF));
@@ -1136,7 +1198,7 @@ assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_j
 # resonance_seed is deliberately NOT range-checked -- it is an RNG seed, and
 # every i64 bit pattern is a legal one.
 var g_jr = crvoice_clone_params(species_params(PRANI_SP_WOLF));
-SpeciesParams_set_resonance_seed(g_jr, f64_neg(1));
+SpeciesParams_set_resonance_seed(g_jr, pr_neg(1));
 assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jr))), 0,
   "resonance_seed is NOT range-checked (every i64 is a legal seed)");
 # Snake's row is f0_min == f0_max == f0_default == 0.0 -- the degenerate case
@@ -1164,12 +1226,12 @@ var g_rt2 = 0;
 var g_rs2 = 0;
 while (g_rs2 < PRANI_SP_COUNT) {
     var g_rv = crvoice_new(g_rs2);
-    var _gx1 = crvoice_with_size(g_rv, f64_from(100));
-    var _gx2 = crvoice_with_vocal_effort(g_rv, f64_from(9));
-    var _gx3 = crvoice_with_breathiness(g_rv, f64_from(5));
+    var _gx1 = crvoice_with_size(g_rv, pr_from(100));
+    var _gx2 = crvoice_with_vocal_effort(g_rv, pr_from(9));
+    var _gx3 = crvoice_with_breathiness(g_rv, pr_from(5));
     var _gx4 = crvoice_with_jitter(g_rv, T_1_0);
     var _gx5 = crvoice_with_shimmer(g_rv, T_1_0);
-    var _gx6 = crvoice_with_f0_offset(g_rv, f64_from(99999));
+    var _gx6 = crvoice_with_f0_offset(g_rv, pr_from(99999));
     if (t_roundtrip_ok(g_rv) == 1) { g_rt2 = g_rt2 + 1; }
     g_rs2 = g_rs2 + 1;
 }
@@ -1202,10 +1264,17 @@ test_group("2.1.2 the excitation level: svara 3.11's pulse at 2.1.1's loudness")
 # 2.1.1's code on svara 3.14.0 puts the median at +7.4 dB, and the excitation fix
 # without its gain at -7.4. It also fails if svara recalibrates its pulse, which is
 # the point: then the gain is re-solved, by the method above, not nudged.
+#ifdef PRANI_F32
+var VL_LN10 = 0x40135D8E;           # ln(10)
+var VL_TOL  = 0x3D4CCCCD;           # 0.05 dB on the median
+var VL_HI   = 0x40F00000;           # +7.5 dB, the spread's bound
+var VL_LO   = 0xC0F00000;           # -7.5 dB
+#else
 var VL_LN10 = 0x40026bb1bbb55516;   # ln(10)
 var VL_TOL  = 0x3fa999999999999a;   # 0.05 dB on the median
 var VL_HI   = 0x401e000000000000;   # +7.5 dB, the spread's bound
 var VL_LO   = 0xc01e000000000000;   # -7.5 dB
+#endif
 var vl_db = vec_new();
 var vl_bad = 0;
 var vl_peak = 0;
@@ -1221,72 +1290,73 @@ fn vl_ref(sp, voc, rms_211) {
     var i = 0;
     while (i < n) {
         var x = vec_get(s, i);
-        acc = f64_add(acc, f64_mul(x, x));
+        acc = pr_add(acc, pr_mul(x, x));
         i = i + 1;
     }
-    var rms = f64_sqrt(f64_div(acc, f64_from(n)));
-    vec_push(vl_db, f64_div(f64_mul(f64_from(20), f64_ln(f64_div(rms, rms_211))), VL_LN10));
+    var rms = pr_sqrt(pr_div(acc, pr_from(n)));
+    var vl_ln = pr_of64(f64_ln(pr_to64(pr_div(rms, rms_211))));
+    vec_push(vl_db, pr_div(pr_mul(pr_from(20), vl_ln), VL_LN10));
     var pk = t_max_abs(s);
-    if (f64_gt(pk, vl_peak) == 1) { vl_peak = pk; }
+    if (pr_gt(pk, vl_peak) == 1) { vl_peak = pk; }
     return 0;
 }
 
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_BARK, 0x3f5cbd9c504d668b);   # 0.001754, now +4.06 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_GROWL, 0x3f629bcaf3a71938);   # 0.002272, now +4.91 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_ROAR, 0x3f64a1ccfc5d375c);   # 0.002519, now +5.09 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_HISS, 0x3f6148ff9777712d);   # 0.002110, now +4.71 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_CHIRP, 0x3f638c7180c5cba8);   # 0.002386, now +4.59 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_TRILL, 0x3f63b9c4c591b6dd);   # 0.002408, now +7.05 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_RUMBLE, 0x3f6504b27879bed7);   # 0.002566, now +5.32 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_PURR, 0x3f6319a9f011e85c);   # 0.002332, now +4.72 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_YELP, 0x3f5cbd9c504d668b);   # 0.001754, now +4.06 dB
-vl_ref(PRANI_SP_WOLF, PRANI_VOC_SCREECH, 0x3f62b8a1b16c786a);   # 0.002285, now +5.54 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_BARK, 0x3f60d5552ca3da80);   # 0.002055, now +4.04 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_GROWL, 0x3f5c7092b3dacf94);   # 0.001736, now -2.26 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_ROAR, 0x3f60f8b6ebff10ca);   # 0.002072, now +4.22 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_HISS, 0x3f5b2c469d33c05a);   # 0.001659, now -2.90 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_CHIRP, 0x3f5eeca5a2915364);   # 0.001887, now -2.68 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_TRILL, 0x3f55c548118bf85c);   # 0.001329, now +0.98 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_RUMBLE, 0x3f613d663bc92e47);   # 0.002104, now +4.33 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_PURR, 0x3f5dd32ac5b4f2aa);   # 0.001820, now -2.58 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_YELP, 0x3f60d5552ca3da80);   # 0.002055, now +4.04 dB
-vl_ref(PRANI_SP_DOG, PRANI_VOC_SCREECH, 0x3f61f47cdf8879db);   # 0.002192, now -0.38 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_HOWL, 0x3f68c4a494746c17);   # 0.003023, now -2.08 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_BARK, 0x3f6b32465c840e9e);   # 0.003320, now +1.71 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_GROWL, 0x3f6f3c6cacdb98ef);   # 0.003813, now -2.18 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_ROAR, 0x3f681fb172c88702);   # 0.002945, now +1.00 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_HISS, 0x3f6e354a98fe855a);   # 0.003688, now -2.56 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_CHIRP, 0x3f712e87ac1c9b88);   # 0.004195, now -2.55 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_TRILL, 0x3f6430ca7fcfe520);   # 0.002465, now -1.18 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_WHINE, 0x3f708a869c30374a);   # 0.004038, now +2.86 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_RUMBLE, 0x3f67ba1f7e13073a);   # 0.002896, now +1.28 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_YELP, 0x3f6b32465c840e9e);   # 0.003320, now +1.71 dB
-vl_ref(PRANI_SP_CAT, PRANI_VOC_SCREECH, 0x3f68a212dafa6e58);   # 0.003007, now +0.79 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_HOWL, 0x3f7e23a25f970a0f);   # 0.007358, now +0.00 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_BARK, 0x3f7e485052cbf8b6);   # 0.007393, now -1.53 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_GROWL, 0x3f79d25c4e961e2d);   # 0.006304, now -1.37 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_ROAR, 0x3f7d44a2225b52de);   # 0.007146, now -1.32 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_HISS, 0x3f7de148141b70cb);   # 0.007295, now -2.05 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_CHIRP, 0x3f809bccf48b0db6);   # 0.008110, now -1.98 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_TRILL, 0x3f76ba1345626272);   # 0.005549, now -1.67 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_WHINE, 0x3f81ac0598ac2458);   # 0.008629, now +1.71 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_RUMBLE, 0x3f7b941c08d5bb8b);   # 0.006733, now -1.08 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_PURR, 0x3f7e020487a2cabd);   # 0.007326, now -1.80 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_YELP, 0x3f7e485052cbf8b6);   # 0.007393, now -1.53 dB
-vl_ref(PRANI_SP_CROW, PRANI_VOC_SCREECH, 0x3f83298f23cf6ae5);   # 0.009357, now +0.68 dB
-vl_ref(PRANI_SP_RAPTOR, PRANI_VOC_HOWL, 0x3f89e47c7e05c0f0);   # 0.012643, now +5.22 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_HOWL, 0x3f59482508b7fbe0);   # 0.001543, now +3.93 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_BARK, 0x3f58829ada2549ff);   # 0.001496, now -0.28 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_GROWL, 0x3f4e220651323553);   # 0.000920, now -6.38 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_ROAR, 0x3f568152df51c7ba);   # 0.001374, now -2.21 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_HISS, 0x3f4d69df60f1f51f);   # 0.000898, now -6.86 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_CHIRP, 0x3f50b8fca3fd2090);   # 0.001021, now -6.83 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_TRILL, 0x3f4a6f3875f253bb);   # 0.000807, now -1.48 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_WHINE, 0x3f5552115934deea);   # 0.001301, now +1.89 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_RUMBLE, 0x3f56d30dbea542c6);   # 0.001393, now -2.24 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_PURR, 0x3f4ff15ef61212ec);   # 0.000975, now -6.73 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_YELP, 0x3f58829ada2549ff);   # 0.001496, now -0.28 dB
-vl_ref(PRANI_SP_FANTASY, PRANI_VOC_SCREECH, 0x3f5b6bcb0ab8a89b);   # 0.001674, now +0.71 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_BARK, pr_of64(0x3f5cbd9c504d668b));   # 0.001754, now +4.06 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_GROWL, pr_of64(0x3f629bcaf3a71938));   # 0.002272, now +4.91 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_ROAR, pr_of64(0x3f64a1ccfc5d375c));   # 0.002519, now +5.09 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_HISS, pr_of64(0x3f6148ff9777712d));   # 0.002110, now +4.71 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_CHIRP, pr_of64(0x3f638c7180c5cba8));   # 0.002386, now +4.59 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_TRILL, pr_of64(0x3f63b9c4c591b6dd));   # 0.002408, now +7.05 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_RUMBLE, pr_of64(0x3f6504b27879bed7));   # 0.002566, now +5.32 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_PURR, pr_of64(0x3f6319a9f011e85c));   # 0.002332, now +4.72 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_YELP, pr_of64(0x3f5cbd9c504d668b));   # 0.001754, now +4.06 dB
+vl_ref(PRANI_SP_WOLF, PRANI_VOC_SCREECH, pr_of64(0x3f62b8a1b16c786a));   # 0.002285, now +5.54 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_BARK, pr_of64(0x3f60d5552ca3da80));   # 0.002055, now +4.04 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_GROWL, pr_of64(0x3f5c7092b3dacf94));   # 0.001736, now -2.26 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_ROAR, pr_of64(0x3f60f8b6ebff10ca));   # 0.002072, now +4.22 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_HISS, pr_of64(0x3f5b2c469d33c05a));   # 0.001659, now -2.90 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_CHIRP, pr_of64(0x3f5eeca5a2915364));   # 0.001887, now -2.68 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_TRILL, pr_of64(0x3f55c548118bf85c));   # 0.001329, now +0.98 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_RUMBLE, pr_of64(0x3f613d663bc92e47));   # 0.002104, now +4.33 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_PURR, pr_of64(0x3f5dd32ac5b4f2aa));   # 0.001820, now -2.58 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_YELP, pr_of64(0x3f60d5552ca3da80));   # 0.002055, now +4.04 dB
+vl_ref(PRANI_SP_DOG, PRANI_VOC_SCREECH, pr_of64(0x3f61f47cdf8879db));   # 0.002192, now -0.38 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_HOWL, pr_of64(0x3f68c4a494746c17));   # 0.003023, now -2.08 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_BARK, pr_of64(0x3f6b32465c840e9e));   # 0.003320, now +1.71 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_GROWL, pr_of64(0x3f6f3c6cacdb98ef));   # 0.003813, now -2.18 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_ROAR, pr_of64(0x3f681fb172c88702));   # 0.002945, now +1.00 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_HISS, pr_of64(0x3f6e354a98fe855a));   # 0.003688, now -2.56 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_CHIRP, pr_of64(0x3f712e87ac1c9b88));   # 0.004195, now -2.55 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_TRILL, pr_of64(0x3f6430ca7fcfe520));   # 0.002465, now -1.18 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_WHINE, pr_of64(0x3f708a869c30374a));   # 0.004038, now +2.86 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_RUMBLE, pr_of64(0x3f67ba1f7e13073a));   # 0.002896, now +1.28 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_YELP, pr_of64(0x3f6b32465c840e9e));   # 0.003320, now +1.71 dB
+vl_ref(PRANI_SP_CAT, PRANI_VOC_SCREECH, pr_of64(0x3f68a212dafa6e58));   # 0.003007, now +0.79 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_HOWL, pr_of64(0x3f7e23a25f970a0f));   # 0.007358, now +0.00 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_BARK, pr_of64(0x3f7e485052cbf8b6));   # 0.007393, now -1.53 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_GROWL, pr_of64(0x3f79d25c4e961e2d));   # 0.006304, now -1.37 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_ROAR, pr_of64(0x3f7d44a2225b52de));   # 0.007146, now -1.32 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_HISS, pr_of64(0x3f7de148141b70cb));   # 0.007295, now -2.05 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_CHIRP, pr_of64(0x3f809bccf48b0db6));   # 0.008110, now -1.98 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_TRILL, pr_of64(0x3f76ba1345626272));   # 0.005549, now -1.67 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_WHINE, pr_of64(0x3f81ac0598ac2458));   # 0.008629, now +1.71 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_RUMBLE, pr_of64(0x3f7b941c08d5bb8b));   # 0.006733, now -1.08 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_PURR, pr_of64(0x3f7e020487a2cabd));   # 0.007326, now -1.80 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_YELP, pr_of64(0x3f7e485052cbf8b6));   # 0.007393, now -1.53 dB
+vl_ref(PRANI_SP_CROW, PRANI_VOC_SCREECH, pr_of64(0x3f83298f23cf6ae5));   # 0.009357, now +0.68 dB
+vl_ref(PRANI_SP_RAPTOR, PRANI_VOC_HOWL, pr_of64(0x3f89e47c7e05c0f0));   # 0.012643, now +5.22 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_HOWL, pr_of64(0x3f59482508b7fbe0));   # 0.001543, now +3.93 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_BARK, pr_of64(0x3f58829ada2549ff));   # 0.001496, now -0.28 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_GROWL, pr_of64(0x3f4e220651323553));   # 0.000920, now -6.38 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_ROAR, pr_of64(0x3f568152df51c7ba));   # 0.001374, now -2.21 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_HISS, pr_of64(0x3f4d69df60f1f51f));   # 0.000898, now -6.86 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_CHIRP, pr_of64(0x3f50b8fca3fd2090));   # 0.001021, now -6.83 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_TRILL, pr_of64(0x3f4a6f3875f253bb));   # 0.000807, now -1.48 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_WHINE, pr_of64(0x3f5552115934deea));   # 0.001301, now +1.89 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_RUMBLE, pr_of64(0x3f56d30dbea542c6));   # 0.001393, now -2.24 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_PURR, pr_of64(0x3f4ff15ef61212ec));   # 0.000975, now -6.73 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_YELP, pr_of64(0x3f58829ada2549ff));   # 0.001496, now -0.28 dB
+vl_ref(PRANI_SP_FANTASY, PRANI_VOC_SCREECH, pr_of64(0x3f5b6bcb0ab8a89b));   # 0.001674, now +0.71 dB
 
 assert_eq(vl_bad, 0, "control: every reference render synthesized");
 assert_eq(vec_len(vl_db), 56, "control: all 56 reference renders were measured");
@@ -1296,7 +1366,7 @@ while (vl_i < vec_len(vl_db)) {
     var vl_x = vec_get(vl_db, vl_i);
     var vl_j = vl_i - 1;
     while (vl_j >= 0) {
-        if (f64_le(vec_get(vl_db, vl_j), vl_x) == 1) { break; }
+        if (pr_le(vec_get(vl_db, vl_j), vl_x) == 1) { break; }
         vec_set(vl_db, vl_j + 1, vec_get(vl_db, vl_j));
         vl_j = vl_j - 1;
     }
@@ -1305,11 +1375,11 @@ while (vl_i < vec_len(vl_db)) {
 }
 var vl_med = vec_get(vl_db, 28);
 assert_eq(prani_is_finite(vl_med), 1, "control: the median level change is a number");
-assert_eq(f64_le(f64_abs(vl_med), VL_TOL), 1, "the median of the 56 is 2.1.1's level, within 0.05 dB");
-assert_eq(f64_ge(vec_get(vl_db, 0), VL_LO), 1, "no reference render is more than 7.5 dB quieter than 2.1.1");
-assert_eq(f64_le(vec_get(vl_db, 55), VL_HI), 1, "no reference render is more than 7.5 dB louder than 2.1.1");
-assert_eq(f64_lt(vl_peak, T_1_0), 1, "no reference render reaches full scale");
-assert_eq(f64_gt(vl_peak, T_0_01), 1, "control: and they are not silent");
+assert_eq(pr_le(pr_abs(vl_med), VL_TOL), 1, "the median of the 56 is 2.1.1's level, within 0.05 dB");
+assert_eq(pr_ge(vec_get(vl_db, 0), VL_LO), 1, "no reference render is more than 7.5 dB quieter than 2.1.1");
+assert_eq(pr_le(vec_get(vl_db, 55), VL_HI), 1, "no reference render is more than 7.5 dB louder than 2.1.1");
+assert_eq(pr_lt(vl_peak, T_1_0), 1, "no reference render reaches full scale");
+assert_eq(pr_gt(vl_peak, T_0_01), 1, "control: and they are not silent");
 # The case that showed it: 2.1.1's gain stage on svara 3.14.0 peaked here at 2.24.
 var vl_els = vec_new();
 vec_push(vl_els, sequence_call_element_new(PRANI_VOC_HOWL, T_0_1, T_DUR_005));
@@ -1317,7 +1387,7 @@ vec_push(vl_els, sequence_call_element_new(PRANI_VOC_BARK, T_DUR_005, 0));
 var vl_ph = sequence_call_phrase_synthesize(sequence_call_phrase_new(vl_els, PRANI_INTENT_TERRITORIAL),
   crvoice_new(PRANI_SP_WOLF), T_8000);
 assert_eq(prani_is_err(vl_ph), 0, "control: the wolf howl+bark phrase synthesized");
-assert_eq(f64_lt(t_max_abs(vl_ph), T_1_0), 1, "the wolf howl+bark phrase stays under full scale (2.24 before)");
+assert_eq(pr_lt(t_max_abs(vl_ph), T_1_0), 1, "the wolf howl+bark phrase stays under full scale (2.24 before)");
 
 var rc = assert_summary();
 syscall(60, rc);

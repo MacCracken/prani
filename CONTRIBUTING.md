@@ -33,11 +33,42 @@ oracle kept in git history, not the build — nothing in CI or the release runs
 
 ```sh
 cyrius deps                              # resolve dependencies
-cyrius build src/main.cyr build/prani    # compile
-cyrius test                              # every tests/*.tcyr
+cyrius build src/main.cyr build/prani    # compile (the f64 build)
+cyrius test                              # every tests/*.tcyr, f64 build
+cyrius test -D PRANI_F32                 # every tests/*.tcyr, f32 build
 cyrius test tests/voice.tcyr             # one suite
+sh scripts/gen-f64.sh                    # regenerate src/f64/ from src/ (after any src/ edit)
 cyrius distlib                           # regenerate dist/prani.cyr from [lib].modules
 ```
+
+### Two float formats (ADR-0010)
+
+prani builds in either float format: f64 by default, f32 with `-D PRANI_F32` (a
+consumer adds `defines = ["PRANI_F32"]` to its `[build]`). Both are consumer-facing,
+so both are tested, and both must pass.
+
+- **Write arithmetic over `src/real.cyr`'s primitives**, never the `f64_*` builtins:
+  `pr_mul(a, b)`, not `f64_mul(a, b)`. A real is the build's float, and the
+  primitives are what make one source compile in either. A constant is a pair:
+  `#ifdef PRANI_F32` with its f32 bits, `#else` with its f64 bits, each from the same
+  decimal.
+- **Write a compare as a bare truth value**: `if (pr_lt(a, b))`, `if (!pr_ge(a, b))`.
+  After an `#inline` replay, cycc 6.7.18 does not fuse `== 1` / `== 0` into the
+  branch, which cost 2x on a clamp.
+- **svara, naad, hisab and bayan are f64 in both builds.** Widen a real into them
+  with `pr_to64`, and narrow what comes back with `pr_of64`. A missed crossing
+  compiles: the f32 suites are what find it.
+- **An oscillator's time and phase are f64** in the f32 build: `pr_time(n, sr64)` and
+  `pr_sinw(w64, t)` in an `#ifdef PRANI_F32` arm, with the f64 arm left as it was.
+- **The f64 build compiles `src/f64/`**, which `scripts/gen-f64.sh` writes from
+  `src/`. Never edit `src/f64/`. Regenerate after every `src/` edit, then run
+  `cyrius distlib`. A module with no arithmetic has no twin and needs no guard.
+- **A test states an expected real as the f64 value it should be.** Compare a real
+  with `assert_real(actual, expected, ulps, msg)` (`tests/realt.cyr`): exact in the
+  f64 build, and within `ulps` in the f32 build, where `ulps` is the measured error
+  of that computation, recorded beside it. Never widen a budget to make a case pass.
+  Where the format itself decides an input or a count, state both with
+  `t_per(a64, a32)`.
 
 ## Code Quality Requirements
 
@@ -57,20 +88,24 @@ things to know about it:
 - Every `cyrius …` call re-resolves dependencies and races on `cyrius.lock`. If
   you run more than one at a time, serialize them: `flock /tmp/prani-build.lock cyrius …`.
 
-CI runs four gates **around** the audit that the audit itself does not — added
-across 2.0.4, 2.0.6, 2.0.11 and 2.2.0. Run them before you push, or the PR fails on
-something green locally:
+CI runs gates **around** the audit that the audit itself does not, added across
+2.0.4, 2.0.6, 2.0.11, 2.2.0 and 2.3.0. The audit runs the f64 build only. Run these
+before you push, or the PR fails on something green locally:
 
 ```sh
+cyrius test -D PRANI_F32                         # every suite, f32 build
+sh scripts/gen-f64.sh --check                    # src/f64/ must match src/
 cyrius distlib && git diff --exit-code -- dist/  # bundle coherence: dist/ must match src/
-sh scripts/run-examples.sh                       # fmt + lint + build + run all five docs/examples/
+PRANI_FORMAT=f64 sh scripts/run-examples.sh      # fmt + lint + build + run all five docs/examples/
+PRANI_FORMAT=f32 sh scripts/run-examples.sh      # and again, built for f32
 sh scripts/bench-check.sh                        # timing delta vs benches/baseline.csv
 sh scripts/check-alloc.sh                        # every allocation goes through prani's funnel
+cyrius fuzz tests/prani.fcyr                     # the decoders' fuzz harness (2.2.1)
+cyrius fuzz -D PRANI_F32 tests/prani.fcyr        # and in the f32 build
 ```
 
-`cyrius fuzz tests/prani.fcyr` runs the decoders' fuzz harness (2.2.1): 1,500
-mutated documents against all four hand-written decoders. It is not a CI step; run
-it after touching a decoder or an encoder.
+The fuzz harness feeds 1,500 mutated documents to all four hand-written decoders.
+Since 2.3.0 it is a CI step, in both formats.
 
 Bundle coherence runs **before** the audit in CI, deliberately — see the
 benchmark warning below.
@@ -85,8 +120,11 @@ benchmark warning below.
   bundle is one flat namespace shared with `svara_*` and naad's `validate_*` /
   `ERR_NONE`. Front-load collision avoidance.
 - **Every serializable type gets `#derive(Serialize)` + a `*_to_json` /
-  `*_from_json_str` codec + a roundtrip test.** f64 fields are typed `i64` so they
-  serialize as exact bit patterns — the derive's 6-digit float writer is lossy.
+  `*_from_json_str` codec + a roundtrip test.** Real fields are typed `i64` so they
+  serialize as exact bit patterns, and a document holds **f64** bit patterns in both
+  builds (ADR-0010): the f32 build widens on write and narrows on read, through a
+  64-bit shadow struct for a derived type and `pr_to64` / `pr_of64` in a
+  hand-written codec.
   Deserializers must reject input that does not parse
   ([ADR-0002](docs/adr/0002-deserializers-report-parse-failure.md)).
 - **No panics, no unchecked dereferences, no raw allocation.** Allocate only through

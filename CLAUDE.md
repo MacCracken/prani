@@ -51,13 +51,17 @@ git grep 'fn vocalize' 2.0.3 -- rust-old/src   # grep across the whole oracle
 ```sh
 cyrius deps                              # resolve dependencies
 cyrius build src/main.cyr build/prani    # compile
-cyrius test                              # run tests/*.tcyr
+cyrius test                              # run tests/*.tcyr (f64 build)
+cyrius test -D PRANI_F32                 # and again in the f32 build -- both must pass
+sh scripts/gen-f64.sh                    # after ANY src/ edit: regenerate src/f64/ (never edit it)
 ```
 
 ## Key Principles
 
-- **Cross-check against the Rust oracle** (`git show 2.0.3:rust-old/…`) — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
-- **Correctness over cleverness** — if the Cyrius behavior diverges silently from Rust, the bugs win
+- **The Rust (`git show 2.0.3:rust-old/…`) defines functionality, not numbers.** Cross-check WHAT prani does against it: its functions, behaviours and call patterns. Diverge from that only with an ADR.
+- **Accuracy is the bar for numbers**, not the Rust's bits: measure a result against a higher-precision reference (the f64 build for the f32 build, the exact value where there is one) and record the bound beside the assertion.
+- **Two float formats** ([ADR-0010](docs/adr/0010-two-float-formats.md)): a real is f64 by default and f32 under `PRANI_F32`. Write arithmetic over `src/real.cyr`'s `pr_*` primitives, never `f64_*`; the f64 build compiles the generated `src/f64/`. Never remove either format.
+- **Correctness over cleverness** — if the Cyrius behavior diverges silently from what the Rust did, the bugs win
 - Test after every change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
 - Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps

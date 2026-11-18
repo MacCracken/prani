@@ -10,34 +10,11 @@
 
 | Release | Lane | Status |
 |---|---|---|
-| **2.3.0** | [f32 throughout, to match the oracle](#230--f32-throughout-to-match-the-oracle) | needs a decision first |
 | **2.3.x** | [What the 2.2.1 sweep deferred](#23x--what-the-221-sweep-deferred) | can start today |
 | **2.x.x** | [A raw C ABI](#2xx--a-raw-c-abi-conditional) | conditional on a host that needs it |
 | ⛔ | [Blocked upstream](#-blocked-upstream) | waiting on other repos |
 
 ---
-
-## 2.3.0 — f32 throughout, to match the oracle
-
-**Source**: 2.0.7's measured comparison (`docs/benchmarks.md`), and ganita 1.1.4's
-f32 scalar tier, which made the widening this port was built on optional.
-
-- [ ] **Decide the lane: close it with an ADR, or re-scope it.** Both of the
-      dependencies it waited on decided to stay f64: naad's ADR-0008 and svara's
-      ADR-0008, *The synthesis core stays f64*. naad also measured ganita's f32 tier
-      routing through f64 (`sin` 15% slower, `exp` 93% slower), and `f32` cannot be a
-      fn return type at cyrius 6.7.18. So the only form this lane can take is a
-      hybrid: prani's own arithmetic in f32, widened at every svara call. That costs
-      work and buys neither bit-parity nor speed. The decision was left open on
-      2026-11-17.
-- [ ] **If kept:** prani's arithmetic is f32 end to end, the tolerance-loosened
-      assertions (`PRANI_EPSILON`, f32::EPSILON promoted) are bit-exact against the
-      oracle, and 2.0.7's comparison is re-run f32-vs-f32, so that what is left of the
-      15.7× gap is attributable to codegen.
-
-⚠ **f32 is not proven to be the cause of that 15.7×.** The oracle column is prani
-1.1.0 on svara 1.0.0, compiled by LLVM; the port column is cycc on svara 3.x. The
-honest prior is that codegen dominates and float width is second.
 
 ## 2.3.x — what the 2.2.1 sweep deferred
 
@@ -109,8 +86,11 @@ suspected but could not exercise.
       decoders, which bayan 1.11.1 made strict. Found at 2.1.1. **Blocked on cyrius's
       derive.** When it changes, add the case to `tests/hardening.tcyr`'s duplicate-key
       group.
-- ⛔ **Codegen.** The 15.7× against the Rust oracle is mostly cycc against LLVM, and
-  it belongs to cyrius.
+- ⛔ **Codegen.** The gap to the Rust is cycc against LLVM plus svara 3.x's extra work,
+  and it belongs to cyrius. 2.3.0 measured it f32 against f32: 10.2× for prani's f32
+  build and 9.3× for its f64 build (`docs/benchmarks.md`), so float width does not
+  explain it. Part of the f32 build's own cost is cycc's `#inline` copying its
+  arguments (ADR-0010).
 
 ---
 
@@ -136,7 +116,12 @@ Each is deliberately left alone, with the condition that would change that.
   `tests/voice.tcyr` pins the calibration and `tests/tract.tcyr` the svara facts it
   rests on. **If either fails on a svara bump, re-solve the gain by the method in
   `src/tract.cyr`. Do not nudge it.**
-- **Re-running the Rust comparison depends on crates.io.** The oracle at tag `2.0.3`
-  builds against svara 1.0.0, naad 1.0.0 and hisab 1.2.0, pinned in its `Cargo.lock`.
-  2.0.7 recorded the comparison while it built, and the figures stand. **Revisit only
-  for a fresh comparison**, such as an f32-vs-f32 run after 2.3.0.
+- **Re-running the Rust comparison depends on crates.io.** The tree at tag `2.0.3`
+  has no `Cargo.lock`. 2.3.0 built it offline from the local cargo cache, which
+  resolved svara 1.0.0, naad 1.2.5 and hisab 1.4.0, and recorded the f32-vs-f32
+  comparison in `docs/benchmarks.md`. **Revisit only for a fresh comparison.**
+- **The f64 build compiles generated twins because `#inline` copies its arguments**
+  (ADR-0010). Through the primitives, the f64 build measured 1.09× 2.2.1. **If cycc's
+  `#inline` stops copying its arguments, or cyrius gains a type alias,** measure
+  again, and retire `src/f64/` and `scripts/gen-f64.sh` if the primitives cost
+  nothing.

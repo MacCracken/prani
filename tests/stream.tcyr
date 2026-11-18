@@ -22,19 +22,41 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/stream.cyr"
+include "src/f64/stream.cyr"
+include "tests/realt.cyr"
 
 # ---- test constants (IEEE-754 hex) -----------------------------------------
+#ifdef PRANI_F32
+var T_SR       = 0x472C4400;           # 44100.0 sample rate
+var T_DUR_005  = 0x3D4CCCCD;           # 0.05 s -> 2205 samples @ 44100 (scale 1.0)
+var T_400      = 0x43C80000;           # 400.0  wolf effective_f0 / HOWL contour base
+var T_320      = 0x43A00000;           # 320.0  HOWL contour at t=0 == base*0.8
+var T_0_1      = 0x3DCCCCCD;           # 0.1   (also used as a 0.1 s duration)
+var T_1_0      = 0x3F800000;           # 1.0
+var T_DUR_500  = 0x3F000000;           # 0.5 s -> 22050 samples @ 44100 (scale 1.0)
+var T_DUR_300  = 0x3E99999A;           # 0.3 s -> 13230 samples @ 44100 (scale 1.0)
+var T_480      = 0x43F00000;           # 480.0  BARK contour at t=0 == base*1.2
+#else
 var T_SR       = 0x40e5888000000000;   # 44100.0 sample rate
 var T_DUR_005  = 0x3fa999999999999a;   # 0.05 s -> 2205 samples @ 44100 (scale 1.0)
 var T_400      = 0x4079000000000000;   # 400.0  wolf effective_f0 / HOWL contour base
@@ -44,10 +66,15 @@ var T_1_0      = 0x3ff0000000000000;   # 1.0
 var T_DUR_500  = 0x3fe0000000000000;   # 0.5 s -> 22050 samples @ 44100 (scale 1.0)
 var T_DUR_300  = 0x3fd3333333333333;   # 0.3 s -> 13230 samples @ 44100 (scale 1.0)
 var T_480      = 0x407e000000000000;   # 480.0  BARK contour at t=0 == base*1.2
+#endif
 # 400 * (1.2 + (1.0-1.2)*0.5) is NOT exactly 440 in f64 -- the BARK midpoint
 # lands one ulp above it. Hand-computed following stream_pitch_contour_at's own
 # operation order (frac = 0.05/0.1 = 0.5 exactly; v0 + (v1-v0)*frac = 1.1).
+#ifdef PRANI_F32
+var T_440_ULP  = 0x43DC0000;           # 440.00000000000006  BARK contour at t=0.05
+#else
 var T_440_ULP  = 0x407b800000000001;   # 440.00000000000006  BARK contour at t=0.05
+#endif
 
 alloc_init();
 
@@ -93,7 +120,7 @@ test_group("stream_pitch_contour_at -- hand-computed HOWL (base 400)");
 # HOWL[0] = 0.8 -> base*0.8 = 320 at t=0 (exact, closed-form).
 assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, 0), T_320, "HOWL t=0 == base*0.8 == 320");
 # t < 0 clamps to 0 -> same 320.
-assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, f64_neg(T_1_0)), T_320, "HOWL t=-1 clamps to 0 -> 320");
+assert_eq(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, pr_neg(T_1_0)), T_320, "HOWL t=-1 clamps to 0 -> 320");
 # FLAT contour (GROWL) is base everywhere.
 assert_eq(stream_pitch_contour_at(PRANI_VOC_GROWL, T_400, T_0_1), T_400, "FLAT (growl) t=0.1 == base == 400");
 
@@ -103,14 +130,14 @@ test_group("stream_pitch_contour_at -- hand-computed BARK/YELP (base 400)");
 # `git show 2.0.3:rust-old/src/stream.rs`): (0.0,1.2),(0.1,1.0),(1.0,0.8). It is
 # the only contour with an early knee (0.1), so the first segment is 10x steeper
 # than the second -- a table swapped with HOWL's or ROAR's fails every row below.
-assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, 0), T_480, "BARK t=0 == base*1.2 == 480");
+assert_real(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, 0), T_480, 1, "BARK t=0 == base*1.2 == 480");
 # t=0.05 is the midpoint of the steep first segment: 1.2 + (1.0-1.2)*0.5 == 1.1.
 assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, T_DUR_005), T_440_ULP, "BARK t=0.05 == base*1.1");
 # the knee itself: frac == 1 on segment 0 -> exactly base*1.0.
 assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, T_0_1), T_400, "BARK knee t=0.1 == base == 400");
 assert_eq(stream_pitch_contour_at(PRANI_VOC_BARK, T_400, T_1_0), T_320, "BARK t=1 == base*0.8 == 320");
 # YELP shares the BARK table (both dispatch to stream_contour_bark).
-assert_eq(stream_pitch_contour_at(PRANI_VOC_YELP, T_400, 0), T_480, "YELP t=0 shares BARK table == 480");
+assert_real(stream_pitch_contour_at(PRANI_VOC_YELP, T_400, 0), T_480, 1, "YELP t=0 shares BARK table == 480");
 
 # ================================================================
 test_group("fill_buffer -- writes min(buf,remaining), advances rendered");
@@ -292,12 +319,13 @@ assert_eq(s3diff, 0, "and is bit-identical, at a size that never lines up with a
 var rf_v = crvoice_new(PRANI_SP_WOLF);
 var rf_mods = prani_intent_modifiers(PRANI_INTENT_SOCIAL);
 var rf_t = crtract_new(crvoice_clone_params(CreatureVoice_params(rf_v)), T_SR);
-var rf_f0 = f64_mul(crvoice_effective_f0(rf_v), IntentModifiers_pitch_scale(rf_mods));
+var rf_f0 = pr_mul(crvoice_effective_f0(rf_v), IntentModifiers_pitch_scale(rf_mods));
 # effort_amp = 0.3 + effort * 1.2, computed as the stream computes it (0.9 written
 # as a literal is one ulp away from that sum).
-var rf_eamp = f64_add(0x3FD3333333333333, f64_mul(CreatureVoice_vocal_effort(rf_v), 0x3FF3333333333333));
-var rf_amp = f64_mul(IntentModifiers_amplitude_scale(rf_mods), rf_eamp);
-var rf_tilt = f64_add(SpeciesParams_spectral_tilt(CreatureVoice_params(rf_v)),
+var TL_STRE_324_0 = pr_of64(0x3FD3333333333333);
+var rf_eamp = pr_add(TL_STRE_324_0, pr_mul(CreatureVoice_vocal_effort(rf_v), pr_of64(0x3FF3333333333333)));
+var rf_amp = pr_mul(IntentModifiers_amplitude_scale(rf_mods), rf_eamp);
+var rf_tilt = pr_add(SpeciesParams_spectral_tilt(CreatureVoice_params(rf_v)),
   crvoice_vocalization_spectral_offset(PRANI_VOC_HOWL));
 var rf_opt = crtract_options_default();
 var rf_blk = vec_new();
@@ -308,20 +336,21 @@ var rf_bad = 0;
 while (rf_start < 22050) {
     var rf_n = 882;
     if (22050 - rf_start < rf_n) { rf_n = 22050 - rf_start; }
-    var rf_tt = f64_div(f64_from(rf_start), f64_from(22050));
+    var rf_tt = pr_div(pr_from(rf_start), pr_from(22050));
     var rf_cf = stream_pitch_contour_at(PRANI_VOC_HOWL, rf_f0, rf_tt);
-    var rf_boost = F64_ONE;
-    if (f64_lt(rf_tt, 0x3FB999999999999A) == 1) {
-        rf_boost = f64_add(F64_ONE, f64_mul(f64_sub(F64_ONE, f64_div(rf_tt, 0x3FB999999999999A)), F64_HALF));
-    } elif (f64_gt(rf_tt, 0x3FEB333333333333) == 1) {
-        rf_boost = f64_add(F64_ONE, f64_mul(f64_div(f64_sub(rf_tt, 0x3FEB333333333333), 0x3FC3333333333333), F64_HALF));
+    var rf_boost = PR_ONE;
+    if (pr_lt(rf_tt, pr_of64(0x3FB999999999999A)) == 1) {
+        rf_boost = pr_add(PR_ONE, pr_mul(pr_sub(PR_ONE, pr_div(rf_tt, pr_of64(0x3FB999999999999A))), PR_HALF));
+    } elif (pr_gt(rf_tt, pr_of64(0x3FEB333333333333)) == 1) {
+        var TL_STRE_343_0 = pr_of64(0x3FEB333333333333);
+        rf_boost = pr_add(PR_ONE, pr_mul(pr_div(pr_sub(rf_tt, TL_STRE_343_0), pr_of64(0x3FC3333333333333)), PR_HALF));
     }
-    SynthesisOptions_set_perturbation_scale(rf_opt, f64_add(rf_boost, IntentModifiers_urgency(rf_mods)));
+    SynthesisOptions_set_perturbation_scale(rf_opt, pr_add(rf_boost, IntentModifiers_urgency(rf_mods)));
     crtract_synthesize_into(rf_t, rf_cf, rf_n, rf_opt, rf_blk);
     crtract_apply_spectral_tilt_from(rf_blk, rf_tilt, T_SR, rf_cell);
     var rf_i = 0;
     while (rf_i < rf_n) {
-        if (f64_mul(vec_get(rf_blk, rf_i), rf_amp) != vec_get(obuf, rf_start + rf_i)) { rf_bad = rf_bad + 1; }
+        if (pr_mul(vec_get(rf_blk, rf_i), rf_amp) != vec_get(obuf, rf_start + rf_i)) { rf_bad = rf_bad + 1; }
         rf_i = rf_i + 1;
     }
     rf_start = rf_start + rf_n;
@@ -391,6 +420,17 @@ assert_gt(cdiff, 0, "purr stream advances state -- block 2 differs from block 1"
 # ================================================================
 
 # ---- 2.0.5 test constants ---------------------------------------------------
+#ifdef PRANI_F32
+var T_1E300    = 0x7F7FFFFF;           # 1e300   finite, but 1e300 samples is not
+var T_2P53     = 0x5A000000;           # 2^53    9007199254740992, the ceiling
+var T_2P54     = 0x5A800000;           # 2^54    one binade past the ceiling
+var T_8192     = 0x46000000;           # 8192 Hz, a power of two svara accepts
+var T_2P40     = 0x53800000;           # 2^40 s: x 8192 Hz is exactly 2^53 samples
+var T_2P41     = 0x54000000;           # 2^41 s: x 8192 Hz is 2^54
+var T_1_7E308  = 0x7F7FFFFF;           # 1.7e308 finite f0; x1.2 (BARK) is +inf
+var T_0_8      = 0x3F4CCCCD;           # 0.8     a real vocal-effort setting
+var T_2_0      = 0x40000000;           # 2.0     a real size scale
+#else
 var T_1E300    = 0x7e37e43c8800759c;   # 1e300   finite, but 1e300 samples is not
 var T_2P53     = 0x4340000000000000;   # 2^53    9007199254740992, the ceiling
 var T_2P54     = 0x4350000000000000;   # 2^54    one binade past the ceiling
@@ -400,7 +440,8 @@ var T_2P41     = 0x4280000000000000;   # 2^41 s: x 8192 Hz is 2^54
 var T_1_7E308  = 0x7fee42d130773b76;   # 1.7e308 finite f0; x1.2 (BARK) is +inf
 var T_0_8      = 0x3fe999999999999a;   # 0.8     a real vocal-effort setting
 var T_2_0      = 0x4000000000000000;   # 2.0     a real size scale
-var T_NAN = f64_div(0, 0);
+#endif
+var T_NAN = pr_div(0, 0);
 
 # ================================================================
 test_group("2.0.5 stream_new -- sample_rate must be finite and > 0");
@@ -413,15 +454,15 @@ assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, PRANI_POS_INF, T_
   PRANI_ERR_INVALID_TRACT, "+inf sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, 0, T_DUR_005),
   PRANI_ERR_INVALID_TRACT, "zero sample_rate -> PRANI_ERR_INVALID_TRACT");
-assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_neg(T_SR), T_DUR_005),
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, pr_neg(T_SR), T_DUR_005),
   PRANI_ERR_INVALID_TRACT, "negative sample_rate -> PRANI_ERR_INVALID_TRACT");
 # CONTROL: prani's own guard still does not restate svara's floor (ADR-0001): 10 Hz
 # passes it. Since 2.2.1 (ADR-0009, audit B10) stream_new builds the tract, so
 # svara's rule is applied right here and its code comes back; through 2.2.0 the
 # stream constructed and only the first fill failed.
-var g_lo = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), T_1_0);
+var g_lo = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, pr_from(10), T_1_0);
 assert_eq(g_lo, PRANI_ERR_SVARA, "10 Hz: stream_new reports svara's rejection");
-var g_lo0 = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), 0x3FA999999999999A);
+var g_lo0 = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, pr_from(10), pr_of64(0x3FA999999999999A));
 assert_eq(g_lo0, PRANI_ERR_SVARA, "even for a stream too short to have a sample (2.2.0: a valid empty stream)");
 
 # ================================================================
@@ -443,7 +484,7 @@ assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, PRANI_POS_I
 # saturates a negative product to 0, so a negative duration produced a silent
 # empty stream there. f64 -> i64 in Cyrius does not saturate to 0 (it keeps the
 # sign), so the port would hand the host total_samples == -44100. Report it.
-assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, f64_neg(T_1_0)),
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, pr_neg(T_1_0)),
   PRANI_ERR_INVALID_VOCALIZATION, "negative duration -> error (oracle silently returned empty)");
 
 # ================================================================
@@ -452,10 +493,10 @@ test_group("2.0.5 stream_new -- total_samples must be exactly representable");
 # f64's exact-integer ceiling, not a taste call. The check runs in f64 because a
 # count cannot be checked after the cast (cyrius 6.6.8+, pinned here): an
 # overflow is i64::MAX, which passes a floor check, and NaN is 0, a legal count.
-assert_eq(f64_to(T_1E300), 9223372036854775807, "measured: f64_to(1e300) saturates to i64::MAX");
-assert_eq(f64_to(PRANI_POS_INF), 9223372036854775807, "measured: +inf saturates to the same i64::MAX");
-assert_eq(f64_to(T_NAN), 0, "measured: f64_to(NaN) is 0");
-assert_eq(f64_to(T_2P53), 9007199254740992, "measured: 2^53 converts exactly");
+assert_eq(pr_to(T_1E300), 9223372036854775807, "measured: pr_to(1e300) saturates to i64::MAX");
+assert_eq(pr_to(PRANI_POS_INF), 9223372036854775807, "measured: +inf saturates to the same i64::MAX");
+assert_eq(pr_to(T_NAN), 0, "measured: pr_to(NaN) is 0");
+assert_eq(pr_to(T_2P53), 9007199254740992, "measured: 2^53 converts exactly");
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_1E300),
   PRANI_ERR_INVALID_VOCALIZATION, "1e300 s at 44.1 kHz -> rejected (product overflows to +inf)");
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_1E300),
@@ -472,7 +513,7 @@ assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_8192, T_2P41),
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_MATING, T_8192, T_2P40),
   PRANI_ERR_INVALID_VOCALIZATION, "Mating (x2 duration) pushes an accepted 2^53 over the ceiling");
 # CONTROL: an hour of audio at 44.1 kHz is 158,760,000 samples and still builds.
-var g_hr = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, f64_from(3600));
+var g_hr = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, pr_from(3600));
 assert_eq(prani_is_err(g_hr), 0, "an hour-long stream still constructs");
 assert_eq(stream_total_samples(g_hr), 158760000, "3600 s * 44100 == 158760000 samples");
 
@@ -558,7 +599,7 @@ test_group("2.0.5 stream_pitch_contour_at -- a NaN t propagates, it does not fab
 # pattern), so there is no code to return: propagate the NaN.
 assert_eq(prani_is_finite(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, T_NAN)), 0,
   "NaN t -> NaN, not a fabricated f0");
-assert_neq(f64_to(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, T_NAN)), 240,
+assert_neq(pr_to(stream_pitch_contour_at(PRANI_VOC_HOWL, T_400, T_NAN)), 240,
   "specifically NOT the 240 Hz the fallthrough used to invent");
 # CONTROL: infinities are NOT NaN -- the clamp bounds them, which is the oracle's
 # own behaviour (f32 clamp(inf, 0, 1) == 1), so they must still return an f0.
@@ -668,7 +709,7 @@ assert_lt(a_fill, a_tract,
 # rather than written down: prani's own share of a fill is 0 B, and a svara
 # release that resizes its source moves the bar with it instead of failing it.
 var a_g0 = alloc_used();
-var a_gs = svara_glottal_new(T_400, T_SR);
+var a_gs = svara_glottal_new(pr_to64(T_400), pr_to64(T_SR));
 var a_glottal = alloc_used() - a_g0;
 assert_eq(svara_is_err(a_gs), 0, "control: the reference svara_glottal_new built a source");
 assert_gt(a_glottal, 0, "control: and it allocated, so the bar below is not 0");
@@ -712,7 +753,7 @@ var a_vc = 0;
 while (a_vc < 16) {
     var a_tk = 0;
     while (a_tk <= 20) {
-        var a_t = f64_div(f64_from(a_tk), f64_from(20));
+        var a_t = pr_div(pr_from(a_tk), pr_from(20));
         if (stream_pitch_contour_at_into(a_reuse, a_vc, T_400, a_t)
           != stream_pitch_contour_at(a_vc, T_400, a_t)) { a_bad = a_bad + 1; }
         a_tk = a_tk + 1;
@@ -754,14 +795,14 @@ var le_obuf = vec_new();
 prani_vec_push_zeros(le_obuf, 256);
 while (stream_is_finished(le_ok) == 0) { stream_fill_buffer(le_ok, le_obuf); }
 assert_eq(stream_last_error(le_ok), PRANI_ERR_NONE, "control: nor does one that finished by rendering");
-var le_bad = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, F64_ONE);
+var le_bad = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, PR_ONE);
 SynthStream_set_f0(le_bad, T_1_7E308);
 var le_buf = vec_new();
 prani_vec_push_zeros(le_buf, 64);
 assert_eq(stream_fill_buffer(le_bad, le_buf), 0, "the fill fails and writes nothing (ADR-0003)");
 assert_eq(stream_is_finished(le_bad), 1, "and retires the stream (ADR-0003)");
 assert_eq(stream_last_error(le_bad), PRANI_ERR_SYNTHESIS_FAILED, "stream_last_error names the failure");
-var le_bad2 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, F64_ONE);
+var le_bad2 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, PR_ONE);
 SynthStream_set_f0(le_bad2, T_1_7E308);
 assert_eq(stream_next_block(le_bad2, 64), PRANI_ERR_SYNTHESIS_FAILED,
   "stream_next_block reports the failed fill (2.1.2 returned 64 zeros as a block)");

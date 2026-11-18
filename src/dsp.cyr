@@ -30,7 +30,14 @@
 
 # 0.995 pole radius: R in H(z) = (1 - z^-1) / (1 - R z^-1). Standard DC-block
 # corner (~35 Hz @ 44.1 kHz). Non-integer literal -> module-top hex constant.
+# prani:real-source
+#ifdef PRANI_F32
+#ifdef PRANI_F32
+
+var PRANI_DCBLOCK_R = 0x3F7EB852;           # 0.995
+#else
 var PRANI_DCBLOCK_R = 0x3fefd70a3d70a3d7;   # 0.995
+#endif
 
 # ================================================================
 # DcBlocker -- single-pole DC blocker. Removes DC offset that accumulates
@@ -44,6 +51,58 @@ var PRANI_DCBLOCK_R = 0x3fefd70a3d70a3d7;   # 0.995
 # f64 would use the derive's 6-decimal float writer, which loses ~1 ULP on many
 # values. Auto-generates DcBlocker_to_json / _from_json_str — ports the Rust
 # `#[derive(Serialize, Deserialize)]` on DcBlocker.
+#ifdef PRANI_F32
+#derive(accessors)
+struct DcBlocker {
+    x_prev: i64;
+    y_prev: i64;
+    r: i64;
+}
+
+# Pr64DcBlocker -- DcBlocker as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of DcBlocker's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64DcBlocker {
+    x_prev: i64;
+    y_prev: i64;
+    r: i64;
+}
+
+# DcBlocker_to_json(self, sb) -- the f64 build's document for this DcBlocker: each real widened,
+# which is exact (ADR-0010).
+fn DcBlocker_to_json(self, sb) {
+    var w[24];
+    Pr64DcBlocker_set_x_prev(&w, pr_to64(DcBlocker_x_prev(self)));
+    Pr64DcBlocker_set_y_prev(&w, pr_to64(DcBlocker_y_prev(self)));
+    Pr64DcBlocker_set_r(&w, pr_to64(DcBlocker_r(self)));
+    return Pr64DcBlocker_to_json(&w, sb);
+}
+
+# pr64_dc_blocker_narrow(w) -- a new DcBlocker from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_dc_blocker_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(DcBlocker));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    DcBlocker_set_x_prev(self, pr_of64(Pr64DcBlocker_x_prev(w)));
+    DcBlocker_set_y_prev(self, pr_of64(Pr64DcBlocker_y_prev(w)));
+    DcBlocker_set_r(self, pr_of64(Pr64DcBlocker_r(w)));
+    return self;
+}
+
+# DcBlocker_from_json_str(json) -- DcBlocker from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn DcBlocker_from_json_str(json) {
+    return pr64_dc_blocker_narrow(Pr64DcBlocker_from_json_str(json));
+}
+
+# DcBlocker_from_json(pairs) -- the pairs form, likewise.
+fn DcBlocker_from_json(pairs) {
+    return pr64_dc_blocker_narrow(Pr64DcBlocker_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct DcBlocker {
@@ -51,6 +110,7 @@ struct DcBlocker {
     y_prev: i64;
     r: i64;
 }
+#endif
 
 # new() -- zeroed state, standard pole radius.
 #must_use
@@ -87,7 +147,7 @@ fn dcblocker_new() {
 # What this module does instead is detect the latch once, in process_buffer.
 fn dcblocker_process(b, x) {
     # y = x - x_prev + r * y_prev
-    var y = f64_add(f64_sub(x, DcBlocker_x_prev(b)), f64_mul(DcBlocker_r(b), DcBlocker_y_prev(b)));
+    var y = pr_add(pr_sub(x, DcBlocker_x_prev(b)), pr_mul(DcBlocker_r(b), DcBlocker_y_prev(b)));
     DcBlocker_set_x_prev(b, x);
     DcBlocker_set_y_prev(b, y);
     return y;
@@ -170,7 +230,7 @@ fn prani_vec_scale(v, k) {
     var n = vec_len(v);
     var i = 0;
     while (i < n) {
-        vec_set(v, i, f64_mul(vec_get(v, i), k));
+        vec_set(v, i, pr_mul(vec_get(v, i), k));
         i = i + 1;
     }
     return 0;
@@ -228,3 +288,6 @@ fn prani_map_naad_error(naad_code) {
     prani_log_error("prani: naad backend synthesis init failed");
     return PRANI_ERR_SYNTHESIS_FAILED;
 }
+
+# prani:real-source-end
+#endif

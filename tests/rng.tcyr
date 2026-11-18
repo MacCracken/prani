@@ -5,8 +5,12 @@
 # in f64 (integer * 2^-31), so its golden bit pattern is asserted exactly too;
 # determinism + range round out coverage.
 
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
@@ -39,15 +43,15 @@ assert_neq(prani_rng_next_u32(c), prani_rng_next_u32(a), "different seed -> diff
 # ================================================================
 test_group("next_f32 exact + range (seed 42)");
 var rf = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
-assert_eq(prani_rng_next_f32(rf), 0x3FD02CA5E1000000, "next_f32[0] == 0.2527250955 (exact f64)");
-assert_eq(prani_rng_next_f32(rf), 0x3FA5166E0C000000, "next_f32[1] == 0.0411867513 (exact f64)");
+assert_real(prani_rng_next_f32(rf), pr_of64(0x3FD02CA5E1000000), 1, "next_f32[0] == 0.2527250955 (exact f64)");
+assert_eq(prani_rng_next_f32(rf), pr_of64(0x3FA5166E0C000000), "next_f32[1] == 0.0411867513 (exact f64)");
 # remaining draws must stay in [0.0, 1.0)
 var i = 0;
 var in_range = 1;
 while (i < 256) {
     var v = prani_rng_next_f32(rf);
-    if (f64_lt(v, 0) == 1) { in_range = 0; }
-    if (f64_ge(v, F64_ONE) == 1) { in_range = 0; }
+    if (pr_lt(v, 0) == 1) { in_range = 0; }
+    if (pr_ge(v, PR_ONE) == 1) { in_range = 0; }
     i = i + 1;
 }
 assert_eq(in_range, 1, "256 next_f32 draws all in [0.0, 1.0)");
@@ -68,6 +72,21 @@ assert_eq(PrRng_inc(r2), PrRng_inc(rser), "inc roundtrips");
 # the restored generator resumes the EXACT same stream
 assert_eq(prani_rng_next_u32(r2), prani_rng_next_u32(rser), "restored rng resumes u32 stream");
 assert_eq(prani_rng_next_u32(r2), prani_rng_next_u32(rser), "…and stays in lockstep");
+
+# ================================================================
+test_group("2.3.0 the largest draw stays below 1.0 in both formats (ADR-0010)");
+# PCG32's output is an invertible xorshift of the old state, so a state can be solved
+# for: this one has rotation 0 and outputs 0xFFFFFFFF, the top of the range, and the
+# draw takes its high 31 bits, 2^31 - 1. In f64 that is 1 - 2^-31. In f32, rounding
+# all 31 bits (as the Rust did, and 2.2.1's f64 form would) gives 2^31 and a draw of
+# exactly 1.0; keeping 24 gives 1 - 2^-24, one ulp below 1.0.
+var rtop = prani_rng_new(1);
+PrRng_set_state(rtop, 576458553405997536);   # 0x07FFFE00078001E0
+assert_eq(prani_rng_next_u32(rtop), 4294967295, "control: the solved state outputs 0xFFFFFFFF");
+PrRng_set_state(rtop, 576458553405997536);
+var rtop_v = prani_rng_next_f32(rtop);
+assert_eq(pr_lt(rtop_v, PR_ONE), 1, "the draw from 2^31 - 1 is below 1.0");
+assert_real(rtop_v, pr_of64(0x3fefffffffc00000), 1, "and it is 1 - 2^-31 (f32: 1 - 2^-24, one ulp from it)");
 
 var rc = assert_summary();
 syscall(60, rc);

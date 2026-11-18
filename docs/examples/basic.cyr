@@ -33,13 +33,21 @@ include "dist/prani.cyr"
 # The floor is svara's, not prani's: below ~1200 Hz svara cannot build a tract
 # (its subglottal bandpass sits at 600 Hz and needs nyquist above that), and
 # prani reports that rejection rather than papering over it.
-var SAMPLE_RATE = f64_from(44100);
+var SAMPLE_RATE = pr_from(44100);
 
 # 1.5 s -- a wolf howl is a long sustained call, and short buffers hide the
 # pitch contour that makes it sound like a howl rather than a tone.
+#ifdef PRANI_F32
+var DURATION = 0x3FC00000;           # 1.5
+#else
 var DURATION = 0x3FF8000000000000;   # 1.5
+#endif
 
+#ifdef PRANI_F32
+var F_ONE = 0x3F800000;           # 1.0  -- the nominal amplitude bound
+#else
 var F_ONE = 0x3FF0000000000000;   # 1.0  -- the nominal amplitude bound
+#endif
 
 # ================================================================
 # Reporting helpers. Cyrius has no printf: output is built line by line, and
@@ -55,7 +63,7 @@ fn ex_label(s) {
 
 fn ex_line(label, value, decimals, suffix) {
     ex_label(label);
-    fmt_float(value, decimals);
+    fmt_float(pr_to64(value), decimals);
     println(suffix);
     return 0;
 }
@@ -156,7 +164,7 @@ fn main() {
     # Rendered length is duration * intent duration_scale * sample_rate, so it
     # is worth deriving the real duration back from the count rather than
     # assuming you got the 1.5 s you asked for. Idle scales duration by 1.0.
-    ex_line("   duration        : ", f64_div(f64_from(n), SAMPLE_RATE), 3, " s at 44100 Hz");
+    ex_line("   duration        : ", pr_div(pr_from(n), SAMPLE_RATE), 3, " s at 44100 Hz");
 
     # Peak amplitude, and where in the buffer it lands. The level is well under
     # 1.0 and that is not a bug: the Idle intent halves amplitude and the
@@ -166,15 +174,15 @@ fn main() {
     var peak_at = 0;
     var i = 0;
     while (i < n) {
-        var a = f64_abs(vec_get(howl, i));
-        if (f64_gt(a, peak) == 1) { peak = a; peak_at = i; }
+        var a = pr_abs(vec_get(howl, i));
+        if (pr_gt(a, peak) == 1) { peak = a; peak_at = i; }
         i = i + 1;
     }
     ex_line("   peak amplitude  : ", peak, 6, "  (max |sample|; Idle intent scales amplitude by 0.5)");
     ex_label("   loudest at      : ");
     fmt_int(peak_at);
     ex_label("  (");
-    fmt_float(f64_div(f64_from(peak_at), SAMPLE_RATE), 3);
+    fmt_float(pr_to64(pr_div(pr_from(peak_at), SAMPLE_RATE)), 3);
     println(" s in -- the howl's pitch contour swells past its midpoint)");
 
     # The ends of the buffer show the vocalization envelope: a howl opens from
@@ -197,7 +205,7 @@ fn main() {
     while (j < n) {
         var v = vec_get(howl, j);
         if (prani_is_finite(v) == 0) { nonfinite = nonfinite + 1; }
-        if (f64_gt(f64_abs(v), F_ONE) == 1) { outside = outside + 1; }
+        if (pr_gt(pr_abs(v), F_ONE) == 1) { outside = outside + 1; }
         j = j + 1;
     }
     ex_line_int("   non-finite      : ", nonfinite, " of the samples");

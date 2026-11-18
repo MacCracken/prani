@@ -100,10 +100,94 @@ source-filter interaction. **This measures the two stacks as shipped, not one
 algorithm in two languages,** and it is not evidence that Cyrius is 15× slower
 than Rust. The honest prior is that codegen dominates and float width is second.
 
-Closing the float-width variable is [roadmap 2.3.0 Lane A](development/roadmap.md),
-filed as **P0 on naad and svara** — prani cannot convert alone, because the
-per-sample svara calls are f64 on both sides. It is no longer *forced*: ganita
-1.1.4 ships an f32 scalar tier and prani calls nothing outside it.
+The float-width variable was closed in 2.3.0, as far as prani alone can close it:
+prani builds in f32 too ([ADR-0010](adr/0010-two-float-formats.md)), with svara and
+naad still f64 on both sides of the per-sample calls. The f32-vs-f32 comparison
+below finds that float width does not explain the gap.
+
+## The two float formats (2.3.0)
+
+> **Dated 2026-11-17.** Six rounds on one host, each running tag 2.2.1, this tree's
+> f64 build and its f32 build back to back. The medians of the per-round ratios are
+> quoted, as for every comparison in this file.
+
+```sh
+cyrius bench tests/prani.bcyr                 # the f64 build
+cyrius bench -D PRANI_F32 tests/prani.bcyr    # the f32 build
+```
+
+| Benchmark | f64 build ÷ 2.2.1 | f32 build ÷ f64 build |
+|---|---:|---:|
+| `dcblocker_process (per-sample)` | 1.062× | 1.222× |
+| `prani_rng_next_f32 (per-sample)` | 1.000× | 1.091× |
+| `emotion_evaluate (per-frame)` | 1.014× | 1.311× |
+| `crvoice_vocalize wolf_howl_0.05s@8k` | 0.994× | 1.055× |
+| `wolf_howl_1s` | 0.996× | 1.050× |
+| `cat_purr_500ms` | 0.992× | 1.063× |
+| `cricket_stridulate_300ms` | 0.997× | 1.159× |
+| `dragon_roar_1s` | 1.005× | 1.094× |
+| `snake_hiss_500ms` | 1.009× | 1.078× |
+| `songbird_trill_500ms` | 0.998× | 1.100× |
+| `lion_roar_1s` | 1.003× | 1.085× |
+| `wolf_alarm_howl_1s` | 0.997× | 1.051× |
+| `bee_buzz_300ms` | 1.001× | 1.143× |
+| `crow_screech_500ms` | 1.009× | 1.005× |
+| `crocodilian_rumble_1s` | 1.002× | 1.085× |
+| `wolf_howl_shout_1s` | 0.997× | 1.050× |
+| `stream_wolf_howl_1s` | 1.019× | 0.997× |
+| `emotion_evaluate` | 1.000× | 1.301× |
+
+**The f64 build is 2.2.1's speed**, a median of medians of **1.001×**, every synthesis benchmark within 0.992–1.019×. Its code is
+2.2.1's: `src/f64/` spells each primitive as its builtin ([ADR-0010](adr/0010-two-float-formats.md)).
+
+**The f32 build is **1.085×** the f64 build today, and the cost is cycc's `#inline`,
+not f32 arithmetic.** Before the generated twins, the f64 build compiled the same
+primitives the f32 build does, and measured 1.087× 2.2.1, with `emotion_evaluate` at
+1.30×, the cricket at 1.18× and the bee at 1.14×. The f32 build's profile against
+f64 is the same: `emotion_evaluate` 1.30–1.31×, the cricket 1.16×, the bee 1.14×, 1.085× overall. cycc 6.7.18 copies each argument of an `#inline`
+replay into a slot of its own, so a primitive costs a store and a load that the
+builtin does not. When cycc stops copying, the f32 build stops paying it.
+`crow_screech` and the stream run at parity, because most of their time is in svara,
+which is f64 in both.
+
+### The Rust comparison, f32 against f32 (2.3.0)
+
+> **Dated 2026-11-17**, one sitting, on a host another session was loading (load
+> 3.3–4.0, single-threaded harnesses on an 8-core part). prani's f32 bench ran
+> immediately before and after criterion; the faster of the two is quoted, and they
+> agreed within 3.2%. The oracle is tag `2.0.3`, built offline from the local cargo
+> cache, which resolved svara 1.0.0, naad 1.2.5 and hisab 1.4.0 (there is no
+> `Cargo.lock` in the tree), with cargo 1.100.
+
+| Benchmark | Rust oracle (f32) | prani f32 build | Ratio |
+|---|---:|---:|---:|
+| `bee_buzz_300ms` | 195 µs | 3.22 ms | **16.5×** |
+| `songbird_trill_500ms` | 759 µs | 8.61 ms | **11.3×** |
+| `snake_hiss_500ms` | 212 µs | 2.41 ms | **11.3×** |
+| `cricket_stridulate_300ms` | 257 µs | 2.73 ms | **10.6×** |
+| `dragon_roar_1s` | 1.55 ms | 16.3 ms | **10.5×** |
+| `crocodilian_rumble_1s` | 1.46 ms | 14.9 ms | **10.2×** |
+| `lion_roar_1s` | 1.47 ms | 15.0 ms | **10.2×** |
+| `wolf_howl_1s` | 1.46 ms | 14.3 ms | **9.8×** |
+| `wolf_howl_shout_1s` | 1.42 ms | 13.8 ms | **9.7×** |
+| `wolf_alarm_howl_1s` | 1.04 ms | 10.0 ms | **9.6×** |
+| `crow_screech_500ms` | 568 µs | 5.30 ms | **9.3×** |
+| `stream_wolf_howl_1s` | 1.13 ms | 10.0 ms | **8.9×** |
+| `cat_purr_500ms` | 556 µs | 4.33 ms | **7.8×** |
+| `emotion_evaluate` | 6.84 ns | 95 ns | 13.9× (timer floor: not comparable) |
+
+**Float width is not the gap.** Across the 13 synthesis benchmarks the f32 build is a
+median **10.2×** the oracle (7.8–16.5×), and the f64 build, from the same sitting's
+rounds, **9.3×** (7.3–14.4×). Matching the oracle's width moved the ratio the wrong
+way, by the f32 build's 1.085× above. What remains is codegen and the stacks
+themselves: svara 3.14.0 does work svara 1.0.0 never did (above), and the oracle's
+naad and hisab resolved to newer 1.x releases than 2.0.7's.
+
+The ratio is smaller than 2.0.7's 15.7× (f32 oracle against the f64 port then). Many
+things moved between the two sittings: two and a half months of cyrius releases
+(6.5.36 → 6.7.18), svara 3.5.4 → 3.14.0, ADR-0007's and ADR-0009's render changes, the oracle's
+dependency resolution, and the host's load. This comparison does not separate them,
+and no figure here is a claim about one of them alone.
 
 ## Method
 

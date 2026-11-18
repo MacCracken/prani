@@ -39,33 +39,63 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/stream.cyr"
+include "src/f64/stream.cyr"
 include "src/ffi.cyr"
+include "tests/realt.cyr"
 
 # ---- test constants (IEEE-754 hex) -----------------------------------------
+#ifdef PRANI_F32
+var T_SR       = 0x472C4400;           # 44100.0 sample rate
+var T_DUR_005  = 0x3D4CCCCD;           # 0.05 s -> 2205 samples @ 44100 (scale 1.0)
+var T_0_9      = 0x3F666666;           # 0.9  effort (in range, passes through)
+var T_1_5      = 0x3FC00000;           # 1.5  effort (out of range -> clamps to 1.0)
+var T_1_0      = 0x3F800000;           # 1.0  effort clamp ceiling
+var T_60       = 0x42700000;           # 60.0 dB SPL ambient (Lombard test)
+#else
 var T_SR       = 0x40e5888000000000;   # 44100.0 sample rate
 var T_DUR_005  = 0x3fa999999999999a;   # 0.05 s -> 2205 samples @ 44100 (scale 1.0)
 var T_0_9      = 0x3feccccccccccccd;   # 0.9  effort (in range, passes through)
 var T_1_5      = 0x3ff8000000000000;   # 1.5  effort (out of range -> clamps to 1.0)
 var T_1_0      = 0x3ff0000000000000;   # 1.0  effort clamp ceiling
 var T_60       = 0x404e000000000000;   # 60.0 dB SPL ambient (Lombard test)
+#endif
 
 # ---- 2.0.5 range-guard constants -------------------------------------------
+#ifdef PRANI_F32
+var T_NAN      = 0x7FC00000;           # NaN -- the value that walks every clamp
+#else
 var T_NAN      = 0x7ff8000000000000;   # NaN -- the value that walks every clamp
+#endif
 var T_0_0      = 0;                    # +0.0 (valid duration, invalid rate)
+#ifdef PRANI_F32
+var T_999      = 0x4479C000;           # 999.0 Hz -- finite, positive, under svara's floor
+var T_DUR_NEG  = 0xBF800000;           # -1.0 s duration (rejected -- divergence)
+var T_SR_NEG   = 0xC72C4400;           # -44100.0 sample rate (rejected)
+#else
 var T_999      = 0x408f380000000000;   # 999.0 Hz -- finite, positive, under svara's floor
 var T_DUR_NEG  = 0xbff0000000000000;   # -1.0 s duration (rejected -- divergence)
 var T_SR_NEG   = 0xc0e5888000000000;   # -44100.0 sample rate (rejected)
+#endif
 
 alloc_init();
 
@@ -127,7 +157,7 @@ test_group("voice_apply_lombard -- effort boost, null guard");
 var vl = prani_ffi_voice_create(0);
 var before = crvoice_vocal_effort(vl);
 prani_ffi_voice_apply_lombard(vl, T_60);
-assert_eq(f64_ge(crvoice_vocal_effort(vl), before), 1, "lombard raises (or holds) effort");
+assert_eq(pr_ge(crvoice_vocal_effort(vl), before), 1, "lombard raises (or holds) effort");
 prani_ffi_voice_apply_lombard(0, T_60);   # null guard: no crash.
 
 # ================================================================
@@ -240,7 +270,7 @@ assert_eq(crvoice_vocal_effort(vlb), T_0_9, "apply_lombard(-inf) rejected -- eff
 # NOT overreach: any FINITE dB SPL is still accepted -- the boost is total over
 # the finite reals, so there is no out-of-range dB value to reject.
 prani_ffi_voice_apply_lombard(vlb, T_60);
-assert_eq(f64_ge(crvoice_vocal_effort(vlb), T_0_9), 1, "finite 60 dB still raises (or holds) effort");
+assert_eq(pr_ge(crvoice_vocal_effort(vlb), T_0_9), 1, "finite 60 dB still raises (or holds) effort");
 
 # ================================================================
 test_group("stream_start -- sample_rate (0,inf) and duration [0,inf) ranges");
@@ -309,12 +339,12 @@ assert_eq(prani_ffi_stream_fill(st_bl, blbuf, 2205), 2205, "a corrected buffer_l
 # ================================================================
 test_group("2.2.0 prani_ffi_stream_last_error names why a fill wrote nothing");
 var fle_v = prani_ffi_voice_create(0);
-var fle_st = prani_ffi_stream_start(fle_v, 1, 4, f64_from(44100), F64_ONE);
+var fle_st = prani_ffi_stream_start(fle_v, 1, 4, pr_from(44100), PR_ONE);
 assert_neq(fle_st, 0, "control: a 44.1 kHz bark starts");
 assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_NONE, "before a fill: no error");
 # A failure mid-stream: an f0 whose contour overflows (BARK opens at 1.2x), set
 # raw, the way a crafted state would carry it.
-SynthStream_set_f0(fle_st, 0x7fee42d130773b76);
+SynthStream_set_f0(fle_st, pr_of64(0x7fee42d130773b76));
 var fle_buf = vec_new();
 prani_vec_push_zeros(fle_buf, 64);
 assert_eq(prani_ffi_stream_fill(fle_st, fle_buf, 64), 0, "the fill writes nothing");

@@ -53,6 +53,21 @@ jobs:
         # run costs seconds.
         run: cyrius test
 
+      - name: Test — the f32 build
+        # 2.3.0, ADR-0010. prani builds in either float format, and both are
+        # consumer-facing, so every suite runs in each. The f64 build's suites hold
+        # every real bit for bit; the f32 build's hold the same expected values to
+        # a measured accuracy (tests/realt.cyr's assert_real).
+        run: cyrius test -D PRANI_F32
+
+      - name: Generated f64 build — src/f64/ matches its sources
+        # The f64 build compiles src/f64/<module>.cyr, which scripts/gen-f64.sh
+        # writes from src/<module>.cyr (ADR-0010: cycc's #inline copies its
+        # arguments, so the f64 build is spelled in the builtins directly). Like
+        # dist/, it is tracked, and an edit to src/ without re-running the script
+        # leaves the f64 build compiling the old code. Fail on that first.
+        run: sh scripts/gen-f64.sh --check
+
       # ORDER MATTERS: this runs BEFORE the audit, not after. tests/prani.bcyr
       # benchmarks `dist/prani.cyr` — the generated bundle, deliberately, since
       # that is what a consumer gets. So a stale bundle makes the audit's bench
@@ -109,7 +124,7 @@ jobs:
         # disappearing is a real regression, not noise.
         run: sh scripts/bench-check.sh
 
-      - name: Examples — fmt · lint · build · run all five
+      - name: Examples — fmt · lint · build · run all five, in both formats
         # Roadmap 2.0.6's gate. `rust-old/` (the frozen Rust oracle) was removed
         # in 2.0.8, after which a worked example is the only executable
         # statement of how this API is driven — so they must not be left to rot.
@@ -117,4 +132,14 @@ jobs:
         # also proves the published bundle is usable from outside the library.
         # Since 2.2.1 the script fails if any of the five is missing, or if one
         # drifts from cyrfmt or lint (audit D11, D15).
-        run: sh scripts/run-examples.sh
+        run: |
+          PRANI_FORMAT=f64 sh scripts/run-examples.sh
+          PRANI_FORMAT=f32 sh scripts/run-examples.sh
+
+      - name: Fuzz — the decoders, in both formats
+        # tests/prani.fcyr feeds mutated documents to the four hand-written
+        # decoders (2.2.1, D17). A document carries f64 bit patterns in both
+        # builds, and the f32 build narrows on read (ADR-0010), so both run.
+        run: |
+          cyrius fuzz tests/prani.fcyr
+          cyrius fuzz -D PRANI_F32 tests/prani.fcyr

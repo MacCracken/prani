@@ -13,29 +13,51 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/spatial.cyr"
+include "src/f64/spatial.cyr"
 include "src/vocalization.cyr"
 include "src/fatigue.cyr"
+include "src/f64/fatigue.cyr"
 include "src/emotion.cyr"
+include "src/f64/emotion.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/preset.cyr"
+include "src/f64/preset.cyr"
 include "src/stream.cyr"
+include "src/f64/stream.cyr"
 include "src/ffi.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
+#ifdef PRANI_F32
+var H_SR      = 0x472C4400;           # 44100.0  a sample rate svara accepts
+var H_DUR_005 = 0x3D4CCCCD;           # 0.05 s
+var H_0_02    = 0x3CA3D70A;           # 0.02     the 20 ms block constant
+var H_3_0     = 0x40400000;           # 3.0      an out-of-range size scale
+#else
 var H_SR      = 0x40e5888000000000;   # 44100.0  a sample rate svara accepts
 var H_DUR_005 = 0x3fa999999999999a;   # 0.05 s
 var H_0_02    = 0x3f947ae147ae147b;   # 0.02     the 20 ms block constant
 var H_3_0     = 0x4008000000000000;   # 3.0      an out-of-range size scale
+#endif
 
 # all_finite(vec) -- 1 iff every element passes prani_is_finite.
 #must_use
@@ -58,32 +80,32 @@ fn t_all_finite_h(v) {
 # group is a SIGSEGV, not a failure.
 # ================================================================
 test_group("F1 crtract_new reports svara's rejection instead of dereferencing it");
-assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_from(10))), 1,
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), pr_from(10))), 1,
   "sample_rate 10 -> error, not a segfault");
-assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_from(1000))), 1,
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), pr_from(1000))), 1,
   "sample_rate 1000 (svara's boundary) -> error");
 assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), 0)), 1,
   "sample_rate 0 -> error");
-assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_neg(H_SR))), 1,
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), pr_neg(H_SR))), 1,
   "negative sample_rate -> error");
-assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_div(0, 0))), 1,
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), pr_div(0, 0))), 1,
   "NaN sample_rate -> error");
 # control: the rates the library is actually used at still build a tract.
 assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), H_SR)), 0,
   "44100 still builds (control)");
-assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000))), 0,
+assert_eq(prani_is_err(crtract_new(species_params(PRANI_SP_WOLF), pr_from(8000))), 0,
   "8000 still builds (control)");
 
 test_group("F1 the rejection propagates out of every public entry point");
 var hv = crvoice_new(PRANI_SP_WOLF);
-assert_eq(prani_is_err(crvoice_vocalize(hv, PRANI_VOC_HOWL, f64_from(10), F64_ONE)), 1,
+assert_eq(prani_is_err(crvoice_vocalize(hv, PRANI_VOC_HOWL, pr_from(10), PR_ONE)), 1,
   "crvoice_vocalize -> error at sample_rate 10");
 assert_eq(prani_is_err(
-    crvoice_vocalize_with_intent(hv, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, f64_from(10), F64_ONE)), 1,
+    crvoice_vocalize_with_intent(hv, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, pr_from(10), PR_ONE)), 1,
   "crvoice_vocalize_with_intent -> error at sample_rate 10");
 # the cat-purr special path takes its own crtract_new call site
 var hcat = crvoice_new(PRANI_SP_CAT);
-assert_eq(prani_is_err(crvoice_vocalize(hcat, PRANI_VOC_PURR, f64_from(10), F64_ONE)), 1,
+assert_eq(prani_is_err(crvoice_vocalize(hcat, PRANI_VOC_PURR, pr_from(10), PR_ONE)), 1,
   "cat purr path -> error at sample_rate 10");
 # control: the same calls at a real sample rate still synthesize
 var hok = crvoice_vocalize(hv, PRANI_VOC_HOWL, H_SR, H_DUR_005);
@@ -92,7 +114,7 @@ assert_eq(vec_len(hok), 2205, "control length is 0.05 s * 44100");
 
 test_group("F1 a rejected stream reports 0 written and retires");
 var hsv = crvoice_new(PRANI_SP_WOLF);
-var hs = stream_new(hsv, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), F64_ONE);
+var hs = stream_new(hsv, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, pr_from(10), PR_ONE);
 # 2.2.1 (ADR-0009, audit B10): stream_new builds the tract, so the rejection is its
 # to report; through 2.2.0 it constructed and the first fill failed.
 assert_eq(hs, PRANI_ERR_SVARA, "stream_new reports svara's rejection of the rate");
@@ -112,10 +134,10 @@ assert_eq(stream_is_finished(hs), 1, "and it reads as finished, so a drain loop 
 # defect.
 # ================================================================
 test_group("F2 block_size arithmetic underflows below 50 Hz (floor is defense in depth)");
-assert_eq(f64_to(f64_mul(f64_from(10), H_0_02)), 0, "sr=10 -> block_size 0 unfloored");
-assert_eq(f64_to(f64_mul(f64_from(49), H_0_02)), 0, "sr=49 -> block_size 0 unfloored");
-assert_eq(f64_to(f64_mul(f64_from(50), H_0_02)), 1, "sr=50 -> block_size 1");
-assert_eq(f64_to(f64_mul(H_SR, H_0_02)), 882, "sr=44100 -> block_size 882");
+assert_eq(pr_to(pr_mul(pr_from(10), H_0_02)), 0, "sr=10 -> block_size 0 unfloored");
+assert_eq(pr_to(pr_mul(pr_from(49), H_0_02)), 0, "sr=49 -> block_size 0 unfloored");
+assert_eq(pr_to(pr_mul(pr_from(50), H_0_02)), 1, "sr=50 -> block_size 1");
+assert_eq(pr_to(pr_mul(H_SR, H_0_02)), 882, "sr=44100 -> block_size 882");
 
 # ================================================================
 # F3 (HIGH) -- a parse failure was indistinguishable from a successful parse.
@@ -150,10 +172,10 @@ assert_eq(CreatureVoice_size_scale(hrv2), CreatureVoice_size_scale(hrv), "size_s
 test_group("F4 a NoiseOnly tract with no bandpass reports instead of dereferencing 0");
 var hsnake = crtract_new(species_params(PRANI_SP_SNAKE), H_SR);
 assert_eq(prani_is_err(hsnake), 0, "snake tract builds (control)");
-assert_eq(prani_is_err(crtract_synthesize(hsnake, f64_from(300), 32, crtract_options_default())), 0,
+assert_eq(prani_is_err(crtract_synthesize(hsnake, pr_from(300), 32, crtract_options_default())), 0,
   "with a filter present, synthesis still succeeds (control)");
 CreatureTract_set_noise_filter(hsnake, 0);   # the state crtract_new can leave behind
-assert_eq(crtract_synthesize(hsnake, f64_from(300), 32, crtract_options_default()),
+assert_eq(crtract_synthesize(hsnake, pr_from(300), 32, crtract_options_default()),
   PRANI_ERR_SYNTHESIS_FAILED, "filter absent -> PRANI_ERR_SYNTHESIS_FAILED, not a segfault");
 
 # ================================================================
@@ -175,7 +197,7 @@ assert_eq(stream_samples_rendered(hs2), 128, "and the stream advanced by 128");
 # The rewrite must be observably identical to the rebuild it replaced.
 # ================================================================
 test_group("F6 ffi_voice_set_size matches a genuinely rebuilt voice, field for field");
-var hff = crvoice_with_vocal_effort(crvoice_with_f0_offset(crvoice_new(PRANI_SP_DRAGON), f64_from(40)), F64_ONE);
+var hff = crvoice_with_vocal_effort(crvoice_with_f0_offset(crvoice_new(PRANI_SP_DRAGON), pr_from(40)), PR_ONE);
 prani_ffi_voice_set_size(hff, H_3_0);
 var href = crvoice_with_size(crvoice_new(PRANI_SP_DRAGON), H_3_0);
 assert_eq(CreatureVoice_species(hff), CreatureVoice_species(href), "species matches rebuild");
@@ -196,11 +218,11 @@ assert_eq(CreatureVoice_species(hff2), PRANI_SP_CAT, "handle still addresses the
 # ================================================================
 test_group("R1/R2 extracted vec helpers, including the non-positive count edge");
 var hsrc = vec_new();
-vec_push(hsrc, f64_from(1)); vec_push(hsrc, f64_from(2)); vec_push(hsrc, f64_from(3));
+vec_push(hsrc, pr_from(1)); vec_push(hsrc, pr_from(2)); vec_push(hsrc, pr_from(3));
 var hdst = vec_new();
 prani_vec_extend(hdst, hsrc);
 assert_eq(vec_len(hdst), 3, "extend appends every element");
-assert_eq(vec_get(hdst, 2), f64_from(3), "in order");
+assert_eq(vec_get(hdst, 2), pr_from(3), "in order");
 prani_vec_extend(hdst, vec_new());
 assert_eq(vec_len(hdst), 3, "extending by an empty vec is a no-op");
 prani_vec_push_zeros(hdst, 4);
@@ -208,10 +230,10 @@ assert_eq(vec_len(hdst), 7, "push_zeros appends n zeros");
 assert_eq(vec_get(hdst, 6), 0, "and they are zero");
 prani_vec_push_zeros(hdst, 0);
 assert_eq(vec_len(hdst), 7, "a zero count appends nothing");
-prani_vec_push_zeros(hdst, f64_to(f64_neg(PRANI_POS_INF)));
-assert_eq(vec_len(hdst), 7, "f64_to(-inf) == i64::MIN appends nothing, does not loop");
-prani_vec_push_zeros(hdst, f64_to(f64_div(0, 0)));
-assert_eq(vec_len(hdst), 7, "f64_to(NaN) == 0 appends nothing");
+prani_vec_push_zeros(hdst, pr_to(pr_neg(PRANI_POS_INF)));
+assert_eq(vec_len(hdst), 7, "pr_to(-inf) == i64::MIN appends nothing, does not loop");
+prani_vec_push_zeros(hdst, pr_to(pr_div(0, 0)));
+assert_eq(vec_len(hdst), 7, "pr_to(NaN) == 0 appends nothing");
 
 # ================================================================
 # O1/O2 -- allocation budget. Cyrius's allocator is a bump arena that never
@@ -252,12 +274,12 @@ assert_eq(vec_len(hb_out), 2205, "control: and still returns 0.05 s of audio");
 # nothing of prani's. One SynthesisOptions per block would add 16 bytes to it.
 assert_eq(hb_used < 1000000, 1, "one 0.05 s call stays under 1 MB retained");
 var hb7 = crvoice_new(PRANI_SP_WOLF);
-crvoice_vocalize(hb7, PRANI_VOC_HOWL, H_SR, 0x3FB1EB851EB851EC);   # warm, 0.07 s
+crvoice_vocalize(hb7, PRANI_VOC_HOWL, H_SR, pr_of64(0x3FB1EB851EB851EC));   # warm, 0.07 s
 var hb7_before = alloc_used();
-var hb7_out = crvoice_vocalize(hb7, PRANI_VOC_HOWL, H_SR, 0x3FB1EB851EB851EC);
+var hb7_out = crvoice_vocalize(hb7, PRANI_VOC_HOWL, H_SR, pr_of64(0x3FB1EB851EB851EC));
 var hb7_used = alloc_used() - hb7_before;
 var hb_g0 = alloc_used();
-var hb_g = svara_glottal_new(f64_from(400), H_SR);
+var hb_g = svara_glottal_new(f64_from(400), pr_to64(H_SR));
 var hb_glottal = alloc_used() - hb_g0;
 assert_eq(vec_len(hb7_out) > 2646, 1, "control: 0.07 s is a fourth block (2646 = 3 x 882)");
 assert_gt(hb_glottal, 0, "control: a svara source allocates, so the equality below is not 0 = 0");
@@ -291,27 +313,27 @@ assert_eq(hb7_used - hb_used, hb_glottal,
 test_group("F12 low sample rates report instead of aborting");
 var hlv = crvoice_new(PRANI_SP_WOLF);
 # below svara's floor: a checkable error, no crash
-assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(1001), H_DUR_005)), 1,
+assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(1001), H_DUR_005)), 1,
   "1001 Hz -> error (svara's 600 Hz subglottal bandpass is above nyquist)");
-assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(1200), H_DUR_005)), 1,
+assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(1200), H_DUR_005)), 1,
   "1200 Hz (600 Hz exactly at nyquist) -> error");
 # above it: these ABORTED before svara 3.5.4 and now render
-var h1201 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(1201), H_DUR_005);
+var h1201 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(1201), H_DUR_005);
 assert_eq(prani_is_err(h1201), 0, "1201 Hz synthesizes (aborted before 3.5.4)");
 assert_eq(vec_len(h1201), 60, "1201 Hz length is trunc(0.05 * 1201) = 60");
 assert_eq(t_all_finite_h(h1201), 1, "1201 Hz output is finite");
-var h4000 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(4000), H_DUR_005);
+var h4000 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(4000), H_DUR_005);
 assert_eq(prani_is_err(h4000), 0, "4000 Hz synthesizes (aborted before 3.5.4)");
 assert_eq(vec_len(h4000), 200, "4000 Hz length is 0.05 * 4000 = 200");
 assert_eq(t_all_finite_h(h4000), 1, "4000 Hz output is finite");
-var h7500 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(7500), H_DUR_005);
+var h7500 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(7500), H_DUR_005);
 assert_eq(prani_is_err(h7500), 0, "7500 Hz synthesizes (aborted before 3.5.4)");
 assert_eq(t_all_finite_h(h7500), 1, "7500 Hz output is finite");
 # the boundary above which svara carries its FULL five-formant bank
-var h7501 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(7501), H_DUR_005);
+var h7501 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(7501), H_DUR_005);
 assert_eq(prani_is_err(h7501), 0, "7501 Hz synthesizes (full five-formant bank)");
 # control: the rates the library is actually used at are untouched by all of this
-assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(8000), H_DUR_005)), 0,
+assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(8000), H_DUR_005)), 0,
   "control: 8000 unaffected");
 assert_eq(vec_len(crvoice_vocalize(hlv, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
   "control: 44100 still returns 0.05 s of audio");
@@ -320,7 +342,7 @@ assert_eq(vec_len(crvoice_vocalize(hlv, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
 # null handle from stream_start; through 2.2.0 it yielded a handle whose first
 # fill failed.
 var hfv = prani_ffi_voice_create(0);
-var hfs_lo = prani_ffi_stream_start(hfv, 0, 6, f64_from(1200), H_DUR_005);
+var hfs_lo = prani_ffi_stream_start(hfv, 0, 6, pr_from(1200), H_DUR_005);
 assert_eq(hfs_lo, 0, "FFI: 1200 Hz yields a null handle (svara rejects the rate)");
 var hfbuf = vec_new();
 prani_vec_push_zeros(hfbuf, 64);
@@ -329,7 +351,7 @@ assert_eq(prani_ffi_stream_fill(hfs_lo, hfbuf, 64), 0,
 assert_eq(prani_ffi_stream_is_finished(hfs_lo), 1,
   "FFI: the 1200 Hz stream retires so a host drain loop terminates");
 # and the band that used to abort now actually renders through the FFI
-var hfs_ok = prani_ffi_stream_start(hfv, 0, 6, f64_from(4000), H_DUR_005);
+var hfs_ok = prani_ffi_stream_start(hfv, 0, 6, pr_from(4000), H_DUR_005);
 assert_neq(hfs_ok, 0, "FFI: 4000 Hz stream starts");
 assert_eq(prani_ffi_stream_fill(hfs_ok, hfbuf, 64), 64,
   "FFI: 4000 Hz fill writes 64 samples (aborted before svara 3.5.4)");
@@ -347,8 +369,8 @@ assert_eq(t_all_finite_h(hfbuf), 1, "FFI: what it wrote is finite");
 # species that reported.
 # ================================================================
 test_group("F11 non-finite input is refused, not rendered");
-var hnan = f64_div(0, 0);
-var hpinf = f64_div(f64_from(1), 0);
+var hnan = pr_div(0, 0);
+var hpinf = pr_div(pr_from(1), 0);
 var hnv = crvoice_new(PRANI_SP_WOLF);
 assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, hnan, H_DUR_005)), 1,
   "NaN sample_rate -> error");
@@ -364,7 +386,7 @@ var hcri = crvoice_new(PRANI_SP_CRICKET);
 assert_eq(prani_is_err(crvoice_vocalize(hcri, PRANI_VOC_STRIDULATE, H_SR, hnan)), 1,
   "stridulatory + NaN duration -> error (was an all-NaN buffer)");
 # a negative duration is not a length
-assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, f64_neg(F64_ONE))), 1,
+assert_eq(prani_is_err(crvoice_vocalize(hnv, PRANI_VOC_HOWL, H_SR, pr_neg(PR_ONE))), 1,
   "negative duration -> error");
 # CONTROL: zero duration stays VALID -- the oracle's test_zero_duration_synthesis
 # asserts an empty buffer, not an error, and 2.0.5 must not have changed that.
@@ -397,10 +419,10 @@ assert_eq(prani_is_err(
     sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, hnan)), 1,
   "NaN timing_spread -> error (was a plausible-looking buffer)");
 assert_eq(prani_is_err(
-    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, f64_from(1000000))), 1,
+    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, pr_from(1000000))), 1,
   "1e6 s timing_spread -> error (would have needed >700 GB)");
 assert_eq(prani_is_err(
-    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, f64_neg(F64_ONE))), 1,
+    sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, pr_neg(PR_ONE))), 1,
   "negative timing_spread -> error");
 # CONTROL: an ordinary chorus is unaffected
 var hchor = sequence_synthesize_chorus(hvoices, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, PR_ST_0_1);
@@ -457,7 +479,7 @@ var hd_psb = str_builder_new();
 preset_to_json(preset_alpha_wolf(), hd_psb);
 var hd_preset = str_data(str_builder_build(hd_psb));
 var hd_elems = vec_new();
-vec_push(hd_elems, sequence_call_element_new(PRANI_VOC_BARK, F64_HALF, F64_HALF));
+vec_push(hd_elems, sequence_call_element_new(PRANI_VOC_BARK, PR_HALF, PR_HALF));
 var hd_qsb = str_builder_new();
 sequence_call_phrase_to_json(sequence_call_phrase_new(hd_elems, PRANI_INTENT_ALARM), hd_qsb);
 var hd_phrase = str_data(str_builder_build(hd_qsb));
@@ -526,18 +548,25 @@ assert_eq(vec_len(crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, H
 # finite-only guard and a 2^63 ceiling each abort inside this group.
 # ================================================================
 test_group("an overflowing sample count is refused on every synthesis path");
+#ifdef PRANI_F32
+var H_1E300 = 0x7F7FFFFF;           # 1e300 s: finite, the product overflows to +inf
+var H_1E308 = 0x7F7FFFFF;           # 1e308 s: finite, only Mating's x2 overflows it
+var H_1E19  = 0x5F0AC723;           # 1e19: finite past 2^63, and no infinity anywhere
+var H_2P54  = 0x5A800000;           # 2^54: inside i64, past the exact-count ceiling
+#else
 var H_1E300 = 0x7e37e43c8800759c;   # 1e300 s: finite, the product overflows to +inf
 var H_1E308 = 0x7fe1ccf385ebc8a0;   # 1e308 s: finite, only Mating's x2 overflows it
 var H_1E19  = 0x43e158e460913d00;   # 1e19: finite past 2^63, and no infinity anywhere
 var H_2P54  = 0x4350000000000000;   # 2^54: inside i64, past the exact-count ceiling
+#endif
 var h_wolf = crvoice_new(PRANI_SP_WOLF);
 assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_1E300), PRANI_ERR_INVALID_VOCALIZATION,
   "1e300 s at 44.1 kHz");
-assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E300, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E300, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "the same product through the rate: 1 s at 1e300 Hz");
-assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E19, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E19, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "1e19 samples: a finite product past i64, so no infinity for a check to find");
-assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_2P54, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_2P54, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "2^54 samples: fits i64, past the ceiling stream_new already enforced");
 assert_eq(crvoice_vocalize_with_intent(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_MATING, H_SR, H_1E308),
   PRANI_ERR_INVALID_VOCALIZATION, "the intent's duration_scale is what overflows");
@@ -573,14 +602,19 @@ assert_eq(vec_len(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, 0)), 0,
 # it takes minutes and 4 GiB, so it is not an assertion here.
 # ================================================================
 test_group("a request past one vec's limit is refused before any rendering");
+#ifdef PRANI_F32
+var H_3E9 = 0x4F32D05E;           # 3e9 s: under 2^53 samples at 44.1 kHz, far past one vec
+#else
 var H_3E9 = 0x41e65a0bc0000000;   # 3e9 s: under 2^53 samples at 44.1 kHz, far past one vec
-var h_over = f64_from(VEC_CAP_MAX + 1);
+#endif
+# The next count past the limit the format can hold: +1 in f64, +32 in f32 (ADR-0010).
+var h_over = pr_from(VEC_CAP_MAX + t_per(1, 32));
 assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_3E9), PRANI_ERR_INVALID_VOCALIZATION,
   "3e9 s at 44.1 kHz: under 2^53, past VEC_CAP_MAX");
-assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, h_over, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, h_over, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "exactly one sample too many");
 assert_eq(crvoice_vocalize_with_intent(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_MATING,
-    f64_from(134217729), F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+    pr_from(134217728 + t_per(1, 16)), PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,   # f32: 2^27 + 16
   "2^27 + 1 samples, which only Mating's x2 takes past the limit");
 assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, H_SR, H_3E9),
   PRANI_ERR_INVALID_VOCALIZATION, "the cat purr path");
@@ -619,15 +653,16 @@ assert_eq(emotion_select_intent(dh_e), dh_e, "emotion_select_intent(error)");
 assert_eq(emotion_evaluate(0), PRANI_ERR_INVALID_VOCALIZATION, "emotion_evaluate(null)");
 assert_eq(fatigue_modifiers(dh_e), dh_e, "fatigue_modifiers(error)");
 assert_eq(fatigue_fatigue(dh_e), dh_e, "fatigue_fatigue(error)");
-assert_eq(fatigue_record_call(dh_e, F64_ONE, 0), 0, "fatigue_record_call(error) is a no-op");
-assert_eq(fatigue_rest(0, F64_ONE), 0, "fatigue_rest(null) is a no-op");
+assert_eq(fatigue_record_call(dh_e, PR_ONE, 0), 0, "fatigue_record_call(error) is a no-op");
+assert_eq(fatigue_rest(0, PR_ONE), 0, "fatigue_rest(null) is a no-op");
 assert_eq(fatigue_reinforce_alarm(dh_e), 0, "fatigue_reinforce_alarm(error) is a no-op");
 assert_eq(fatigue_reset(dh_e), 0, "fatigue_reset(error) is a no-op");
-assert_eq(prani_ffi_voice_set_effort(dh_e, 0x3FE0000000000000), 0, "prani_ffi_voice_set_effort(error) is a no-op");
-assert_eq(prani_ffi_voice_set_size(dh_e, F64_ONE), 0, "prani_ffi_voice_set_size(error) is a no-op");
-assert_eq(prani_ffi_voice_apply_lombard(dh_e, f64_from(60)), 0, "prani_ffi_voice_apply_lombard(error) is a no-op");
-assert_eq(crvoice_set_vocal_effort(dh_e, F64_ONE), 0, "crvoice_set_vocal_effort(error) is a no-op");
-assert_eq(crvoice_apply_lombard_effect(0, f64_from(60)), 0, "crvoice_apply_lombard_effect(null) is a no-op");
+var TL_HARD_658_0 = pr_of64(0x3FE0000000000000);
+assert_eq(prani_ffi_voice_set_effort(dh_e, TL_HARD_658_0), 0, "prani_ffi_voice_set_effort(error) is a no-op");
+assert_eq(prani_ffi_voice_set_size(dh_e, PR_ONE), 0, "prani_ffi_voice_set_size(error) is a no-op");
+assert_eq(prani_ffi_voice_apply_lombard(dh_e, pr_from(60)), 0, "prani_ffi_voice_apply_lombard(error) is a no-op");
+assert_eq(crvoice_set_vocal_effort(dh_e, PR_ONE), 0, "crvoice_set_vocal_effort(error) is a no-op");
+assert_eq(crvoice_apply_lombard_effect(0, pr_from(60)), 0, "crvoice_apply_lombard_effect(null) is a no-op");
 assert_eq(crvoice_reset_individual(dh_e), dh_e, "crvoice_reset_individual(error)");
 assert_eq(crvoice_species(dh_e), dh_e, "crvoice_species(error)");
 assert_eq(crvoice_effective_f0(0), PRANI_ERR_INVALID_SPECIES, "crvoice_effective_f0(null)");
@@ -641,13 +676,13 @@ assert_eq(prani_vec_extend(vec_new(), dh_e), dh_e, "prani_vec_extend(error src)"
 assert_eq(prani_vec_push_zeros(dh_e, 4), dh_e, "prani_vec_push_zeros(error vec)");
 var dh_t = crtract_new(species_params(PRANI_SP_WOLF), H_SR);
 var dh_fb = vec_new();
-vec_push(dh_fb, f64_from(500)); vec_push(dh_fb, f64_from(1500)); vec_push(dh_fb, f64_from(2500));
-assert_eq(crtract_set_formant_blend(dh_t, dh_e, dh_fb, F64_ONE), dh_e, "crtract_set_formant_blend(error target)");
-assert_eq(crtract_synthesize(dh_t, f64_from(220), 64, dh_e), dh_e, "crtract_synthesize(error options)");
-assert_eq(crtract_synthesize_into(dh_t, f64_from(220), 64, crtract_options_default(), 0),
+vec_push(dh_fb, pr_from(500)); vec_push(dh_fb, pr_from(1500)); vec_push(dh_fb, pr_from(2500));
+assert_eq(crtract_set_formant_blend(dh_t, dh_e, dh_fb, PR_ONE), dh_e, "crtract_set_formant_blend(error target)");
+assert_eq(crtract_synthesize(dh_t, pr_from(220), 64, dh_e), dh_e, "crtract_synthesize(error options)");
+assert_eq(crtract_synthesize_into(dh_t, pr_from(220), 64, crtract_options_default(), 0),
   PRANI_ERR_INVALID_VOCALIZATION,
   "crtract_synthesize_into(null out)");
-assert_eq(spatial_apply_distance_attenuation(dh_e, F64_ONE, F64_ONE, H_SR), dh_e,
+assert_eq(spatial_apply_distance_attenuation(dh_e, PR_ONE, PR_ONE, H_SR), dh_e,
   "spatial attenuation keeps a chained error (C7)");
 assert_eq(stream_next_block(dh_e, 64), dh_e, "stream_next_block(error) keeps its code");
 assert_eq(crvoice_vocalize(0, PRANI_VOC_HOWL, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
@@ -666,9 +701,9 @@ vec_push(dh_vs, 0);
 assert_eq(sequence_synthesize_chorus(dh_vs, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, 0),
   PRANI_ERR_INVALID_SPECIES, "a null voice in a chorus is reported");
 # controls: the same calls on live handles still work
-var dh_live = emotion_with_values(0x3FE0000000000000, 0x3FE0000000000000);
+var dh_live = emotion_with_values(pr_of64(0x3FE0000000000000), pr_of64(0x3FE0000000000000));
 assert_eq(prani_is_err(emotion_select_intent(dh_live)), 0, "control: a live emotion still selects");
-assert_eq(prani_is_err(crtract_synthesize(dh_t, f64_from(220), 64, crtract_options_default())), 0,
+assert_eq(prani_is_err(crtract_synthesize(dh_t, pr_from(220), 64, crtract_options_default())), 0,
   "control: a live tract still renders");
 
 # t_json_set(doc, keyq, rep) -- the cstring JSON `doc` with the value after the
@@ -767,7 +802,7 @@ test_group("2.2.1 -- a tract's clock survives JSON, and a document without one r
 # ADR-0009 gave the tract a sample clock, and ADR-0005 restores prani's own state
 # from a document. Through 2.2.0 there was no clock to save.
 var ck_t = crtract_new(species_params(PRANI_SP_CRICKET), H_SR);
-var ck_o = crtract_synthesize_stridulatory(ck_t, f64_from(4500), 300, crtract_options_default());
+var ck_o = crtract_synthesize_stridulatory(ck_t, pr_from(4500), 300, crtract_options_default());
 assert_eq(prani_is_err(ck_o), 0, "control: the render that advances the clock succeeded");
 assert_eq(CreatureTract_clock(ck_t), 300, "control: 300 samples advance the clock to 300");
 var ck_sb = str_builder_new();
@@ -785,26 +820,26 @@ assert_eq(crtract_from_json_str(t_json_set(ck_doc, "\"clock\":", "\"x\"")), PRAN
   "a clock that is not an integer is refused");
 
 test_group("2.2.1 A3/A4 -- a preset's own JSON always reads back");
-var pj_q = preset_make("Big \"Bad\" Wolf", PRANI_SP_WOLF, F64_ONE, 0, 0);
+var pj_q = preset_make("Big \"Bad\" Wolf", PRANI_SP_WOLF, PR_ONE, 0, 0);
 var pj_sb = str_builder_new();
 preset_to_json(pj_q, pj_sb);
 var pj_back = preset_from_json_str(str_data(str_builder_build(pj_sb)));
 assert_eq(prani_is_err(pj_back), 0, "a name with quotes re-reads (2.2.0 wrote it raw and refused its own output)");
 assert_eq(streq(VoicePreset_name(pj_back), "Big \"Bad\" Wolf"), 1, "and comes back the same name");
-var pj_b = preset_make("Dire\\Wolf", PRANI_SP_WOLF, F64_ONE, 0, 0);
+var pj_b = preset_make("Dire\\Wolf", PRANI_SP_WOLF, PR_ONE, 0, 0);
 var pj_sb2 = str_builder_new();
 preset_to_json(pj_b, pj_sb2);
 assert_eq(streq(VoicePreset_name(preset_from_json_str(str_data(str_builder_build(pj_sb2)))), "Dire\\Wolf"), 1,
   "a backslash survives the round trip");
-assert_eq(preset_make(0, PRANI_SP_WOLF, F64_ONE, 0, 0), PRANI_ERR_INVALID_SPECIES,
+assert_eq(preset_make(0, PRANI_SP_WOLF, PR_ONE, 0, 0), PRANI_ERR_INVALID_SPECIES,
   "a null name is refused (2.2.0: preset_to_json then crashed)");
-var pj_big = preset_make("Huge", PRANI_SP_WOLF, f64_from(20), 0, 0);
+var pj_big = preset_make("Huge", PRANI_SP_WOLF, pr_from(20), 0, 0);
 var pj_sb3 = str_builder_new();
 preset_to_json(pj_big, pj_sb3);
 var pj_big_back = preset_from_json_str(str_data(str_builder_build(pj_sb3)));
 assert_eq(prani_is_err(pj_big_back), 0, "a size-20 preset's own JSON reads back (2.2.0 refused it)");
-assert_eq(VoicePreset_size(pj_big), f64_from(10), "because preset_make stores the 10 preset_build clamps it to");
-assert_eq(CreatureVoice_size_scale(preset_build(pj_big)), f64_from(10), "control: and the built voice is unchanged");
+assert_eq(VoicePreset_size(pj_big), pr_from(10), "because preset_make stores the 10 preset_build clamps it to");
+assert_eq(CreatureVoice_size_scale(preset_build(pj_big)), pr_from(10), "control: and the built voice is unchanged");
 
 test_group("2.2.1 A1/A5/B6/B7/B11 -- what the point-of-use guards missed");
 var pu_cat = crvoice_new(PRANI_SP_CAT);
@@ -812,38 +847,41 @@ CreatureVoice_set_vocal_effort(pu_cat, PRANI_POS_INF);
 assert_eq(crvoice_vocalize(pu_cat, PRANI_VOC_PURR, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
   "an out-of-range effort on a purr is refused (2.2.0: an all-NaN purr as success)");
 var pu_cat2 = crvoice_new(PRANI_SP_CAT);
-CreatureVoice_set_vocal_effort(pu_cat2, 0x7FF8000000000000);
+CreatureVoice_set_vocal_effort(pu_cat2, pr_of64(0x7FF8000000000000));
 assert_eq(crvoice_vocalize(pu_cat2, PRANI_VOC_PURR, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES, "and a NaN one");
 var pu_w = crvoice_new(PRANI_SP_WOLF);
-crvoice_set_vocal_effort(pu_w, 0x7FF8000000000000);
-crvoice_apply_lombard_effect(pu_w, 0x7FF8000000000000);
-assert_eq(CreatureVoice_vocal_effort(pu_w), 0x3FE0000000000000, "the two mutators ignore a NaN (2.2.0 stored it)");
+crvoice_set_vocal_effort(pu_w, pr_of64(0x7FF8000000000000));
+crvoice_apply_lombard_effect(pu_w, pr_of64(0x7FF8000000000000));
+var TL_HARD_852_0 = pr_of64(0x3FE0000000000000);
+assert_eq(CreatureVoice_vocal_effort(pu_w), TL_HARD_852_0, "the two mutators ignore a NaN (2.2.0 stored it)");
 var pu_z = crvoice_new(PRANI_SP_WOLF);
 CreatureVoice_set_size_scale(pu_z, 0);
 assert_eq(crvoice_vocalize(pu_z, PRANI_VOC_HOWL, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
   "size_scale 0 is refused (2.2.0 rendered a fabricated f0_max as success)");
 var pu_t = crtract_new(species_params(PRANI_SP_CAT), H_SR);
-assert_eq(crtract_synthesize_purr(pu_t, 100, f64_neg(f64_from(27))), PRANI_ERR_INVALID_TRACT,
+assert_eq(crtract_synthesize_purr(pu_t, 100, pr_neg(pr_from(27))), PRANI_ERR_INVALID_TRACT,
   "a negative purr f0 is refused (2.2.0 drove the phase out of [0, 1])");
 assert_eq(crtract_synthesize_purr(pu_t, 100, H_SR), PRANI_ERR_INVALID_TRACT, "and one at the sample rate");
-assert_eq(prani_is_err(crtract_synthesize_purr(pu_t, 100, f64_from(27))), 0, "control: 27 Hz purrs");
-assert_eq(prani_in_range(CreatureTract_phase(pu_t), 0, F64_ONE), 1, "control: and the phase stays in [0, 1]");
+assert_eq(prani_is_err(crtract_synthesize_purr(pu_t, 100, pr_from(27))), 0, "control: 27 Hz purrs");
+assert_eq(prani_in_range(CreatureTract_phase(pu_t), 0, PR_ONE), 1, "control: and the phase stays in [0, 1]");
 var pu_bee = crtract_new(species_params(PRANI_SP_BEE), H_SR);
-assert_eq(crtract_synthesize(pu_bee, 0x7FEFFFFFFFFFFFFF, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
+var TL_HARD_864_0 = pr_of64(0x7FEFFFFFFFFFFFFF);
+assert_eq(crtract_synthesize(pu_bee, TL_HARD_864_0, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
   "an f0 whose phase overflows is refused (2.2.0: 256 NaN samples as success)");
 var pu_cri = crtract_new(species_params(PRANI_SP_CRICKET), H_SR);
-assert_eq(crtract_synthesize(pu_cri, 0x7FEFFFFFFFFFFFFF, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
+var TL_HARD_867_0 = pr_of64(0x7FEFFFFFFFFFFFFF);
+assert_eq(crtract_synthesize(pu_cri, TL_HARD_867_0, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
   "on the stridulatory path too");
 var pu_lo = crvoice_new(PRANI_SP_WOLF);
-SpeciesParams_set_f0_min(CreatureVoice_params(pu_lo), f64_from(10));
-SpeciesParams_set_f0_default(CreatureVoice_params(pu_lo), f64_from(10));
-SpeciesParams_set_f0_max(CreatureVoice_params(pu_lo), f64_from(10));
+SpeciesParams_set_f0_min(CreatureVoice_params(pu_lo), pr_from(10));
+SpeciesParams_set_f0_default(CreatureVoice_params(pu_lo), pr_from(10));
+SpeciesParams_set_f0_max(CreatureVoice_params(pu_lo), pr_from(10));
 assert_eq(crvoice_vocalize(pu_lo, PRANI_VOC_GROWL, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
   "a species range below the 20 Hz floor is refused (2.2.0 rendered it at 20 Hz)");
 
 test_group("2.2.1 B8/C6/C8/C9 -- refused where it was accepted, accepted where it was refused");
-var r8 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, F64_ONE);
-SynthStream_set_spectral_tilt(r8, 0x7FF8000000000000);
+var r8 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, PR_ONE);
+SynthStream_set_spectral_tilt(r8, pr_of64(0x7FF8000000000000));
 var r8_buf = vec_new();
 prani_vec_push_zeros(r8_buf, 256);
 assert_eq(stream_fill_buffer(r8, r8_buf), 0, "a rejected tilt fails the fill (2.2.0 wrote 256)");
@@ -855,22 +893,25 @@ str_builder_add_cstr(r6_sb, "\"alarm_count\":0,\"alarm_reinforced\":0}");
 var r6 = FatigueState_from_json_str(str_data(str_builder_build(r6_sb)));
 assert_eq(fatigue_modifiers(r6), PRANI_ERR_INVALID_VOCALIZATION, "fatigue 50 is refused (2.2.0: amplitude -19)");
 assert_eq(prani_is_err(fatigue_modifiers(fatigue_new())), 0, "control: a fresh fatigue state derives modifiers");
-var r_bout = sequence_call_bout_new(PRANI_VOC_HOWL, 1, H_DUR_005, f64_from(400), PRANI_INTENT_IDLE);
+var r_bout = sequence_call_bout_new(PRANI_VOC_HOWL, 1, H_DUR_005, pr_from(400), PRANI_INTENT_IDLE);
 var r_bo = sequence_call_bout_synthesize(r_bout, crvoice_new(PRANI_SP_WOLF), H_SR);
 assert_eq(prani_is_err(r_bo), 0, "a one-call bout with a long interval renders (2.2.0 refused it)");
 assert_eq(vec_len(r_bo), 2205, "and is one call long: a bout has no interval after its last call");
-assert_eq(bridge_intent_from_threat_level(0x7FF8000000000000), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(bridge_intent_from_threat_level(pr_of64(0x7FF8000000000000)), PRANI_ERR_INVALID_VOCALIZATION,
   "bridge: a NaN threat is refused (2.2.0: IDLE)");
-assert_eq(bridge_species_from_f0(0x7FF8000000000000), PRANI_ERR_INVALID_SPECIES, "bridge: a NaN f0 (2.2.0: SNAKE)");
-assert_eq(bridge_perturbation_from_urgency(0x7FF8000000000000), PRANI_ERR_INVALID_VOCALIZATION,
+var TL_HARD_896_0 = pr_of64(0x7FF8000000000000);
+assert_eq(bridge_species_from_f0(TL_HARD_896_0), PRANI_ERR_INVALID_SPECIES, "bridge: a NaN f0 (2.2.0: SNAKE)");
+assert_eq(bridge_perturbation_from_urgency(pr_of64(0x7FF8000000000000)), PRANI_ERR_INVALID_VOCALIZATION,
   "bridge: a NaN urgency (2.2.0: a NaN jitter as success)");
-assert_eq(bridge_intent_from_threat_level(0x3FE999999999999A), PRANI_INTENT_DISTRESS, "control: 0.8 is DISTRESS");
+var TL_HARD_899_0 = pr_of64(0x3FE999999999999A);
+assert_eq(bridge_intent_from_threat_level(TL_HARD_899_0), PRANI_INTENT_DISTRESS, "control: 0.8 is DISTRESS");
 
 test_group("2.2.1 B2/B4/C3 -- render defects the oracle had too (ADR-0009)");
 # B2: at 8 kHz a dog's estimated F5 (1.5 x 2750 = 4125 Hz) crossed Nyquist, svara
 # refused the whole target, and the tract kept svara's default vowel (523 Hz F1).
-var rd_t = crtract_new(species_params(PRANI_SP_DOG), f64_from(8000));
+var rd_t = crtract_new(species_params(PRANI_SP_DOG), pr_from(8000));
 var rd_fv = SvVocalTract_formants(CreatureTract_tract(rd_t));
+# svara's formants are f64 in both builds (ADR-0010), so they are compared as f64.
 assert_eq(SvFormant_frequency(vec_get(rd_fv, 0)), f64_from(550),
   "a dog at 8 kHz keeps its own F1 (2.2.0: svara's 523)");
 assert_eq(SvFormant_frequency(vec_get(rd_fv, 2)), f64_from(2750), "and its F3");
@@ -884,7 +925,7 @@ assert_eq(SvFormant_frequency(vec_get(rd_f44, 4)), f64_mul(f64_from(2750), 0x3ff
 # B4: a stream renders the voice it was given. Through 2.2.0 it built its tract from
 # the species table, so a breathiness override changed nothing in a stream.
 var rd_s1 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, H_DUR_005);
-var rd_s2 = stream_new(crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), 0x3FECCCCCCCCCCCCD),
+var rd_s2 = stream_new(crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), pr_of64(0x3FECCCCCCCCCCCCD)),
   PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, H_DUR_005);
 var rd_b1 = vec_new();
 prani_vec_push_zeros(rd_b1, 1024);
@@ -902,10 +943,10 @@ assert_eq(rd_same, 0, "a breathier voice streams differently (2.2.0: bit-identic
 # C3: a chorus is as long as its calls. MATING doubles each call's duration.
 var rd_vs = vec_new();
 vec_push(rd_vs, crvoice_new(PRANI_SP_WOLF));
-var rd_ch = sequence_synthesize_chorus(rd_vs, PRANI_VOC_HOWL, PRANI_INTENT_MATING, f64_from(8000),
-  0x3FB999999999999A, 0);
+var rd_ch = sequence_synthesize_chorus(rd_vs, PRANI_VOC_HOWL, PRANI_INTENT_MATING, pr_from(8000),
+  pr_of64(0x3FB999999999999A), 0);
 var rd_solo = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_MATING,
-  f64_from(8000), 0x3FB999999999999A);
+  pr_from(8000), pr_of64(0x3FB999999999999A));
 assert_eq(vec_len(rd_ch), vec_len(rd_solo), "a MATING chorus spans its call (2.2.0: 800 of the call's 1600)");
 
 var rc = assert_summary();

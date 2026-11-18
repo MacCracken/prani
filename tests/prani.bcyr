@@ -55,11 +55,19 @@ include "lib/svara.cyr"
 include "dist/prani.cyr"
 
 # --- float bit patterns (IEEE-754 hex; decimal in the comment) ---
+#ifdef PRANI_F32
+var F_0_05    = 0x3D4CCCCD;           #  0.05 s  (Group A duration)
+var F_0_3     = 0x3E99999A;           #  0.3  s  (cricket, bee)
+var F_0_5     = 0x3F000000;           #  0.5  s  (purr, hiss, trill, screech)
+var F_0_8     = 0x3F4CCCCD;           #  0.8     (oracle emotion arousal)
+var F_NEG_0_5 = 0xBF000000;           # -0.5     (oracle emotion valence)
+#else
 var F_0_05    = 0x3FA999999999999A;   #  0.05 s  (Group A duration)
 var F_0_3     = 0x3FD3333333333333;   #  0.3  s  (cricket, bee)
 var F_0_5     = 0x3FE0000000000000;   #  0.5  s  (purr, hiss, trill, screech)
 var F_0_8     = 0x3FE999999999999A;   #  0.8     (oracle emotion arousal)
 var F_NEG_0_5 = 0xBFE0000000000000;   # -0.5     (oracle emotion valence)
+#endif
 
 # Probe guard. `handle` is whatever the call under test returns: a vec / stream
 # / output-struct pointer on success, or a NEGATIVE PRANI_ERR_* on rejection.
@@ -78,8 +86,8 @@ fn bench_probe_ok(handle, label) {
 fn main() {
     alloc_init();
 
-    var rate = f64_from(44100);   # 44100.0 -- the oracle's rate for all 13
-    var one  = f64_from(1);       # 1.0 s / vocal effort 1.0
+    var rate = pr_from(44100);   # 44100.0 -- the oracle's rate for all 13
+    var one  = pr_from(1);       # 1.0 s / vocal effort 1.0
     var ok   = 0;                 # count of Group B probes that succeeded
     var sink = 0;                 # keeps results live (criterion's black_box)
 
@@ -92,7 +100,7 @@ fn main() {
     var b1 = bench_new("dcblocker_process (per-sample)");
     bench_batch_start(b1);
     var i = 0;
-    while (i < 1000000) { dcblocker_process(blk, F64_ONE); i = i + 1; }
+    while (i < 1000000) { dcblocker_process(blk, PR_ONE); i = i + 1; }
     bench_batch_stop(b1, 1000000);
     bench_report(b1);
 
@@ -110,7 +118,7 @@ fn main() {
     # N = 100,000 (159 ns op). NOTE: (0.5, 0.7), NOT the oracle's (-0.5, 0.8).
     # This is the historical series' own state and is kept as-is; the oracle's
     # parameters are mirrored separately as Group B's `emotion_evaluate`.
-    var em = emotion_with_values(0x3FE0000000000000, 0x3FE6666666666666);   # (0.5, 0.7)
+    var em = emotion_with_values(pr_of64(0x3FE0000000000000), pr_of64(0x3FE6666666666666));   # (0.5, 0.7)
     var b3 = bench_new("emotion_evaluate (per-frame)");
     bench_batch_start(b3);
     var k = 0;
@@ -127,7 +135,7 @@ fn main() {
     var m = 0;
     while (m < 200) {
         var v = crvoice_new(PRANI_SP_WOLF);
-        crvoice_vocalize(v, PRANI_VOC_HOWL, f64_from(8000), F_0_05);
+        crvoice_vocalize(v, PRANI_VOC_HOWL, pr_from(8000), F_0_05);
         m = m + 1;
     }
     bench_batch_stop(b4, 200);

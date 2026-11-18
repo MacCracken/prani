@@ -1,0 +1,265 @@
+# real.cyr -- prani's float format: f64 by default, f32 when PRANI_F32 is defined.
+# L0, the first module: every other module computes through it (ADR-0010).
+#
+# A "real" is prani's float. Which float it is is a BUILD option, like svara's
+# LOGGING: a consumer that wants f32 adds `defines = ["PRANI_F32"]` to its
+# manifest's [build] (or passes -D PRANI_F32), and every prani value -- a sample,
+# a sample rate, a valence, a JSON field -- is then an f32, its binary32 bits in
+# the low 32 bits of the word with the high 32 clear (the form f32_from / f32_to
+# and ganita's f32 tier use). Without the define nothing changes: a real is an f64,
+# and the f64 build is the same arithmetic 2.2.1 did, operation for operation.
+#
+# WHY A PRIMITIVE LAYER. Cyrius has no type alias, and a function-like macro is
+# refused in an included file, so one source cannot be written once and typed twice.
+# What it can do is call through names whose bodies the format picks. Each
+# primitive below is one expression, so `#inline` copies it into the caller: in the
+# f32 build pr_mul is one `mulss` on typed f32 operands, not a call and not a
+# widen-compute-narrow. ⚠ An `#inline` body with a `var` or an `if`, or a fn of more
+# than two parameters, is not inlined (the compiler says so), which is why pr_clamp,
+# pr_min and pr_max are ordinary functions in both formats, as f64_clamp, f64_min
+# and f64_max already were.
+#
+# THE f64 BUILD DOES NOT COMPILE THROUGH THESE. cycc 6.7.18 copies each argument of
+# an `#inline` replay into a slot of its own, and through these wrappers the f64
+# build measured 1.09x 2.2.1 (emotion_evaluate 1.30x). So the library's f64 build is
+# src/f64/, which scripts/gen-f64.sh writes with each primitive spelled as the
+# builtin it stands for. The f64 definitions below are for code outside the library
+# that writes over the primitives: the tests, the examples, a consumer.
+#
+# ⚠ WRITE A COMPARE AS A BARE TRUTH VALUE: `if (pr_lt(a, b))`. cycc 6.7.18 fuses
+# that into the branch, but not `pr_lt(a, b) == 1` or `== 0` after an inline replay:
+# measured on a clamp loop, `== 1` / `== 0` cost 11.4 ns a step, the bare form 5.7,
+# against 5.8 for f64_lt itself. A NEGATED compare stays `== 0`, never `!`: cycc
+# 6.7.2 miscompiles `!` on a float builtin's result (a fresh emotion read as out of
+# range, and a render failed), and the f64 build compiles to f64_ge(..) there. Keep
+# a negated compare off the per-sample path, where its cost does not matter.
+#
+# ACCURACY, NOT A COPY OF THE RUST. The f32 build is measured against the f64 build,
+# which is the reference it must stay close to. So where f32 has a choice, it takes
+# the more accurate one:
+#   - the transcendentals (sin, cos, sqrt, pow, cbrt) are computed in f64 and
+#     rounded once to f32. sqrt is then correctly rounded (53 >= 2*24 + 2); the
+#     others are correctly rounded except where the f64 result sits within half an
+#     f64 ulp of an f32 tie.
+#   - pr_from rounds an integer to f32 once (exact up to 2^24, as an f32 holds).
+#
+# THE SVARA BOUNDARY. svara, naad, hisab and bayan are f64 in both builds. A real crosses
+# into them through pr_to64 (an f32 widens exactly) and comes back through pr_of64
+# (an f64 rounds to the nearest f32). In the f64 build both are the identity.
+#
+# NaN: every comparison is false against a NaN in both formats (probed on cycc
+# 6.7.18: lt, le, gt, ge, eq all 0 for an f32 NaN), so pr_clamp passes a NaN through
+# exactly as f64_clamp does, and the guards in error.cyr behave the same in both.
+
+#ifdef PRANI_F32
+
+# ---------------------------------------------------------------- f32 build
+var PRANI_REAL_BITS = 32;            # the build's float width
+var PR_ONE  = 0x3F800000;            # 1.0
+var PR_TWO  = 0x40000000;            # 2.0
+var PR_HALF = 0x3F000000;            # 0.5
+var PR_PI   = 0x40490FDB;            # pi, rounded to f32
+var PR_TAU  = 0x40C90FDB;            # 2*pi, rounded to f32
+
+# a + b, one f32 rounding.
+#inline
+fn pr_add(a: f32, b: f32): i64 { return a + b; }
+# a - b, one f32 rounding.
+#inline
+fn pr_sub(a: f32, b: f32): i64 { return a - b; }
+# a * b, one f32 rounding.
+#inline
+fn pr_mul(a: f32, b: f32): i64 { return a * b; }
+# a / b, one f32 rounding.
+#inline
+fn pr_div(a: f32, b: f32): i64 { return a / b; }
+# -a: flips the f32 sign bit (so -0.0 and a NaN's sign behave as in f64).
+#inline
+fn pr_neg(a: f32): i64 { return -a; }
+# |a|: clears the f32 sign bit.
+#inline
+fn pr_abs(a): i64 { return a & 0x7FFFFFFF; }
+# 1 iff a < b; 0 when either is NaN.
+#inline
+fn pr_lt(a: f32, b: f32): i64 { return a < b; }
+# 1 iff a <= b; 0 when either is NaN.
+#inline
+fn pr_le(a: f32, b: f32): i64 { return a <= b; }
+# 1 iff a > b; 0 when either is NaN.
+#inline
+fn pr_gt(a: f32, b: f32): i64 { return a > b; }
+# 1 iff a >= b; 0 when either is NaN.
+#inline
+fn pr_ge(a: f32, b: f32): i64 { return a >= b; }
+# 1 iff a == b numerically (-0.0 == 0.0; NaN equals nothing).
+#inline
+fn pr_eq(a: f32, b: f32): i64 { return a == b; }
+# sin, computed in f64 and rounded once.
+#inline
+fn pr_sin(a): i64 { return f32_from(f64_sin(f32_to(a))); }
+# cos, computed in f64 and rounded once.
+#inline
+fn pr_cos(a): i64 { return f32_from(f64_cos(f32_to(a))); }
+# sqrt, computed in f64 and rounded once: correctly rounded.
+#inline
+fn pr_sqrt(a): i64 { return f32_from(f64_sqrt(f32_to(a))); }
+# a^b, computed in f64 and rounded once.
+#inline
+fn pr_pow(a, b): i64 { return f32_from(f64_pow(f32_to(a), f32_to(b))); }
+# cube root, computed in f64 and rounded once.
+#inline
+fn pr_cbrt(a): i64 { return f32_from(f64_cbrt(f32_to(a))); }
+# floor; exact in any format.
+#inline
+fn pr_floor(a): i64 { return f32_from(f64_floor(f32_to(a))); }
+# truncation toward zero; exact in any format.
+#inline
+fn pr_trunc(a): i64 { return f32_from(f64_trunc(f32_to(a))); }
+# an integer as a real: rounded once to f32 (exact below 2^24).
+#inline
+fn pr_from(n): i64 { return f32_from(f64_from(n)); }
+# a real as an integer: truncated, saturating as f64_to does (NaN -> 0).
+#inline
+fn pr_to(a): i64 { return f64_to(f32_to(a)); }
+# a real as an f64, for svara / naad / bayan: exact.
+#inline
+fn pr_to64(a): i64 { return f32_to(a); }
+# an f64 from svara / naad / bayan as a real: rounded to the nearest f32.
+#inline
+fn pr_of64(a): i64 { return f32_from(a); }
+
+# TIME AND PHASE STAY f64 (ADR-0010). An oscillator evaluated as sin(w * n / sr)
+# at sample n cannot be computed in f32: n stops being exact at 2^24 samples (6.3
+# minutes at 44.1 kHz), and long before that the phase w * t outgrows f32's
+# precision -- a 3 kHz tone at t = 10 s is at 1.9e5 rad, where one f32 ulp is 0.016
+# rad, phase noise at -36 dB. So the f32 build takes the time and the phase in f64,
+# from the integer sample index and the widened rate, and rounds only the sine.
+# These two are used only in the f32 arm of such a loop; the f64 arm is unchanged.
+
+# n / sr as an f64 time in seconds: n an integer sample index, sr64 an f64 rate.
+#inline
+fn pr_time(n, sr64): i64 { return f64_div(f64_from(n), sr64); }
+# sin(w64 * t64) for an f64 angular rate (rad/s) and an f64 time, rounded once to f32.
+#inline
+fn pr_sinw(w64, t64): i64 { return f32_from(f64_sin(f64_mul(w64, t64))); }
+
+# x bounded to [lo, hi]; a NaN x passes through (every compare is false), as
+# f64_clamp. Typed operands: the compares branch directly.
+fn pr_clamp(x: f32, lo: f32, hi: f32): i64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+# The smaller of a and b (b when either is NaN, as f64_min).
+fn pr_min(a: f32, b: f32): i64 {
+    if (a < b) { return a; }
+    return b;
+}
+
+# The larger of a and b (b when either is NaN, as f64_max).
+fn pr_max(a: f32, b: f32): i64 {
+    if (a > b) { return a; }
+    return b;
+}
+
+#else
+
+# ---------------------------------------------------------------- f64 build
+var PRANI_REAL_BITS = 64;            # the build's float width
+var PR_ONE  = 0x3FF0000000000000;    # 1.0
+var PR_TWO  = 0x4000000000000000;    # 2.0
+var PR_HALF = 0x3FE0000000000000;    # 0.5
+var PR_PI   = 0x400921FB54442D18;    # pi
+var PR_TAU  = 0x401921FB54442D18;    # 2*pi
+
+# a + b.
+#inline
+fn pr_add(a, b): i64 { return f64_add(a, b); }
+# a - b.
+#inline
+fn pr_sub(a, b): i64 { return f64_sub(a, b); }
+# a * b.
+#inline
+fn pr_mul(a, b): i64 { return f64_mul(a, b); }
+# a / b.
+#inline
+fn pr_div(a, b): i64 { return f64_div(a, b); }
+# -a.
+#inline
+fn pr_neg(a): i64 { return f64_neg(a); }
+# |a|.
+#inline
+fn pr_abs(a): i64 { return f64_abs(a); }
+# 1 iff a < b; 0 when either is NaN.
+#inline
+fn pr_lt(a, b): i64 { return f64_lt(a, b); }
+# 1 iff a <= b; 0 when either is NaN.
+#inline
+fn pr_le(a, b): i64 { return f64_le(a, b); }
+# 1 iff a > b; 0 when either is NaN.
+#inline
+fn pr_gt(a, b): i64 { return f64_gt(a, b); }
+# 1 iff a >= b; 0 when either is NaN.
+#inline
+fn pr_ge(a, b): i64 { return f64_ge(a, b); }
+# 1 iff a == b numerically.
+#inline
+fn pr_eq(a, b): i64 { return f64_eq(a, b); }
+# sin.
+#inline
+fn pr_sin(a): i64 { return f64_sin(a); }
+# cos.
+#inline
+fn pr_cos(a): i64 { return f64_cos(a); }
+# sqrt.
+#inline
+fn pr_sqrt(a): i64 { return f64_sqrt(a); }
+# a^b.
+#inline
+fn pr_pow(a, b): i64 { return f64_pow(a, b); }
+# cube root.
+#inline
+fn pr_cbrt(a): i64 { return f64_cbrt(a); }
+# floor.
+#inline
+fn pr_floor(a): i64 { return f64_floor(a); }
+# truncation toward zero.
+#inline
+fn pr_trunc(a): i64 { return f64_trunc(a); }
+# an integer as a real.
+#inline
+fn pr_from(n): i64 { return f64_from(n); }
+# a real as an integer: truncated, saturating (NaN -> 0).
+#inline
+fn pr_to(a): i64 { return f64_to(a); }
+# a real as an f64: the identity in this build.
+#inline
+fn pr_to64(a): i64 { return a; }
+# an f64 as a real: the identity in this build.
+#inline
+fn pr_of64(a): i64 { return a; }
+
+# x bounded to [lo, hi]: f64_clamp's own body. It calls the builtins, not the
+# wrappers above, because cycc 6.7.18 does not fuse a replayed #inline compare
+# followed by `== 1` into its branch: through pr_lt this clamp measured 2x
+# f64_clamp, and with the builtins it measures the same.
+fn pr_clamp(x, lo, hi): i64 {
+    if (f64_lt(x, lo) == 1) { return lo; }
+    if (f64_gt(x, hi) == 1) { return hi; }
+    return x;
+}
+
+# The smaller of a and b: f64_min's body.
+fn pr_min(a, b): i64 {
+    if (f64_lt(a, b) == 1) { return a; }
+    return b;
+}
+
+# The larger of a and b: f64_max's body.
+fn pr_max(a, b): i64 {
+    if (f64_gt(a, b) == 1) { return a; }
+    return b;
+}
+
+#endif

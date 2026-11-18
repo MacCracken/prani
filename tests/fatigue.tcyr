@@ -9,13 +9,21 @@
 #   modifiers(): pitch=-f*20; breath=f*0.2; amp=(1-f*0.4)*(1-h*0.5); jitter=1+f*1.5
 # serde/Display tests dropped (no serde; integer codes).
 
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/fatigue.cyr"
+include "src/f64/fatigue.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
+#ifdef PRANI_F32
+var TOL = 0x34000000;           # ~1.19e-7 (PRANI_EPSILON), for -0.0 / near-zero checks
+#else
 var TOL = 0x3E80000000000000;   # ~1.19e-7 (PRANI_EPSILON), for -0.0 / near-zero checks
+#endif
 
 # ================================================================
 test_group("new() -- fresh state");
@@ -29,9 +37,9 @@ assert_eq(FatigueState_alarm_reinforced(s), 0, "fresh not reinforced");
 # ================================================================
 test_group("record_call(10, false) -- fatigue accumulation");
 # fatigue = 0 + 10*0.015 = 0.15 (bit-exact in f64)
-fatigue_record_call(s, f64_from(10), 0);
-assert_eq(fatigue_fatigue(s), 0x3fc3333333333333, "fatigue == 0.15");
-assert_eq(FatigueState_bout_calling_time(s), 0x4024000000000000, "bout time == 10.0");
+fatigue_record_call(s, pr_from(10), 0);
+assert_real(fatigue_fatigue(s), pr_of64(0x3fc3333333333333), 1, "fatigue == 0.15");
+assert_eq(FatigueState_bout_calling_time(s), pr_of64(0x4024000000000000), "bout time == 10.0");
 assert_eq(fatigue_alarm_habituation(s), 0, "non-alarm leaves habituation at 0");
 assert_eq(FatigueState_alarm_count(s), 0, "non-alarm leaves alarm count at 0");
 
@@ -44,51 +52,54 @@ assert_eq(FatigueState_alarm_count(s), 0, "non-alarm leaves alarm count at 0");
 test_group("record_call x30 -- accumulates, not assigns");
 var acc = fatigue_new();
 var ai = 0;
-while (ai < 30) { fatigue_record_call(acc, F64_ONE, 0); ai = ai + 1; }
+while (ai < 30) { fatigue_record_call(acc, PR_ONE, 0); ai = ai + 1; }
 # 30 sequential f64 adds of 0.015 round to 0.4500000000000003, which differs
 # from the one-shot 30*0.015 (0.45 = 0x3fdccccccccccccd) -- so this pins the
 # accumulation order as well as the total.
-assert_eq(fatigue_fatigue(acc), 0x3fdcccccccccccd2, "30x1s -> fatigue == 0.4500000000000003");
-assert_eq(f64_gt(fatigue_fatigue(acc), 0x3fd3333333333333), 1, "30x1s -> fatigue > 0.3 (oracle bound)");
-assert_eq(FatigueState_bout_calling_time(acc), 0x403e000000000000, "bout time == 30.0 after 30 calls");
+assert_real(fatigue_fatigue(acc), pr_of64(0x3fdcccccccccccd2), 6, "30x1s -> fatigue == 0.4500000000000003");
+assert_eq(pr_gt(fatigue_fatigue(acc), pr_of64(0x3fd3333333333333)), 1, "30x1s -> fatigue > 0.3 (oracle bound)");
+assert_eq(FatigueState_bout_calling_time(acc), pr_of64(0x403e000000000000), "bout time == 30.0 after 30 calls");
 # Control: a single 1 s call must be strictly smaller on both accumulators.
 # An assigning implementation leaves acc and one identical, failing these two.
 var one = fatigue_new();
-fatigue_record_call(one, F64_ONE, 0);
-assert_eq(fatigue_fatigue(one), 0x3f8eb851eb851eb8, "1x1s -> fatigue == 0.015");
-assert_eq(f64_gt(fatigue_fatigue(acc), fatigue_fatigue(one)), 1, "30 calls > 1 call (fatigue accumulates)");
-assert_eq(f64_gt(FatigueState_bout_calling_time(acc), FatigueState_bout_calling_time(one)), 1,
+fatigue_record_call(one, PR_ONE, 0);
+assert_eq(fatigue_fatigue(one), pr_of64(0x3f8eb851eb851eb8), "1x1s -> fatigue == 0.015");
+assert_eq(pr_gt(fatigue_fatigue(acc), fatigue_fatigue(one)), 1, "30 calls > 1 call (fatigue accumulates)");
+assert_eq(pr_gt(FatigueState_bout_calling_time(acc), FatigueState_bout_calling_time(one)), 1,
   "30 calls > 1 call (bout time accumulates)");
 # Modifiers off the accumulated state. The oracle asserts only the three signs
 # (2.0.3:rust-old/tests/integration.rs:801-803); the exact values are
 # hand-computed from fatigue 0.4500000000000003 with habituation 0, in
 # fatigue_modifiers_into's order.
 var macc = fatigue_modifiers(acc);
-assert_eq(FatigueModifiers_pitch_offset(macc), 0xc022000000000003, "accumulated pitch == -9.000000000000005");
-assert_eq(f64_lt(FatigueModifiers_pitch_offset(macc), 0), 1, "pitch drifts down (< 0)");
-assert_eq(FatigueModifiers_breathiness_delta(macc), 0x3fb70a3d70a3d70f,
+var TL_FATI_75 = pr_of64(0xc022000000000003);
+assert_real(FatigueModifiers_pitch_offset(macc), TL_FATI_75, 4, "accumulated pitch == -9.000000000000005");
+assert_eq(pr_lt(FatigueModifiers_pitch_offset(macc), 0), 1, "pitch drifts down (< 0)");
+assert_real(FatigueModifiers_breathiness_delta(macc), pr_of64(0x3fb70a3d70a3d70f), 5,
   "accumulated breathiness == 0.09000000000000007");
-assert_eq(f64_gt(FatigueModifiers_breathiness_delta(macc), 0), 1, "more breathy (> 0)");
-assert_eq(FatigueModifiers_amplitude_scale(macc), 0x3fea3d70a3d70a3c, "accumulated amplitude == 0.8199999999999998");
-assert_eq(f64_lt(FatigueModifiers_amplitude_scale(macc), F64_ONE), 1, "quieter (< 1.0)");
-assert_eq(FatigueModifiers_jitter_scale(macc), 0x3ffacccccccccccf, "accumulated jitter == 1.6750000000000005");
+assert_eq(pr_gt(FatigueModifiers_breathiness_delta(macc), 0), 1, "more breathy (> 0)");
+var TL_FATI_79_0 = pr_of64(0x3fea3d70a3d70a3c);
+assert_real(FatigueModifiers_amplitude_scale(macc), TL_FATI_79_0, 1, "accumulated amplitude == 0.8199999999999998");
+assert_eq(pr_lt(FatigueModifiers_amplitude_scale(macc), PR_ONE), 1, "quieter (< 1.0)");
+var TL_FATI_83 = pr_of64(0x3ffacccccccccccf);
+assert_real(FatigueModifiers_jitter_scale(macc), TL_FATI_83, 2, "accumulated jitter == 1.6750000000000005");
 
 # ================================================================
 test_group("record_call fatigue clamps at 1.0");
 var big = fatigue_new();
 # 100s * 0.015 = 1.5 -> clamp to 1.0
-fatigue_record_call(big, f64_from(100), 0);
-assert_eq(fatigue_fatigue(big), 0x3ff0000000000000, "fatigue clamps to 1.0");
+fatigue_record_call(big, pr_from(100), 0);
+assert_eq(fatigue_fatigue(big), pr_of64(0x3ff0000000000000), "fatigue clamps to 1.0");
 
 # ================================================================
 test_group("record_call(_, true) -- habituation + alarm count");
 var al = fatigue_new();
-fatigue_record_call(al, f64_from(1), 1);   # 1st unreinforced alarm
-assert_eq(fatigue_alarm_habituation(al), 0x3fb999999999999a, "habituation == 0.1 after 1 alarm");
+fatigue_record_call(al, pr_from(1), 1);   # 1st unreinforced alarm
+assert_eq(fatigue_alarm_habituation(al), pr_of64(0x3fb999999999999a), "habituation == 0.1 after 1 alarm");
 assert_eq(FatigueState_alarm_count(al), 1, "alarm count == 1");
-fatigue_record_call(al, f64_from(1), 1);   # 2nd
-fatigue_record_call(al, f64_from(1), 1);   # 3rd -> 0.30000000000000004
-assert_eq(fatigue_alarm_habituation(al), 0x3fd3333333333334, "habituation == ~0.3 after 3 alarms");
+fatigue_record_call(al, pr_from(1), 1);   # 2nd
+fatigue_record_call(al, pr_from(1), 1);   # 3rd -> 0.30000000000000004
+assert_eq(fatigue_alarm_habituation(al), pr_of64(0x3fd3333333333334), "habituation == ~0.3 after 3 alarms");
 assert_eq(FatigueState_alarm_count(al), 3, "alarm count == 3");
 
 # ================================================================
@@ -96,62 +107,62 @@ test_group("reinforced alarm does NOT raise habituation");
 var rf = fatigue_new();
 fatigue_reinforce_alarm(rf);               # sets reinforced flag (hab stays 0)
 assert_eq(FatigueState_alarm_reinforced(rf), 1, "reinforced flag set");
-fatigue_record_call(rf, f64_from(1), 1);   # alarm while reinforced
+fatigue_record_call(rf, pr_from(1), 1);   # alarm while reinforced
 assert_eq(fatigue_alarm_habituation(rf), 0, "habituation stays 0 when reinforced");
 assert_eq(FatigueState_alarm_count(rf), 1, "alarm still counted");
 
 # ================================================================
 test_group("rest() -- fatigue recovery + habituation decay");
 var r = fatigue_new();
-fatigue_record_call(r, f64_from(10), 0);   # fatigue = 0.15
+fatigue_record_call(r, pr_from(10), 0);   # fatigue = 0.15
 # rest(2): fatigue = 0.15 - 2*0.07 = 0.15 - 0.14 = 0.009999999999999981
-fatigue_rest(r, f64_from(2));
-assert_eq(fatigue_fatigue(r), 0x3f847ae147ae1470, "fatigue == 0.15 - 0.14 (f64)");
+fatigue_rest(r, pr_from(2));
+assert_real(fatigue_fatigue(r), pr_of64(0x3f847ae147ae1470), 10, "fatigue == 0.15 - 0.14 (f64)");
 
 # fatigue floors at 0 on long rest
 var r2 = fatigue_new();
-fatigue_record_call(r2, f64_from(10), 0);  # 0.15
-fatigue_rest(r2, f64_from(100));           # 0.15 - 7.0 -> max(0)
+fatigue_record_call(r2, pr_from(10), 0);  # 0.15
+fatigue_rest(r2, pr_from(100));           # 0.15 - 7.0 -> max(0)
 assert_eq(fatigue_fatigue(r2), 0, "fatigue floors at 0");
 assert_eq(fatigue_alarm_habituation(r2), 0, "habituation floors at 0");
 
 # habituation decays on rest
 var r3 = fatigue_new();
-fatigue_record_call(r3, f64_from(1), 1);
-fatigue_record_call(r3, f64_from(1), 1);
-fatigue_record_call(r3, f64_from(1), 1);   # hab = 0.30000000000000004
-fatigue_rest(r3, f64_from(1));             # hab -= 0.023 = 0.277
-assert_eq(fatigue_alarm_habituation(r3), 0x3fd1ba5e353f7cee, "habituation decays by 0.023");
+fatigue_record_call(r3, pr_from(1), 1);
+fatigue_record_call(r3, pr_from(1), 1);
+fatigue_record_call(r3, pr_from(1), 1);   # hab = 0.30000000000000004
+fatigue_rest(r3, pr_from(1));             # hab -= 0.023 = 0.277
+assert_eq(fatigue_alarm_habituation(r3), pr_of64(0x3fd1ba5e353f7cee), "habituation decays by 0.023");
 
 # ================================================================
 test_group("rest > 5s resets bout tracking");
 var bt = fatigue_new();
-fatigue_record_call(bt, f64_from(10), 0);
-assert_eq(FatigueState_bout_calling_time(bt), 0x4024000000000000, "bout time 10.0 before rest");
-fatigue_rest(bt, f64_from(6));             # > 5s -> bout reset
+fatigue_record_call(bt, pr_from(10), 0);
+assert_eq(FatigueState_bout_calling_time(bt), pr_of64(0x4024000000000000), "bout time 10.0 before rest");
+fatigue_rest(bt, pr_from(6));             # > 5s -> bout reset
 assert_eq(FatigueState_bout_calling_time(bt), 0, "bout time reset after >5s rest");
 
 # rest <= 5s does NOT reset bout
 var bt2 = fatigue_new();
-fatigue_record_call(bt2, f64_from(10), 0);
-fatigue_rest(bt2, f64_from(5));            # == 5s, not > 5s
-assert_eq(FatigueState_bout_calling_time(bt2), 0x4024000000000000, "bout time kept at exactly 5s rest");
+fatigue_record_call(bt2, pr_from(10), 0);
+fatigue_rest(bt2, pr_from(5));            # == 5s, not > 5s
+assert_eq(FatigueState_bout_calling_time(bt2), pr_of64(0x4024000000000000), "bout time kept at exactly 5s rest");
 
 # ================================================================
 test_group("reinforce_alarm() -- drops habituation, resets count");
 var re = fatigue_new();
-fatigue_record_call(re, f64_from(1), 1);
-fatigue_record_call(re, f64_from(1), 1);
-fatigue_record_call(re, f64_from(1), 1);   # hab ~0.3, count 3
+fatigue_record_call(re, pr_from(1), 1);
+fatigue_record_call(re, pr_from(1), 1);
+fatigue_record_call(re, pr_from(1), 1);   # hab ~0.3, count 3
 fatigue_reinforce_alarm(re);               # hab -= 0.3 -> ~0 (max 0), count 0, reinforced
 # 0.30000000000000004 - 0.3 = 5.55e-17 (tiny positive), not exactly 0
-assert_eq(f64_lt(fatigue_alarm_habituation(re), TOL), 1, "habituation near 0 after reinforce");
+assert_eq(pr_lt(fatigue_alarm_habituation(re), TOL), 1, "habituation near 0 after reinforce");
 assert_eq(FatigueState_alarm_count(re), 0, "alarm count reset to 0");
 assert_eq(FatigueState_alarm_reinforced(re), 1, "reinforced flag set");
 
 # reinforce floors at 0 when habituation already small
 var re2 = fatigue_new();
-fatigue_record_call(re2, f64_from(1), 1);  # hab 0.1
+fatigue_record_call(re2, pr_from(1), 1);  # hab 0.1
 fatigue_reinforce_alarm(re2);              # 0.1 - 0.3 -> max(0) = 0
 assert_eq(fatigue_alarm_habituation(re2), 0, "habituation floors at 0 on reinforce");
 
@@ -163,61 +174,62 @@ assert_eq(FatigueState_alarm_reinforced(cr), 1, "reinforced before clear");
 fatigue_clear_reinforcement(cr);
 assert_eq(FatigueState_alarm_reinforced(cr), 0, "cleared after clear_reinforcement");
 # after clearing, a new unreinforced alarm raises habituation again
-fatigue_record_call(cr, f64_from(1), 1);
-assert_eq(fatigue_alarm_habituation(cr), 0x3fb999999999999a, "habituation rises after clear+alarm");
+fatigue_record_call(cr, pr_from(1), 1);
+assert_eq(fatigue_alarm_habituation(cr), pr_of64(0x3fb999999999999a), "habituation rises after clear+alarm");
 
 # ================================================================
 test_group("modifiers() -- fresh state (identity-ish)");
 var fresh = fatigue_new();
 var m0 = fatigue_modifiers(fresh);
 # pitch = -0*20 = -0.0 (bit-differs from +0.0); check magnitude
-assert_eq(f64_lt(f64_abs(FatigueModifiers_pitch_offset(m0)), TOL), 1, "fresh pitch ~ 0");
+assert_eq(pr_lt(pr_abs(FatigueModifiers_pitch_offset(m0)), TOL), 1, "fresh pitch ~ 0");
 assert_eq(FatigueModifiers_breathiness_delta(m0), 0, "fresh breathiness == 0");
-assert_eq(FatigueModifiers_amplitude_scale(m0), 0x3ff0000000000000, "fresh amplitude == 1.0");
-assert_eq(FatigueModifiers_jitter_scale(m0), 0x3ff0000000000000, "fresh jitter == 1.0");
+assert_eq(FatigueModifiers_amplitude_scale(m0), pr_of64(0x3ff0000000000000), "fresh amplitude == 1.0");
+assert_eq(FatigueModifiers_jitter_scale(m0), pr_of64(0x3ff0000000000000), "fresh jitter == 1.0");
 
 # ================================================================
 test_group("modifiers() -- at fatigue 0.15");
 var f15 = fatigue_new();
-fatigue_record_call(f15, f64_from(10), 0);   # fatigue = 0.15
+fatigue_record_call(f15, pr_from(10), 0);   # fatigue = 0.15
 var m1 = fatigue_modifiers(f15);
 # pitch = -0.15*20 = -3.0
-assert_eq(FatigueModifiers_pitch_offset(m1), 0xc008000000000000, "pitch == -3.0");
+assert_real(FatigueModifiers_pitch_offset(m1), pr_of64(0xc008000000000000), 1, "pitch == -3.0");
 # breathiness = 0.15*0.2 = 0.03
-assert_eq(FatigueModifiers_breathiness_delta(m1), 0x3f9eb851eb851eb8, "breathiness == 0.03");
+assert_eq(FatigueModifiers_breathiness_delta(m1), pr_of64(0x3f9eb851eb851eb8), "breathiness == 0.03");
 # amplitude = (1-0.15*0.4)*(1-0*0.5) = 0.94
-assert_eq(FatigueModifiers_amplitude_scale(m1), 0x3fee147ae147ae14, "amplitude == 0.94");
+assert_eq(FatigueModifiers_amplitude_scale(m1), pr_of64(0x3fee147ae147ae14), "amplitude == 0.94");
 # jitter = 1 + 0.15*1.5 = 1.225
-assert_eq(FatigueModifiers_jitter_scale(m1), 0x3ff399999999999a, "jitter == 1.225");
+assert_eq(FatigueModifiers_jitter_scale(m1), pr_of64(0x3ff399999999999a), "jitter == 1.225");
 
 # ================================================================
 test_group("modifiers() -- habituation cuts amplitude");
 var mh = fatigue_new();
-fatigue_record_call(mh, f64_from(1), 1);     # fatigue = 0.015, hab = 0.1
+fatigue_record_call(mh, pr_from(1), 1);     # fatigue = 0.015, hab = 0.1
 var m2 = fatigue_modifiers(mh);
 # amp = (1 - 0.015*0.4) * (1 - 0.1*0.5); fatigue tiny so ~0.994*0.95
 # assert amplitude strictly below the hab-only 0.95 (fatigue also present)
-assert_eq(f64_lt(FatigueModifiers_amplitude_scale(m2), 0x3fee666666666666), 1, "amp below 0.95 (fatigue+hab both cut)");
-assert_eq(f64_lt(FatigueModifiers_amplitude_scale(m2), F64_ONE), 1, "amp below 1.0");
+var TL_FATI_207_0 = pr_of64(0x3fee666666666666);
+assert_eq(pr_lt(FatigueModifiers_amplitude_scale(m2), TL_FATI_207_0), 1, "amp below 0.95 (fatigue+hab both cut)");
+assert_eq(pr_lt(FatigueModifiers_amplitude_scale(m2), PR_ONE), 1, "amp below 1.0");
 
 # ================================================================
 test_group("modifiers() -- full fatigue extremes");
 var full = fatigue_new();
-fatigue_record_call(full, f64_from(100), 0); # fatigue clamps to 1.0
+fatigue_record_call(full, pr_from(100), 0); # fatigue clamps to 1.0
 var m3 = fatigue_modifiers(full);
 # pitch = -1.0*20 = -20.0
-assert_eq(FatigueModifiers_pitch_offset(m3), 0xc034000000000000, "full pitch == -20.0");
+assert_eq(FatigueModifiers_pitch_offset(m3), pr_of64(0xc034000000000000), "full pitch == -20.0");
 # breathiness = 1.0*0.2 = 0.2
-assert_eq(FatigueModifiers_breathiness_delta(m3), 0x3fc999999999999a, "full breathiness == 0.2");
+assert_eq(FatigueModifiers_breathiness_delta(m3), pr_of64(0x3fc999999999999a), "full breathiness == 0.2");
 # amplitude = (1-0.4)*(1-0) = 0.6
-assert_eq(FatigueModifiers_amplitude_scale(m3), 0x3fe3333333333333, "full amplitude == 0.6");
+assert_eq(FatigueModifiers_amplitude_scale(m3), pr_of64(0x3fe3333333333333), "full amplitude == 0.6");
 # jitter = 1 + 1.5 = 2.5
-assert_eq(FatigueModifiers_jitter_scale(m3), 0x4004000000000000, "full jitter == 2.5");
+assert_eq(FatigueModifiers_jitter_scale(m3), pr_of64(0x4004000000000000), "full jitter == 2.5");
 
 # ================================================================
 test_group("reset() -- clears all state");
 var rs = fatigue_new();
-fatigue_record_call(rs, f64_from(10), 1);
+fatigue_record_call(rs, pr_from(10), 1);
 fatigue_reset(rs);
 assert_eq(fatigue_fatigue(rs), 0, "reset fatigue == 0");
 assert_eq(fatigue_alarm_habituation(rs), 0, "reset habituation == 0");
@@ -233,7 +245,7 @@ var fs = fatigue_new();
 # advance so every field is non-default: fatigue=64*0.015=0.96, bout=64.0,
 # alarm_count=1, habituation=0.1 (alarm). dur=64 chosen so all f64 fields (and
 # every derived modifier) print to a shortest-decimal that reparses bit-exact.
-fatigue_record_call(fs, f64_from(64), 1);
+fatigue_record_call(fs, pr_from(64), 1);
 var sb = str_builder_new();
 FatigueState_to_json(fs, sb);
 var jstr = str_data(str_builder_build(sb));
@@ -280,6 +292,15 @@ assert_eq(memeq(mstr, mstr_2, strlen(mstr)), 1, "FatigueModifiers json idempoten
 # Everything below is a NEW group: no assertion above this line changed, because
 # the guards only ever fire on input the oracle had no business accepting.
 # ================================================================
+#ifdef PRANI_F32
+var G_NAN     = 0x7FC00000;           # canonical quiet NaN
+var G_NEG_ONE = 0xBF800000;           # -1.0
+var G_1E300   = 0x7F7FFFFF;           # 1e300 -- finite, far past the 1e9 bound
+var G_TWENTY  = 0x41A00000;           # 20.0
+var G_TEN     = 0x41200000;           # 10.0
+var G_015     = 0x3E19999A;           # 0.15  -- fatigue after one 10 s call
+var G_01      = 0x3DCCCCCD;           # 0.1   -- habituation after one alarm
+#else
 var G_NAN     = 0x7ff8000000000000;   # canonical quiet NaN
 var G_NEG_ONE = 0xbff0000000000000;   # -1.0
 var G_1E300   = 0x7e37e43c8800759c;   # 1e300 -- finite, far past the 1e9 bound
@@ -287,17 +308,18 @@ var G_TWENTY  = 0x4034000000000000;   # 20.0
 var G_TEN     = 0x4024000000000000;   # 10.0
 var G_015     = 0x3fc3333333333333;   # 0.15  -- fatigue after one 10 s call
 var G_01      = 0x3fb999999999999a;   # 0.1   -- habituation after one alarm
+#endif
 
 # The measured behaviour the two guards exist to prevent. These pin facts about
 # the stdlib, not about prani: if any of them changes, the guard rationale in
 # src/fatigue.cyr is stale and must be re-derived rather than trusted.
 test_group("2.0.5 -- measured facts the duration guards rest on");
-assert_eq(f64_clamp(G_NAN, 0, F64_ONE), G_NAN, "f64_clamp passes NaN straight through (F11)");
-assert_eq(f64_clamp(PRANI_POS_INF, 0, F64_ONE), F64_ONE, "f64_clamp DOES bound +inf to hi");
-assert_eq(f64_clamp(PRANI_NEG_INF, 0, F64_ONE), 0, "f64_clamp DOES bound -inf to lo");
-assert_eq(f64_max(G_NAN, 0), 0, "f64_max(NaN, 0) == 0 -- NaN is dropped, not propagated");
-assert_eq(f64_max(0, G_NAN), G_NAN, "f64_max(0, NaN) == NaN -- f64_max is ASYMMETRIC");
-assert_eq(f64_gt(G_NAN, PR_FAT_BOUT_RESET_SECS), 0, "f64_gt(NaN, 5.0) == 0 -- a NaN rest never resets the bout");
+assert_eq(pr_clamp(G_NAN, 0, PR_ONE), G_NAN, "f64_clamp passes NaN straight through (F11)");
+assert_eq(pr_clamp(PRANI_POS_INF, 0, PR_ONE), PR_ONE, "f64_clamp DOES bound +inf to hi");
+assert_eq(pr_clamp(PRANI_NEG_INF, 0, PR_ONE), 0, "f64_clamp DOES bound -inf to lo");
+assert_eq(pr_max(G_NAN, 0), 0, "pr_max(NaN, 0) == 0 -- NaN is dropped, not propagated");
+assert_eq(pr_max(0, G_NAN), G_NAN, "pr_max(0, NaN) == NaN -- f64_max is ASYMMETRIC");
+assert_eq(pr_gt(G_NAN, PR_FAT_BOUT_RESET_SECS), 0, "pr_gt(NaN, 5.0) == 0 -- a NaN rest never resets the bout");
 assert_eq(prani_in_range(G_NAN, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects NaN");
 assert_eq(prani_in_range(PRANI_POS_INF, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects +inf");
 assert_eq(prani_in_range(PRANI_NEG_INF, 0, PR_FAT_MAX_DURATION_S), 0, "duration guard rejects -inf");
@@ -314,9 +336,9 @@ assert_eq(prani_in_range(PR_FAT_MAX_DURATION_S, 0, PR_FAT_MAX_DURATION_S), 1,
 # made bout_calling_time infinite, -1.0 and 1e300 made it nonsense.
 test_group("2.0.5 -- record_call rejects out-of-range duration");
 var g = fatigue_new();
-fatigue_record_call(g, f64_from(10), 1);        # valid: fatigue 0.15, bout 10.0, hab 0.1, count 1
+fatigue_record_call(g, pr_from(10), 1);        # valid: fatigue 0.15, bout 10.0, hab 0.1, count 1
 fatigue_record_call(g, G_NAN, 1);
-assert_eq(fatigue_fatigue(g), G_015, "NaN duration leaves fatigue at 0.15");
+assert_real(fatigue_fatigue(g), G_015, 1, "NaN duration leaves fatigue at 0.15");
 assert_eq(FatigueState_bout_calling_time(g), G_TEN, "NaN duration leaves bout time at 10.0");
 assert_eq(fatigue_alarm_habituation(g), G_01, "NaN duration leaves habituation at 0.1");
 assert_eq(FatigueState_alarm_count(g), 1, "a rejected alarm call is not counted");
@@ -326,16 +348,16 @@ fatigue_record_call(g, PRANI_NEG_INF, 0);
 assert_eq(FatigueState_bout_calling_time(g), G_TEN, "-inf duration leaves bout time at 10.0");
 fatigue_record_call(g, G_NEG_ONE, 0);
 assert_eq(FatigueState_bout_calling_time(g), G_TEN, "negative duration leaves bout time at 10.0");
-assert_eq(fatigue_fatigue(g), G_015, "negative duration leaves fatigue at 0.15");
+assert_real(fatigue_fatigue(g), G_015, 1, "negative duration leaves fatigue at 0.15");
 fatigue_record_call(g, G_1E300, 0);
 assert_eq(FatigueState_bout_calling_time(g), G_TEN, "1e300 (past the 1e9 bound) leaves bout time at 10.0");
 # The state is still USABLE afterwards -- a rejection is not a retirement.
-fatigue_record_call(g, f64_from(10), 0);
+fatigue_record_call(g, pr_from(10), 0);
 assert_eq(FatigueState_bout_calling_time(g), G_TWENTY, "bout == 20.0 after a valid call follows five rejections");
 # ...and bit-identical to a run that never made the five bad calls at all.
 var gc = fatigue_new();
-fatigue_record_call(gc, f64_from(10), 1);
-fatigue_record_call(gc, f64_from(10), 0);
+fatigue_record_call(gc, pr_from(10), 1);
+fatigue_record_call(gc, pr_from(10), 0);
 assert_eq(fatigue_fatigue(g), fatigue_fatigue(gc), "fatigue bit-identical to a clean run");
 assert_eq(FatigueState_bout_calling_time(g), FatigueState_bout_calling_time(gc),
   "bout time bit-identical to a clean run");
@@ -348,15 +370,15 @@ assert_eq(FatigueState_alarm_count(g), FatigueState_alarm_count(gc), "alarm coun
 # upper bound itself: prani_in_range is inclusive at both ends.
 test_group("2.0.5 -- record_call still accepts 0 and the bound");
 var z = fatigue_new();
-fatigue_record_call(z, f64_from(10), 0);
+fatigue_record_call(z, pr_from(10), 0);
 fatigue_record_call(z, 0, 1);
-assert_eq(fatigue_fatigue(z), G_015, "zero duration is a no-op on fatigue, not a rejection");
+assert_real(fatigue_fatigue(z), G_015, 1, "zero duration is a no-op on fatigue, not a rejection");
 assert_eq(FatigueState_bout_calling_time(z), G_TEN, "zero duration is a no-op on bout time");
 assert_eq(FatigueState_alarm_count(z), 1, "zero duration STILL counts as an alarm call");
 assert_eq(fatigue_alarm_habituation(z), G_01, "zero duration STILL raises habituation");
 var bnd = fatigue_new();
 fatigue_record_call(bnd, PR_FAT_MAX_DURATION_S, 0);
-assert_eq(fatigue_fatigue(bnd), F64_ONE, "1e9 s accepted at the inclusive bound -- fatigue clamps to 1.0");
+assert_eq(fatigue_fatigue(bnd), PR_ONE, "1e9 s accepted at the inclusive bound -- fatigue clamps to 1.0");
 assert_eq(FatigueState_bout_calling_time(bnd), PR_FAT_MAX_DURATION_S, "1e9 s accepted -- bout time == 1e9");
 
 # ================================================================
@@ -366,29 +388,29 @@ assert_eq(FatigueState_bout_calling_time(bnd), PR_FAT_MAX_DURATION_S, "1e9 s acc
 # backwards with no ceiling (rest(-1000) gave fatigue 70.15, well outside [0,1]).
 test_group("2.0.5 -- rest rejects out-of-range duration");
 var rq = fatigue_new();
-fatigue_record_call(rq, f64_from(10), 1);       # fatigue 0.15, hab 0.1, bout 10.0
+fatigue_record_call(rq, pr_from(10), 1);       # fatigue 0.15, hab 0.1, bout 10.0
 fatigue_rest(rq, G_NAN);
-assert_eq(fatigue_fatigue(rq), G_015, "NaN rest no longer zeroes fatigue");
+assert_real(fatigue_fatigue(rq), G_015, 1, "NaN rest no longer zeroes fatigue");
 assert_eq(fatigue_alarm_habituation(rq), G_01, "NaN rest no longer zeroes habituation");
 fatigue_rest(rq, PRANI_NEG_INF);
-assert_eq(fatigue_fatigue(rq), G_015, "-inf rest no longer drives fatigue to +inf");
+assert_real(fatigue_fatigue(rq), G_015, 1, "-inf rest no longer drives fatigue to +inf");
 assert_eq(prani_is_finite(fatigue_fatigue(rq)), 1, "fatigue stays finite through a -inf rest");
 fatigue_rest(rq, PRANI_POS_INF);
-assert_eq(fatigue_fatigue(rq), G_015, "+inf rest no longer zeroes fatigue");
+assert_real(fatigue_fatigue(rq), G_015, 1, "+inf rest no longer zeroes fatigue");
 assert_eq(FatigueState_bout_calling_time(rq), G_TEN, "+inf rest no longer resets the bout");
 fatigue_rest(rq, G_NEG_ONE);
-assert_eq(fatigue_fatigue(rq), G_015, "negative rest no longer runs recovery backwards");
-assert_eq(f64_le(fatigue_fatigue(rq), F64_ONE), 1, "fatigue stays inside its documented [0,1]");
+assert_real(fatigue_fatigue(rq), G_015, 1, "negative rest no longer runs recovery backwards");
+assert_eq(pr_le(fatigue_fatigue(rq), PR_ONE), 1, "fatigue stays inside its documented [0,1]");
 fatigue_rest(rq, G_1E300);
-assert_eq(fatigue_fatigue(rq), G_015, "1e300 rest (past the 1e9 bound) rejected");
+assert_real(fatigue_fatigue(rq), G_015, 1, "1e300 rest (past the 1e9 bound) rejected");
 assert_eq(fatigue_alarm_habituation(rq), G_01, "habituation survives all four rejected rests");
 
 # ================================================================
 test_group("2.0.5 -- rest still accepts 0 and the bound");
 var rz = fatigue_new();
-fatigue_record_call(rz, f64_from(10), 1);
+fatigue_record_call(rz, pr_from(10), 1);
 fatigue_rest(rz, 0);
-assert_eq(fatigue_fatigue(rz), G_015, "zero rest is a no-op, not a rejection");
+assert_real(fatigue_fatigue(rz), G_015, 1, "zero rest is a no-op, not a rejection");
 assert_eq(FatigueState_bout_calling_time(rz), G_TEN, "zero rest does not reset the bout (0 is not > 5)");
 fatigue_rest(rz, PR_FAT_MAX_DURATION_S);
 assert_eq(fatigue_fatigue(rz), 0, "1e9 s rest accepted at the bound -- fatigue floors at 0");
@@ -400,7 +422,7 @@ assert_eq(FatigueState_bout_calling_time(rz), 0, "1e9 s rest accepted -- bout re
 # NaN state through ANY sequence of public calls on a state prani built.
 test_group("2.0.5 -- modifiers() unpoisonable through the mutators");
 var pm = fatigue_new();
-fatigue_record_call(pm, f64_from(10), 1);
+fatigue_record_call(pm, pr_from(10), 1);
 fatigue_record_call(pm, G_NAN, 1);
 fatigue_rest(pm, G_NAN);
 fatigue_record_call(pm, PRANI_POS_INF, 0);
@@ -409,7 +431,8 @@ assert_eq(prani_is_finite(FatigueModifiers_pitch_offset(mpm)), 1, "pitch_offset 
 assert_eq(prani_is_finite(FatigueModifiers_breathiness_delta(mpm)), 1, "breathiness_delta finite after rejected calls");
 assert_eq(prani_is_finite(FatigueModifiers_amplitude_scale(mpm)), 1, "amplitude_scale finite after rejected calls");
 assert_eq(prani_is_finite(FatigueModifiers_jitter_scale(mpm)), 1, "jitter_scale finite after rejected calls");
-assert_eq(FatigueModifiers_pitch_offset(mpm), 0xc008000000000000, "pitch == -3.0, exactly the clean-state value");
+var TL_FATI_429_0 = pr_of64(0xc008000000000000);
+assert_real(FatigueModifiers_pitch_offset(mpm), TL_FATI_429_0, 1, "pitch == -3.0, exactly the clean-state value");
 
 # ================================================================
 # What 2.0.5 could NOT close in this module, closed in 2.2.0. modifiers_make
@@ -419,13 +442,13 @@ assert_eq(FatigueModifiers_pitch_offset(mpm), 0xc008000000000000, "pitch == -3.0
 # substitutes the identity modifiers (0, 0, 1, 1): that would be the plausible
 # fabrication ADR-0001 rules out.
 test_group("2.2.0 -- modifiers_make refuses a non-finite field");
-assert_eq(fatigue_modifiers_make(G_NAN, 0, F64_ONE, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(fatigue_modifiers_make(G_NAN, 0, PR_ONE, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "a NaN pitch_offset -> PRANI_ERR_INVALID_VOCALIZATION (2.1.2 returned it unaltered)");
-assert_eq(fatigue_modifiers_make(0, 0, PRANI_POS_INF, F64_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(fatigue_modifiers_make(0, 0, PRANI_POS_INF, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "an infinite amplitude_scale too: these are computed values, not clamp inputs");
-var mk = fatigue_modifiers_make(0, 0, F64_ONE, F64_ONE);
+var mk = fatigue_modifiers_make(0, 0, PR_ONE, PR_ONE);
 assert_gt(mk, 0, "control: finite fields still build modifiers");
-assert_eq(FatigueModifiers_amplitude_scale(mk), F64_ONE, "control: with the values given");
+assert_eq(FatigueModifiers_amplitude_scale(mk), PR_ONE, "control: with the values given");
 
 # The one remaining producer of a poisoned state: FatigueState_from_json_str is
 # derive-generated and takes any i64 per field, so a document prani did not

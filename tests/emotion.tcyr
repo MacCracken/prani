@@ -5,13 +5,38 @@
 # pitch_scale, breathiness_delta). Golden float values computed by hand in f64,
 # matching the Rust match arms + arithmetic exactly. serde/Display tests dropped.
 
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/vocalization.cyr"
 include "src/emotion.cyr"
+include "src/f64/emotion.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
 # ---- test input constants (IEEE-754 hex) ----
+#ifdef PRANI_F32
+var T_NEG_0_8 = 0xBF4CCCCD;           # -0.8
+var T_NEG_0_6 = 0xBF19999A;           # -0.6
+var T_NEG_0_5 = 0xBF000000;           # -0.5
+var T_NEG_0_3 = 0xBE99999A;           # -0.3
+var T_POS_0_7 = 0x3F333333;           #  0.7
+var T_POS_0_3 = 0x3E99999A;           #  0.3
+var T_0_0     = 0x00000000;           #  0.0
+var T_0_1     = 0x3DCCCCCD;           #  0.1
+var T_0_2     = 0x3E4CCCCD;           #  0.2
+var T_0_25    = 0x3E800000;           #  0.25
+var T_0_5     = 0x3F000000;           #  0.5
+var T_0_625   = 0x3F200000;           #  0.625
+var T_0_75    = 0x3F400000;           #  0.75
+var T_0_875   = 0x3F600000;           #  0.875
+var T_0_9     = 0x3F666666;           #  0.9
+var T_1_0     = 0x3F800000;           #  1.0
+var T_2_0     = 0x40000000;           #  2.0
+var T_NEG_2_0 = 0xC0000000;           # -2.0
+var T_NEG_1_0 = 0xBF800000;           # -1.0
+#else
 var T_NEG_0_8 = 0xbfe999999999999a;   # -0.8
 var T_NEG_0_6 = 0xbfe3333333333333;   # -0.6
 var T_NEG_0_5 = 0xbfe0000000000000;   # -0.5
@@ -31,6 +56,7 @@ var T_1_0     = 0x3ff0000000000000;   #  1.0
 var T_2_0     = 0x4000000000000000;   #  2.0
 var T_NEG_2_0 = 0xc000000000000000;   # -2.0
 var T_NEG_1_0 = 0xbff0000000000000;   # -1.0
+#endif
 
 # ================================================================
 test_group("constructors -- new() defaults + accessors");
@@ -55,7 +81,7 @@ assert_eq(PrEmotion_smoothing(ecmid), T_0_1, "with_values smoothing default 0.1"
 # ================================================================
 test_group("with_smoothing -- clamps to [0.0, 0.95]");
 var es = emotion_with_smoothing(emotion_new(), T_2_0);
-assert_eq(PrEmotion_smoothing(es), 0x3fee666666666666, "smoothing clamped to 0.95");
+assert_eq(PrEmotion_smoothing(es), pr_of64(0x3fee666666666666), "smoothing clamped to 0.95");
 var es2 = emotion_with_smoothing(emotion_new(), T_NEG_1_0);
 assert_eq(PrEmotion_smoothing(es2), T_0_0, "smoothing clamped to 0.0");
 var es3 = emotion_with_smoothing(emotion_new(), T_0_5);
@@ -75,14 +101,14 @@ test_group("update -- exponential decay toward target (s=0.1)");
 #   a = 0.2*0.1 + 1.0*0.9 = 0.92
 var eu = emotion_new();
 emotion_update(eu, T_1_0, T_1_0);
-assert_eq(emotion_valence(eu), 0x3feccccccccccccd, "update valence -> 0.9");
-assert_eq(emotion_arousal(eu), 0x3fed70a3d70a3d71, "update arousal -> 0.92");
+assert_eq(emotion_valence(eu), pr_of64(0x3feccccccccccccd), "update valence -> 0.9");
+assert_real(emotion_arousal(eu), pr_of64(0x3fed70a3d70a3d71), 1, "update arousal -> 0.92");
 # targets clamped before blending: update toward (-2.0, -2.0) from new()
 var eu2 = emotion_new();
 emotion_update(eu2, T_NEG_2_0, T_NEG_2_0);
 # v = 0.0*0.1 + (-1.0)*0.9 = -0.9 ; a = 0.2*0.1 + 0.0*0.9 = 0.02
-assert_eq(emotion_valence(eu2), 0xbfeccccccccccccd, "update valence clamped tgt -> -0.9");
-assert_eq(emotion_arousal(eu2), 0x3f947ae147ae147c, "update arousal clamped tgt -> 0.02");
+assert_eq(emotion_valence(eu2), pr_of64(0xbfeccccccccccccd), "update valence clamped tgt -> -0.9");
+assert_real(emotion_arousal(eu2), pr_of64(0x3f947ae147ae147c), 1, "update arousal clamped tgt -> 0.02");
 
 # ================================================================
 # The oracle's test_emotion_state_smooth_update
@@ -99,8 +125,8 @@ assert_eq(emotion_valence(eu3), T_0_5, "s=0.5 -> valence halfway (0.5)");
 assert_eq(emotion_arousal(eu3), T_0_75, "s=0.5 -> arousal 0.75");
 # Control: an update that ignored the field and used the hardcoded PRE_0_1
 # would land on 0.9 / 0.95 from this same start and target.
-assert_neq(emotion_valence(eu3), 0x3feccccccccccccd, "valence is not the s=0.1 result 0.9");
-assert_neq(emotion_arousal(eu3), 0x3fee666666666667, "arousal is not the s=0.1 result 0.95");
+assert_neq(emotion_valence(eu3), pr_of64(0x3feccccccccccccd), "valence is not the s=0.1 result 0.9");
+assert_neq(emotion_arousal(eu3), pr_of64(0x3fee666666666667), "arousal is not the s=0.1 result 0.95");
 assert_eq(PrEmotion_smoothing(eu3), T_0_5, "smoothing unchanged by update");
 var eu3v1 = emotion_valence(eu3);
 # a second step blends from the updated state, not from the original
@@ -119,7 +145,7 @@ emotion_update(eu4, T_1_0, T_1_0);
 assert_eq(emotion_valence(eu4), T_0_25, "s=0.75 -> valence 0.25");
 assert_eq(emotion_arousal(eu4), T_0_625, "s=0.75 -> arousal 0.625");
 # more smoothing = less movement toward the target in one step
-assert_eq(f64_lt(emotion_valence(eu4), eu3v1), 1, "s=0.75 moves less than s=0.5");
+assert_eq(pr_lt(emotion_valence(eu4), eu3v1), 1, "s=0.75 moves less than s=0.5");
 # s=0.0 is instant: one step lands exactly on the (clamped) target
 var eu5 = emotion_with_smoothing(emotion_with_values(T_POS_0_7, T_0_5), T_0_0);
 emotion_update(eu5, T_0_25, T_0_9);
@@ -129,9 +155,9 @@ assert_eq(emotion_arousal(eu5), T_0_9, "s=0.0 -> arousal snaps to target 0.9");
 var eu6 = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), T_2_0);
 emotion_update(eu6, T_1_0, T_1_0);
 # 1.0-0.95 rounds to 0.050000000000000044, so v is that and a is 0.525
-assert_eq(emotion_valence(eu6), 0x3fa99999999999a0, "s clamped to 0.95 -> valence 0.05");
-assert_eq(emotion_arousal(eu6), 0x3fe0cccccccccccd, "s clamped to 0.95 -> arousal 0.525");
-assert_eq(f64_lt(emotion_valence(eu6), emotion_valence(eu4)), 1, "s=0.95 moves less than s=0.75");
+assert_real(emotion_valence(eu6), pr_of64(0x3fa99999999999a0), 3, "s clamped to 0.95 -> valence 0.05");
+assert_eq(emotion_arousal(eu6), pr_of64(0x3fe0cccccccccccd), "s clamped to 0.95 -> arousal 0.525");
+assert_eq(pr_lt(emotion_valence(eu6), emotion_valence(eu4)), 1, "s=0.95 moves less than s=0.75");
 
 # ================================================================
 test_group("valence_zone / arousal_zone boundaries");
@@ -223,7 +249,7 @@ var o = emotion_evaluate(ev);
 assert_eq(PrEmotionOut_vocalization(o), PRANI_VOC_RUMBLE, "default vocalization Rumble");
 assert_eq(PrEmotionOut_intent(o), PRANI_INTENT_IDLE, "default intent Idle");
 # effort = 0.2 + 0.2*0.7 = 0.34
-assert_eq(PrEmotionOut_vocal_effort(o), 0x3fd5c28f5c28f5c2, "effort 0.34");
+assert_eq(PrEmotionOut_vocal_effort(o), pr_of64(0x3fd5c28f5c28f5c2), "effort 0.34");
 # pitch = 1.0 + 0.0*0.15 = 1.0
 assert_eq(PrEmotionOut_pitch_scale(o), T_1_0, "pitch 1.0");
 # arousal 0.2 is NOT < 0.2 -> breath 0.0
@@ -237,11 +263,11 @@ var oh = emotion_evaluate(eh);
 assert_eq(PrEmotionOut_vocalization(oh), PRANI_VOC_SCREECH, "screech");
 assert_eq(PrEmotionOut_intent(oh), PRANI_INTENT_DISTRESS, "distress");
 # effort = 0.2 + 0.9*0.7 = 0.83
-assert_eq(PrEmotionOut_vocal_effort(oh), 0x3fea8f5c28f5c290, "effort 0.83");
+assert_eq(PrEmotionOut_vocal_effort(oh), pr_of64(0x3fea8f5c28f5c290), "effort 0.83");
 # pitch = 1.0 + (-0.8)*0.15 = 0.88
-assert_eq(PrEmotionOut_pitch_scale(oh), 0x3fec28f5c28f5c29, "pitch 0.88");
+assert_eq(PrEmotionOut_pitch_scale(oh), pr_of64(0x3fec28f5c28f5c29), "pitch 0.88");
 # breath = (0.9-0.8)*0.75 = 0.075
-assert_eq(PrEmotionOut_breathiness_delta(oh), 0x3fb3333333333332, "breath 0.075 (high)");
+assert_real(PrEmotionOut_breathiness_delta(oh), pr_of64(0x3fb3333333333332), 4, "breath 0.075 (high)");
 
 # ================================================================
 test_group("evaluate -- low-arousal breathiness branch (v=0.7, a=0.1)");
@@ -251,11 +277,11 @@ var ol = emotion_evaluate(el);
 assert_eq(PrEmotionOut_vocalization(ol), PRANI_VOC_PURR, "purr");
 assert_eq(PrEmotionOut_intent(ol), PRANI_INTENT_IDLE, "idle");
 # effort = 0.2 + 0.1*0.7 = 0.27
-assert_eq(PrEmotionOut_vocal_effort(ol), 0x3fd147ae147ae148, "effort 0.27");
+assert_eq(PrEmotionOut_vocal_effort(ol), pr_of64(0x3fd147ae147ae148), "effort 0.27");
 # pitch = 1.0 + 0.7*0.15 = 1.105
-assert_eq(PrEmotionOut_pitch_scale(ol), 0x3ff1ae147ae147ae, "pitch 1.105");
+assert_eq(PrEmotionOut_pitch_scale(ol), pr_of64(0x3ff1ae147ae147ae), "pitch 1.105");
 # breath = (0.2-0.1)*0.5 = 0.05
-assert_eq(PrEmotionOut_breathiness_delta(ol), 0x3fa999999999999a, "breath 0.05 (low)");
+assert_eq(PrEmotionOut_breathiness_delta(ol), pr_of64(0x3fa999999999999a), "breath 0.05 (low)");
 
 # ================================================================
 # serde roundtrip (restores the Rust #[derive(Serialize, Deserialize)] on
@@ -327,6 +353,15 @@ assert_eq(memeq(pojstr, pojstr_2, strlen(pojstr)), 1, "json idempotent");
 # values, and every assertion above this block still passes unchanged.
 # ================================================================
 
+#ifdef PRANI_F32
+var T_POS_INF   = 0x7F800000;           #  +inf
+var T_NEG_INF   = 0xFF800000;           #  -inf
+var T_5_0       = 0x40A00000;           #  5.0   (out of range for valence)
+var T_3_0       = 0x40400000;           #  3.0   (out of range for smoothing)
+var T_0_95      = 0x3F733333;           #  0.95  (smoothing clamp hi)
+var T_PAST_1_0  = 0x3F800001;           #  1.0000001 (one f32 ulp past 1.0)
+var T_PAST_0_95 = 0x3F733334;           #  0.95000005 (one f32 ulp past 0.95)
+#else
 var T_POS_INF   = 0x7ff0000000000000;   #  +inf
 var T_NEG_INF   = 0xfff0000000000000;   #  -inf
 var T_5_0       = 0x4014000000000000;   #  5.0   (out of range for valence)
@@ -334,6 +369,7 @@ var T_3_0       = 0x4008000000000000;   #  3.0   (out of range for smoothing)
 var T_0_95      = 0x3fee666666666666;   #  0.95  (smoothing clamp hi)
 var T_PAST_1_0  = 0x3ff0000000000001;   #  1.0000000000000002 (one ulp past 1.0)
 var T_PAST_0_95 = 0x3fee666666666667;   #  0.9500000000000001 (one ulp past 0.95)
+#endif
 
 # ================================================================
 # Why the guards test the range EXACTLY rather than with a tolerance:
@@ -351,13 +387,13 @@ var g_a_hi = T_0_0;
 var g_a_lo = T_1_0;
 var g_k = 0;
 while (g_k < 65) {
-    var g_s = f64_div(f64_from(g_k), f64_from(64));
+    var g_s = pr_div(pr_from(g_k), pr_from(64));
     var g_i = 0;
     while (g_i < 9) {
-        var g_v0 = f64_sub(f64_div(f64_from(g_i), f64_from(4)), T_1_0);
+        var g_v0 = pr_sub(pr_div(pr_from(g_i), pr_from(4)), T_1_0);
         var g_j = 0;
         while (g_j < 5) {
-            var g_a0 = f64_div(f64_from(g_j), f64_from(4));
+            var g_a0 = pr_div(pr_from(g_j), pr_from(4));
             var g_t = 0;
             while (g_t < 4) {
                 var g_tv = T_NEG_1_0;
@@ -371,14 +407,14 @@ while (g_k < 65) {
                     emotion_update(g_e, g_tv, g_ta);
                     var g_v = emotion_valence(g_e);
                     var g_a = emotion_arousal(g_e);
-                    if (f64_gt(g_v, g_v_hi) == 1) { g_v_hi = g_v; }
-                    if (f64_lt(g_v, g_v_lo) == 1) { g_v_lo = g_v; }
-                    if (f64_gt(g_a, g_a_hi) == 1) { g_a_hi = g_a; }
-                    if (f64_lt(g_a, g_a_lo) == 1) { g_a_lo = g_a; }
-                    if (f64_gt(g_v, T_1_0) == 1)     { g_over = g_over + 1; }
-                    if (f64_lt(g_v, T_NEG_1_0) == 1) { g_over = g_over + 1; }
-                    if (f64_gt(g_a, T_1_0) == 1)     { g_over = g_over + 1; }
-                    if (f64_lt(g_a, T_0_0) == 1)     { g_over = g_over + 1; }
+                    if (pr_gt(g_v, g_v_hi) == 1) { g_v_hi = g_v; }
+                    if (pr_lt(g_v, g_v_lo) == 1) { g_v_lo = g_v; }
+                    if (pr_gt(g_a, g_a_hi) == 1) { g_a_hi = g_a; }
+                    if (pr_lt(g_a, g_a_lo) == 1) { g_a_lo = g_a; }
+                    if (pr_gt(g_v, T_1_0) == 1)     { g_over = g_over + 1; }
+                    if (pr_lt(g_v, T_NEG_1_0) == 1) { g_over = g_over + 1; }
+                    if (pr_gt(g_a, T_1_0) == 1)     { g_over = g_over + 1; }
+                    if (pr_lt(g_a, T_0_0) == 1)     { g_over = g_over + 1; }
                     g_n = g_n + 1;
                 }
                 g_t = g_t + 1;
@@ -402,13 +438,13 @@ assert_eq(g_a_lo, T_0_0, "sweep min arousal is exactly 0.0");
 test_group("input-range guards -- NaN valence is refused, or stored and then rejected");
 # 2.2.0: with_values refuses a NaN itself (it passes every clamp). Through 2.1.2 it
 # stored one, and the guards below were the only report.
-assert_eq(emotion_with_values(f64_div(0, 0), T_0_5), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(emotion_with_values(pr_div(0, 0), T_0_5), PRANI_ERR_INVALID_VOCALIZATION,
   "with_values refuses a NaN valence (2.2.0; it stored it before)");
-assert_eq(emotion_with_values(T_0_5, f64_div(0, 0)), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(emotion_with_values(T_0_5, pr_div(0, 0)), PRANI_ERR_INVALID_VOCALIZATION,
   "and a NaN arousal");
 # The point-of-use guards stay: a raw setter (or a document, below) still delivers one.
 var gn = emotion_with_values(T_0_0, T_0_5);
-PrEmotion_set_valence(gn, f64_div(0, 0));
+PrEmotion_set_valence(gn, pr_div(0, 0));
 assert_eq(prani_is_finite(emotion_valence(gn)), 0, "a raw setter stores the NaN (the door the builder does not guard)");
 assert_eq(emotion_arousal(gn), T_0_5, "arousal unaffected");
 assert_eq(emotion_valence_zone(gn), PRANI_ERR_INVALID_VOCALIZATION, "valence_zone rejects NaN");
@@ -422,7 +458,7 @@ assert_eq(prani_is_err(emotion_evaluate(gn)), 1, "evaluate's return reads as an 
 # arousal NaN, arrived via set()'s clamp (the other mutator path).
 test_group("input-range guards -- NaN arousal via set()");
 var ga = emotion_new();
-emotion_set(ga, T_0_5, f64_div(0, 0));
+emotion_set(ga, T_0_5, pr_div(0, 0));
 assert_eq(prani_is_finite(emotion_arousal(ga)), 0, "set's clamp passed the NaN through");
 assert_eq(emotion_valence(ga), T_0_5, "valence set normally");
 assert_eq(emotion_valence_zone(ga), PRE_VZ_POSITIVE, "valence_zone still classifies its own field");
@@ -437,10 +473,10 @@ assert_eq(emotion_evaluate(ga), PRANI_ERR_INVALID_VOCALIZATION, "evaluate reject
 # corrupts valence/arousal on the very next tick.
 test_group("input-range guards -- NaN smoothing corrupts the state on update");
 var gs = emotion_with_values(T_0_0, T_0_5);
-assert_eq(emotion_with_smoothing(gs, f64_div(0, 0)), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(emotion_with_smoothing(gs, pr_div(0, 0)), PRANI_ERR_INVALID_VOCALIZATION,
   "with_smoothing refuses a NaN (2.2.0; its clamp passed it through before)");
 assert_eq(PrEmotion_smoothing(gs), PRE_0_1, "and leaves the emotion's smoothing as it was");
-PrEmotion_set_smoothing(gs, f64_div(0, 0));
+PrEmotion_set_smoothing(gs, pr_div(0, 0));
 assert_eq(prani_is_finite(PrEmotion_smoothing(gs)), 0, "a raw setter still stores one");
 assert_eq(emotion_valence_zone(gs), PRE_VZ_NEUTRAL, "valence_zone unaffected -- it checks only what it reads");
 assert_eq(emotion_evaluate(gs), PRANI_ERR_INVALID_VOCALIZATION, "evaluate rejects it (it checks all three fields)");
@@ -527,10 +563,10 @@ var u_si = 0;
 var u_n = 0;
 var u_i = 0;
 while (u_i < 17) {
-    var u_v = f64_sub(f64_div(f64_from(u_i), f64_from(8)), T_1_0);
+    var u_v = pr_sub(pr_div(pr_from(u_i), pr_from(8)), T_1_0);
     var u_j = 0;
     while (u_j < 9) {
-        var u_a = f64_div(f64_from(u_j), f64_from(8));
+        var u_a = pr_div(pr_from(u_j), pr_from(8));
         var u_e = emotion_with_values(u_v, u_a);
         if (emotion_valence_zone(u_e) != emotion_valence_zone_unchecked(u_e)) { u_vz = u_vz + 1; }
         if (emotion_arousal_zone(u_e) != emotion_arousal_zone_unchecked(u_e)) { u_az = u_az + 1; }
@@ -555,7 +591,7 @@ assert_eq(u_si, 0, "select_intent == _unchecked on every valid state");
 # fields it reads, and it is what the public wrappers below it still prevent.
 test_group("checked/unchecked split -- the unchecked core is genuinely unchecked");
 var un = emotion_with_values(T_0_0, T_0_5);
-PrEmotion_set_valence(un, f64_div(0, 0));   # with_values refuses a NaN since 2.2.0
+PrEmotion_set_valence(un, pr_div(0, 0));   # with_values refuses a NaN since 2.2.0
 assert_eq(prani_is_finite(emotion_valence(un)), 0, "state carries a NaN valence");
 assert_eq(emotion_valence_zone_unchecked(un), PRE_VZ_NEUTRAL, "unchecked core fabricates Neutral on NaN");
 assert_eq(emotion_select_vocalization_unchecked(un), PRANI_VOC_WHINE, "unchecked selector fabricates Whine");

@@ -12,14 +12,28 @@ include "lib/hashmap.cyr"
 include "lib/bayan.cyr"
 include "lib/svara.cyr"
 include "dist/prani.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
-var SR = f64_from(8000);
+var SR = pr_from(8000);
+#ifdef PRANI_F32
+var DUR = 0x3D4CCCCD;           # 0.05 s
+#else
 var DUR = 0x3FA999999999999A;   # 0.05 s
+#endif
 
 # Oracle-matching rate/duration for the emotion -> synthesis composition below.
-var SR44    = f64_from(44100);
+var SR44    = pr_from(44100);
+#ifdef PRANI_F32
+var DUR_0_5 = 0x3F000000;           # 0.5 s
+var E_NEG_0_5 = 0xBF000000;           # -0.5  (valence, exactly on the Bark/Screech bound)
+var E_NEG_0_8 = 0xBF4CCCCD;           # -0.8  (valence, past both bounds)
+var E_0_8     = 0x3F4CCCCD;           #  0.8  (arousal, High zone)
+var E_0_76    = 0x3F428F5C;           #  0.76 (= 0.2 + 0.8*0.7, expected vocal_effort)
+var E_0_925   = 0x3F6CCCCD;           #  0.925 (= 1.0 + -0.5*0.15, expected pitch_scale)
+var E_0_001   = 0x3A83126F;           #  0.001 (audibility floor)
+#else
 var DUR_0_5 = 0x3FE0000000000000;   # 0.5 s
 var E_NEG_0_5 = 0xBFE0000000000000;   # -0.5  (valence, exactly on the Bark/Screech bound)
 var E_NEG_0_8 = 0xBFE999999999999A;   # -0.8  (valence, past both bounds)
@@ -27,6 +41,7 @@ var E_0_8     = 0x3FE999999999999A;   #  0.8  (arousal, High zone)
 var E_0_76    = 0x3FE851EB851EB852;   #  0.76 (= 0.2 + 0.8*0.7, expected vocal_effort)
 var E_0_925   = 0x3FED99999999999A;   #  0.925 (= 1.0 + -0.5*0.15, expected pitch_scale)
 var E_0_001   = 0x3F50624DD2F1A9FC;   #  0.001 (audibility floor)
+#endif
 
 # ================================================================
 test_group("bundle: L0/L1 constants + tables");
@@ -37,9 +52,9 @@ assert_eq(prani_is_err(PRANI_ERR_INVALID_VOCALIZATION), 1, "error code negative"
 # ================================================================
 test_group("bundle: species -> bridge -> emotion");
 var wp = species_params(PRANI_SP_WOLF);
-assert_eq(SpeciesParams_f0_default(wp), f64_from(400), "Wolf f0_default 400");
-assert_eq(bridge_species_from_f0(f64_from(3500)), PRANI_SP_CRICKET, "3500 Hz -> Cricket");
-var em = emotion_with_values(0x3FE0000000000000, 0x3FE6666666666666);   # (0.5,0.7)
+assert_eq(SpeciesParams_f0_default(wp), pr_from(400), "Wolf f0_default 400");
+assert_eq(bridge_species_from_f0(pr_from(3500)), PRANI_SP_CRICKET, "3500 Hz -> Cricket");
+var em = emotion_with_values(pr_of64(0x3FE0000000000000), pr_of64(0x3FE6666666666666));   # (0.5,0.7)
 var out = emotion_evaluate(em);
 assert_eq(prani_is_finite(PrEmotionOut_pitch_scale(out)), 1, "emotion output finite");
 
@@ -105,24 +120,27 @@ var dvoc = PrEmotionOut_vocalization(dout);
 var dint = PrEmotionOut_intent(dout);
 var dsam = crvoice_vocalize_with_intent(dvoice, dvoc, dint, SR44, DUR_0_5);
 assert_eq(prani_is_err(dsam), 0, "emotion-driven wolf bark synthesizes");
-# 0.5 s * Alarm duration_scale 0.7 = 0.35 s, and 0.35*44100 = 15434.999999999998
-assert_eq(vec_len(dsam), 15434, "0.5 s * 0.7 * 44100 truncates to 15434 samples");
+# 0.5 s * Alarm duration_scale 0.7 = 0.35 s, and 0.35*44100 = 15434.999999999998 in
+# f64, which truncates to 15434. In f32 the product rounds to 15435.0 exactly: each
+# format truncates its own product (ADR-0010), and f32's lands on the exact answer.
+var D_LEN = t_per(15434, 15435);
+assert_eq(vec_len(dsam), D_LEN, "0.5 s * 0.7 * 44100 truncates to 15434 samples");
 var di = 0;
 var dfin = 1;
 var dmax = 0;
 while (di < vec_len(dsam)) { if (prani_is_finite(vec_get(dsam, di)) == 0) { dfin = 0; } di = di + 1; }
 assert_eq(dfin, 1, "all emotion-driven samples finite");
 di = 0;
-while (di < vec_len(dsam)) { var da = f64_abs(vec_get(dsam, di)); if (f64_gt(da,
+while (di < vec_len(dsam)) { var da = pr_abs(vec_get(dsam, di)); if (pr_gt(da,
         dmax) == 1) { dmax = da; } di = di + 1; }
-assert_eq(f64_gt(dmax, E_0_001), 1, "emotion-driven bark is audible (max |s| > 0.001)");
+assert_eq(pr_gt(dmax, E_0_001), 1, "emotion-driven bark is audible (max |s| > 0.001)");
 # control: the identical call at the default 0.5 effort renders a different
 # waveform, so the emotion-derived 0.76 demonstrably reaches synthesis.
 var dbase = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_WOLF), dvoc, dint, SR44, DUR_0_5);
-assert_eq(vec_len(dbase), 15434, "control render has the same length");
+assert_eq(vec_len(dbase), D_LEN, "control render has the same length");
 var dj = 0;
 var dmax2 = 0;
-while (dj < vec_len(dbase)) { var db = f64_abs(vec_get(dbase, dj)); if (f64_gt(db,
+while (dj < vec_len(dbase)) { var db = pr_abs(vec_get(dbase, dj)); if (pr_gt(db,
         dmax2) == 1) { dmax2 = db; } dj = dj + 1; }
 assert_neq(dmax2, dmax, "effort 0.5 and effort 0.76 render differently");
 

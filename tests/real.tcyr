@@ -1,0 +1,150 @@
+# real.tcyr -- 2.3.0, ADR-0010. The float format layer (src/real.cyr), and what the
+# two builds promise about each other.
+#
+# Run in both formats: `cyrius test tests/real.tcyr` (f64) and
+# `cyrius test -D PRANI_F32 tests/real.tcyr` (f32). Each group holds in both; where a
+# value differs by format, both values are stated and t_per picks the build's.
+
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/real.cyr"
+include "src/error.cyr"
+include "src/f64/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/f64/rng.cyr"
+include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
+include "src/spatial.cyr"
+include "src/f64/spatial.cyr"
+include "src/vocalization.cyr"
+include "src/fatigue.cyr"
+include "src/f64/fatigue.cyr"
+include "src/emotion.cyr"
+include "src/f64/emotion.cyr"
+include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
+include "src/species.cyr"
+include "src/f64/species.cyr"
+include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
+include "src/tract.cyr"
+include "src/f64/tract.cyr"
+include "src/voice.cyr"
+include "src/f64/voice.cyr"
+include "tests/realt.cyr"
+
+alloc_init();
+
+var RT_NAN64 = 0x7FF8000000000000;    # an f64 quiet NaN
+var RT_TENTH = 0x3FB999999999999A;    # 0.1 in f64
+var RT_0_15 = 0x3FC3333333333333;     # 0.15 in f64
+
+# rt_fatigue_json(fs) -- the document FatigueState_to_json writes, as a cstring.
+fn rt_fatigue_json(fs) {
+    var sb = str_builder_new();
+    FatigueState_to_json(fs, sb);
+    return str_data(str_builder_build(sb));
+}
+
+# rt_fdoc(f, h, t, c, r) -- a FatigueState document with those five values, as text.
+fn rt_fdoc(f, h, t, c, r) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"fatigue\":"); str_builder_add_cstr(sb, f);
+    str_builder_add_cstr(sb, ",\"alarm_habituation\":"); str_builder_add_cstr(sb, h);
+    str_builder_add_cstr(sb, ",\"bout_calling_time\":"); str_builder_add_cstr(sb, t);
+    str_builder_add_cstr(sb, ",\"alarm_count\":"); str_builder_add_cstr(sb, c);
+    str_builder_add_cstr(sb, ",\"alarm_reinforced\":"); str_builder_add_cstr(sb, r);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# ================================================================
+test_group("the build's format");
+assert_eq(PRANI_REAL_BITS == 32 || PRANI_REAL_BITS == 64, 1, "a real is an f32 or an f64");
+assert_eq(PR_ONE, t_per(0x3FF0000000000000, 0x3F800000), "PR_ONE is 1.0 in the build's format");
+assert_eq(PR_TAU, t_per(0x401921FB54442D18, 0x40C90FDB), "PR_TAU is 2pi, rounded to the format");
+assert_eq(pr_of64(RT_TENTH), t_per(RT_TENTH, 0x3DCCCCCD), "an f64 becomes the nearest real (0.1)");
+assert_eq(pr_to64(pr_of64(RT_TENTH)), t_per(RT_TENTH, 0x3FB99999A0000000), "and widens back exactly");
+assert_eq(pr_to64(PR_ONE), 0x3FF0000000000000, "widening is exact");
+# an f32 real is a non-negative word, high 32 bits clear, so it is never mistaken for
+# a prani error code (negative); an f64 real with its sign set is a negative word.
+assert_eq(prani_is_err(pr_neg(PR_ONE)), t_per(1, 0), "-1.0's word: negative only in f64");
+
+# ================================================================
+test_group("the primitives behave as f64's do, in either format");
+var rt_nan = pr_of64(RT_NAN64);
+assert_eq(prani_is_nan(rt_nan), 1, "an f64 NaN is a NaN in the format");
+assert_eq(prani_is_nan(pr_clamp(rt_nan, 0, PR_ONE)), 1, "pr_clamp passes a NaN through, as f64_clamp");
+assert_eq(pr_clamp(pr_from(5), 0, PR_ONE), PR_ONE, "pr_clamp bounds above");
+assert_eq(pr_clamp(pr_neg(PR_ONE), 0, PR_ONE), 0, "and below");
+assert_eq(pr_min(rt_nan, PR_ONE), PR_ONE, "pr_min(NaN, b) is b, as f64_min");
+assert_eq(pr_max(rt_nan, PR_ONE), PR_ONE, "pr_max(NaN, b) is b, as f64_max");
+assert_eq(pr_lt(rt_nan, PR_ONE) + pr_le(rt_nan, PR_ONE) + pr_gt(rt_nan, PR_ONE) + pr_ge(rt_nan, PR_ONE), 0,
+  "every compare against a NaN is false");
+assert_eq(pr_eq(rt_nan, rt_nan), 0, "a NaN equals nothing, itself included");
+assert_eq(pr_neg(0), t_per(0x8000000000000000, 0x80000000), "pr_neg(0.0) is -0.0");
+assert_eq(pr_eq(pr_neg(0), 0), 1, "and -0.0 == 0.0");
+assert_eq(pr_abs(pr_neg(PR_ONE)), PR_ONE, "pr_abs clears the sign");
+assert_eq(pr_to(rt_nan), 0, "pr_to(NaN) is 0, as f64_to");
+assert_eq(pr_to(PRANI_POS_INF), 9223372036854775807, "pr_to(+inf) saturates");
+assert_eq(pr_to(pr_from(-7)), 0 - 7, "pr_to truncates toward zero");
+assert_eq(pr_sqrt(pr_from(2)), t_per(0x3FF6A09E667F3BCD, 0x3FB504F3), "sqrt(2) is correctly rounded");
+
+# ================================================================
+test_group("integers in the format");
+# f32 holds every integer to 2^24 and then every other one: a count past that is what
+# the format can represent, which the boundary tests in the other suites state.
+assert_eq(pr_to(pr_from(16777216)), 16777216, "2^24 is exact");
+assert_eq(pr_to(pr_from(16777217)), t_per(16777217, 16777216), "2^24 + 1: exact in f64, 2^24 in f32");
+assert_eq(t_next_up(pr_from(16777216)) == pr_from(16777218), t_per(0, 1), "f32's next integer past 2^24 is +2");
+
+# ================================================================
+test_group("time and phase stay f64 (real.cyr, ADR-0010)");
+# The f32 build's oscillators take their time from the integer sample index in f64
+# (tract.tcyr's time-base group renders this; here is the arithmetic).
+var rt_late = 33554433;   # 2^25 + 1 samples
+assert_eq(f64_to(f64_mul(f64_div(f64_from(rt_late), f64_from(44100)), f64_from(44100))), rt_late,
+  "an f64 time recovers its sample index past 2^25");
+assert_eq(pr_to(pr_mul(pr_div(pr_from(rt_late), pr_from(44100)), pr_from(44100))) == rt_late, t_per(1, 0),
+  "control: the format's own arithmetic does not, in f32");
+
+# ================================================================
+test_group("a document is the same in both builds (f64 bit patterns, ADR-0010)");
+# Values f32 represents exactly write the same bytes from either build, and an f64
+# build's document reads into the f32 build by one rounding to nearest.
+var rt_fs = fatigue_new();
+FatigueState_set_fatigue(rt_fs, PR_HALF);
+FatigueState_set_alarm_habituation(rt_fs, pr_of64(0x3FD0000000000000));   # 0.25
+FatigueState_set_bout_calling_time(rt_fs, PR_TWO);
+FatigueState_set_alarm_count(rt_fs, 3);
+FatigueState_set_alarm_reinforced(rt_fs, 1);
+var RT_DOC = rt_fdoc("4602678819172646912", "4598175219545276416", "4611686018427387904", "3", "1");
+assert_eq(streq(rt_fatigue_json(rt_fs), RT_DOC), 1, "FatigueState writes the f64 build's bytes");
+var rt_back = FatigueState_from_json_str(RT_DOC);
+assert_eq(FatigueState_fatigue(rt_back), PR_HALF, "and reads them back exactly");
+assert_eq(FatigueState_alarm_count(rt_back), 3, "an integer field is untouched");
+# an f64 document holding 0.15 (not an f32) reads as the nearest real
+var rt_doc15 = rt_fdoc("4594572339843380019", "0", "0", "0", "0");
+assert_real(FatigueState_fatigue(FatigueState_from_json_str(rt_doc15)), pr_of64(RT_0_15), 0,
+  "an f64 document's 0.15 is the format's nearest 0.15 (f32: correctly rounded)");
+# a voice, through a hand-written encoder and decoder
+var rt_v = crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), PR_HALF);
+var rt_sb = str_builder_new();
+crvoice_to_json(rt_v, rt_sb);
+var rt_vdoc = str_data(str_builder_build(rt_sb));
+var rt_v2 = crvoice_from_json_str(rt_vdoc);
+assert_eq(prani_is_err(rt_v2), 0, "a voice document decodes in its own build");
+assert_eq(CreatureVoice_vocal_effort(rt_v2), PR_HALF, "with its effort");
+assert_eq(SpeciesParams_breathiness(CreatureVoice_params(rt_v2)), SpeciesParams_breathiness(CreatureVoice_params(rt_v)),
+  "and its params, bit for bit");
+var rt_vk = str_index_of_cstr(str_new(rt_vdoc, strlen(rt_vdoc)), "\"vocal_effort\":4602678819172646912");
+assert_eq(rt_vk > 0, 1, "the effort is written as 0.5's f64 bits");
+# the pairs decoder, which the f32 build provides under derive's name
+var rt_pairs = bayan_json_parse(str_new(RT_DOC, strlen(RT_DOC)));   # it takes a Str
+assert_eq(FatigueState_fatigue(FatigueState_from_json(rt_pairs)), PR_HALF, "the pairs decoder reads it too");
+
+var rc = assert_summary();
+syscall(60, rc);

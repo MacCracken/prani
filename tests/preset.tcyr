@@ -21,19 +21,40 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/preset.cyr"
+include "src/f64/preset.cyr"
+include "tests/realt.cyr"
 
 # ---- preset field value constants (IEEE-754 hex; decimals in comments) ------
+#ifdef PRANI_F32
+var T_1_4  = 0x3FB33333;           # 1.4
+var T_0_4  = 0x3ECCCCCD;           # 0.4
+var T_1_0  = 0x3F800000;           # 1.0
+var T_1_3  = 0x3FA66666;           # 1.3
+var T_4_0  = 0x40800000;           # 4.0
+var T_0_8  = 0x3F4CCCCD;           # 0.8
+var T_1_2  = 0x3F99999A;           # 1.2
+var T_1_5  = 0x3FC00000;           # 1.5
+#else
 var T_1_4  = 0x3ff6666666666666;   # 1.4
 var T_0_4  = 0x3fd999999999999a;   # 0.4
 var T_1_0  = 0x3ff0000000000000;   # 1.0
@@ -42,7 +63,18 @@ var T_4_0  = 0x4010000000000000;   # 4.0
 var T_0_8  = 0x3fe999999999999a;   # 0.8
 var T_1_2  = 0x3ff3333333333333;   # 1.2
 var T_1_5  = 0x3ff8000000000000;   # 1.5
+#endif
 
+#ifdef PRANI_F32
+var T_0_03 = 0x3CF5C28F;           # 0.03
+var T_0_12 = 0x3DF5C28F;           # 0.12
+var T_0_08 = 0x3DA3D70A;           # 0.08
+var T_0_15 = 0x3E19999A;           # 0.15
+var T_0_25 = 0x3E800000;           # 0.25
+var T_0_1  = 0x3DCCCCCD;           # 0.1
+var T_0_2  = 0x3E4CCCCD;           # 0.2
+var T_0_18 = 0x3E3851EC;           # 0.18
+#else
 var T_0_03 = 0x3f9eb851eb851eb8;   # 0.03
 var T_0_12 = 0x3fbeb851eb851eb8;   # 0.12
 var T_0_08 = 0x3fb47ae147ae147b;   # 0.08
@@ -51,13 +83,33 @@ var T_0_25 = 0x3fd0000000000000;   # 0.25
 var T_0_1  = 0x3fb999999999999a;   # 0.1
 var T_0_2  = 0x3fc999999999999a;   # 0.2
 var T_0_18 = 0x3fc70a3d70a3d70a;   # 0.18
+#endif
 
 # f0_offsets (negatives via f64_neg(f64_from(n)))
+#ifdef PRANI_F32
+var T_OFF_200 = 0x43480000;           # 200.0
+var T_OFF_150 = 0x43160000;           # 150.0
+var T_OFF_50  = 0x42480000;           # 50.0
+#else
 var T_OFF_200 = 0x4069000000000000;   # 200.0
 var T_OFF_150 = 0x4062c00000000000;   # 150.0
 var T_OFF_50  = 0x4049000000000000;   # 50.0
+#endif
 
 # ---- expected effective_tract_scale (params.tract_scale * size) -------------
+#ifdef PRANI_F32
+var T_ETS_ALPHA_WOLF = 0x3FD70A3D;           # 1.2 * 1.4 = 1.68
+var T_ETS_WOLF_PUP   = 0x3EF5C28F;           # 1.2 * 0.4 = 0.48
+var T_ETS_HOUSE_CAT  = 0x3F000000;           # 0.5 * 1.0 = 0.5
+var T_ETS_KITTEN     = 0x3E4CCCCD;           # 0.5 * 0.4 = 0.2
+var T_ETS_MALE_LION  = 0x40266666;           # 2.0 * 1.3 = 2.6
+var T_ETS_ANC_DRAGON = 0x41400000;           # 3.0 * 4.0 = 12.0
+var T_ETS_YNG_DRAGON = 0x4019999A;           # 3.0 * 0.8 = 2.4000000000000004
+var T_ETS_BALD_EAGLE = 0x3E75C28F;           # 0.2 * 1.2 = 0.24
+var T_ETS_RAVEN      = 0x3EC7AE14;           # 0.3 * 1.3 = 0.39
+var T_ETS_CRICKET    = 0x3D4CCCCD;           # 0.05 * 1.0 = 0.05
+var T_ETS_ALLIGATOR  = 0x40700000;           # 2.5 * 1.5 = 3.75
+#else
 var T_ETS_ALPHA_WOLF = 0x3ffae147ae147ae1;   # 1.2 * 1.4 = 1.68
 var T_ETS_WOLF_PUP   = 0x3fdeb851eb851eb8;   # 1.2 * 0.4 = 0.48
 var T_ETS_HOUSE_CAT  = 0x3fe0000000000000;   # 0.5 * 1.0 = 0.5
@@ -69,8 +121,22 @@ var T_ETS_BALD_EAGLE = 0x3fceb851eb851eb8;   # 0.2 * 1.2 = 0.24
 var T_ETS_RAVEN      = 0x3fd8f5c28f5c28f6;   # 0.3 * 1.3 = 0.39
 var T_ETS_CRICKET    = 0x3fa999999999999a;   # 0.05 * 1.0 = 0.05
 var T_ETS_ALLIGATOR  = 0x400e000000000000;   # 2.5 * 1.5 = 3.75
+#endif
 
 # ---- expected effective_f0 ((f0_default+f0_offset)/size, clamped) -----------
+#ifdef PRANI_F32
+var T_EF0_ALPHA_WOLF = 0x43649249;           # (400-80)/1.4 = 228.571... in [150,1200]
+var T_EF0_WOLF_PUP   = 0x44960000;           # (400+200)/0.4 = 1500 -> clamp 1200
+var T_EF0_HOUSE_CAT  = 0x43FA0000;           # (500+0)/1.0 = 500 in [200,1000]
+var T_EF0_KITTEN     = 0x447A0000;           # (500+150)/0.4 = 1625 -> clamp 1000
+var T_EF0_MALE_LION  = 0x42480000;           # (80-15)/1.3 = 50.0 in [40,200]
+var T_EF0_ANC_DRAGON = 0x41F00000;           # (70-30)/4.0 = 10 -> clamp 30
+var T_EF0_YNG_DRAGON = 0x43160000;           # (70+50)/0.8 = 150.0 in [30,500]
+var T_EF0_BALD_EAGLE = 0x44FA0000;           # (2500-200)/1.2 = 1916.67 -> clamp 2000
+var T_EF0_RAVEN      = 0x44069D8A;           # (800-100)/1.3 = 538.461... in [500,2000]
+var T_EF0_CRICKET    = 0x458CA000;           # (4500+0)/1.0 = 4500 in [3000,8000]
+var T_EF0_ALLIGATOR  = 0x42055555;           # (60-10)/1.5 = 33.333... -> clamp 30? no, in [30,200]
+#else
 var T_EF0_ALPHA_WOLF = 0x406c924924924925;   # (400-80)/1.4 = 228.571... in [150,1200]
 var T_EF0_WOLF_PUP   = 0x4092c00000000000;   # (400+200)/0.4 = 1500 -> clamp 1200
 var T_EF0_HOUSE_CAT  = 0x407f400000000000;   # (500+0)/1.0 = 500 in [200,1000]
@@ -82,19 +148,33 @@ var T_EF0_BALD_EAGLE = 0x409f400000000000;   # (2500-200)/1.2 = 1916.67 -> clamp
 var T_EF0_RAVEN      = 0x4080d3b13b13b13b;   # (800-100)/1.3 = 538.461... in [500,2000]
 var T_EF0_CRICKET    = 0x40b1940000000000;   # (4500+0)/1.0 = 4500 in [3000,8000]
 var T_EF0_ALLIGATOR  = 0x4040aaaaaaaaaaab;   # (60-10)/1.5 = 33.333... -> clamp 30? no, in [30,200]
+#endif
 
 # ---- synthesis constants (the oracle's own arguments: 44100 Hz, 0.3 s) ------
+#ifdef PRANI_F32
+var T_SR    = 0x472C4400;           # 44100.0
+var T_0_3   = 0x3E99999A;           # 0.3   (0.3 * 44100 == 13230.0 exactly)
+var T_0_001 = 0x3A83126F;           # 0.001 -- the oracle's audibility floor
+var T_NAN   = 0x7FC00000;           # NaN   -- control for t_all_finite
+var T_INF   = 0x7F800000;           # +inf  -- control for t_all_finite
+#else
 var T_SR    = 0x40e5888000000000;   # 44100.0
 var T_0_3   = 0x3fd3333333333333;   # 0.3   (0.3 * 44100 == 13230.0 exactly)
 var T_0_001 = 0x3f50624dd2f1a9fc;   # 0.001 -- the oracle's audibility floor
 var T_NAN   = 0x7ff8000000000000;   # NaN   -- control for t_all_finite
 var T_INF   = 0x7ff0000000000000;   # +inf  -- control for t_all_finite
+#endif
 
 # ---- codec-guard constants (2.0.5) -----------------------------------------
 # T_0_1 (0.1) above doubles as crvoice_with_size's floor; T_1_0 as its
 # breathiness ceiling; T_1_5 as an over-ceiling breathiness.
+#ifdef PRANI_F32
+var T_NEG_INF = 0xFF800000;           # -inf
+var T_0_05    = 0x3D4CCCCD;           # 0.05  -- just under the 0.1 size floor
+#else
 var T_NEG_INF = 0xfff0000000000000;   # -inf
 var T_0_05    = 0x3fa999999999999a;   # 0.05  -- just under the 0.1 size floor
+#endif
 
 alloc_init();
 
@@ -120,8 +200,8 @@ fn t_max_abs(v) {
     var i = 0;
     var m = 0;
     while (i < n) {
-        var a = f64_abs(vec_get(v, i));
-        if (f64_gt(a, m) == 1) { m = a; }
+        var a = pr_abs(vec_get(v, i));
+        if (pr_gt(a, m) == 1) { m = a; }
         i = i + 1;
     }
     return m;
@@ -150,11 +230,11 @@ fn t_pj(species, size, f0, br) {
     str_builder_add_cstr(sb, "{\"name\":\"Probe\",\"species\":");
     str_builder_add_int(sb, species);
     str_builder_add_cstr(sb, ",\"size\":");
-    str_builder_add_int(sb, size);
+    str_builder_add_int(sb, pr_to64(size));   # f64 bits in both builds (ADR-0010)
     str_builder_add_cstr(sb, ",\"f0_offset\":");
-    str_builder_add_int(sb, f0);
+    str_builder_add_int(sb, pr_to64(f0));
     str_builder_add_cstr(sb, ",\"breathiness\":");
-    str_builder_add_int(sb, br);
+    str_builder_add_int(sb, pr_to64(br));
     str_builder_add_cstr(sb, "}");
     return str_data(str_builder_build(sb));
 }
@@ -182,7 +262,7 @@ test_group("preset field values -- verbatim from oracle");
 var alpha = preset_alpha_wolf();
 assert_eq(VoicePreset_species(alpha), PRANI_SP_WOLF, "alpha_wolf species Wolf");
 assert_eq(VoicePreset_size(alpha), T_1_4, "alpha_wolf size 1.4");
-assert_eq(VoicePreset_f0_offset(alpha), f64_neg(f64_from(80)), "alpha_wolf f0_offset -80");
+assert_eq(VoicePreset_f0_offset(alpha), pr_neg(pr_from(80)), "alpha_wolf f0_offset -80");
 assert_eq(VoicePreset_breathiness(alpha), T_0_03, "alpha_wolf breathiness 0.03");
 
 var pup = preset_wolf_pup();
@@ -206,13 +286,13 @@ assert_eq(VoicePreset_breathiness(kit), T_0_15, "kitten breathiness 0.15");
 var lion = preset_male_lion();
 assert_eq(VoicePreset_species(lion), PRANI_SP_LION, "male_lion species Lion");
 assert_eq(VoicePreset_size(lion), T_1_3, "male_lion size 1.3");
-assert_eq(VoicePreset_f0_offset(lion), f64_neg(f64_from(15)), "male_lion f0_offset -15");
+assert_eq(VoicePreset_f0_offset(lion), pr_neg(pr_from(15)), "male_lion f0_offset -15");
 assert_eq(VoicePreset_breathiness(lion), T_0_12, "male_lion breathiness 0.12");
 
 var anc = preset_ancient_dragon();
 assert_eq(VoicePreset_species(anc), PRANI_SP_DRAGON, "ancient_dragon species Dragon");
 assert_eq(VoicePreset_size(anc), T_4_0, "ancient_dragon size 4.0");
-assert_eq(VoicePreset_f0_offset(anc), f64_neg(f64_from(30)), "ancient_dragon f0_offset -30");
+assert_eq(VoicePreset_f0_offset(anc), pr_neg(pr_from(30)), "ancient_dragon f0_offset -30");
 assert_eq(VoicePreset_breathiness(anc), T_0_25, "ancient_dragon breathiness 0.25");
 
 var yng = preset_young_dragon();
@@ -224,13 +304,13 @@ assert_eq(VoicePreset_breathiness(yng), T_0_15, "young_dragon breathiness 0.15")
 var eagle = preset_bald_eagle();
 assert_eq(VoicePreset_species(eagle), PRANI_SP_RAPTOR, "bald_eagle species Raptor");
 assert_eq(VoicePreset_size(eagle), T_1_2, "bald_eagle size 1.2");
-assert_eq(VoicePreset_f0_offset(eagle), f64_neg(f64_from(200)), "bald_eagle f0_offset -200");
+assert_eq(VoicePreset_f0_offset(eagle), pr_neg(pr_from(200)), "bald_eagle f0_offset -200");
 assert_eq(VoicePreset_breathiness(eagle), T_0_1, "bald_eagle breathiness 0.1");
 
 var raven = preset_raven();
 assert_eq(VoicePreset_species(raven), PRANI_SP_CROW, "raven species Crow");
 assert_eq(VoicePreset_size(raven), T_1_3, "raven size 1.3");
-assert_eq(VoicePreset_f0_offset(raven), f64_neg(f64_from(100)), "raven f0_offset -100");
+assert_eq(VoicePreset_f0_offset(raven), pr_neg(pr_from(100)), "raven f0_offset -100");
 assert_eq(VoicePreset_breathiness(raven), T_0_2, "raven breathiness 0.2");
 
 var cricket = preset_field_cricket();
@@ -242,7 +322,7 @@ assert_eq(VoicePreset_breathiness(cricket), 0, "field_cricket breathiness 0.0");
 var gator = preset_alligator();
 assert_eq(VoicePreset_species(gator), PRANI_SP_CROCODILIAN, "alligator species Crocodilian");
 assert_eq(VoicePreset_size(gator), T_1_5, "alligator size 1.5");
-assert_eq(VoicePreset_f0_offset(gator), f64_neg(f64_from(10)), "alligator f0_offset -10");
+assert_eq(VoicePreset_f0_offset(gator), pr_neg(pr_from(10)), "alligator f0_offset -10");
 assert_eq(VoicePreset_breathiness(gator), T_0_18, "alligator breathiness 0.18");
 
 # ================================================================
@@ -270,12 +350,12 @@ test_group("preset_build -- species + effective_tract_scale + effective_f0");
 
 var v_alpha = preset_build(preset_alpha_wolf());
 assert_eq(crvoice_species(v_alpha), PRANI_SP_WOLF, "build alpha_wolf species Wolf");
-assert_eq(crvoice_effective_tract_scale(v_alpha), T_ETS_ALPHA_WOLF, "build alpha_wolf tract_scale 1.68");
+assert_real(crvoice_effective_tract_scale(v_alpha), T_ETS_ALPHA_WOLF, 1, "build alpha_wolf tract_scale 1.68");
 assert_eq(crvoice_effective_f0(v_alpha), T_EF0_ALPHA_WOLF, "build alpha_wolf effective_f0 228.57");
 
 var v_pup = preset_build(preset_wolf_pup());
 assert_eq(crvoice_species(v_pup), PRANI_SP_WOLF, "build wolf_pup species Wolf");
-assert_eq(crvoice_effective_tract_scale(v_pup), T_ETS_WOLF_PUP, "build wolf_pup tract_scale 0.48");
+assert_real(crvoice_effective_tract_scale(v_pup), T_ETS_WOLF_PUP, 1, "build wolf_pup tract_scale 0.48");
 assert_eq(crvoice_effective_f0(v_pup), T_EF0_WOLF_PUP, "build wolf_pup effective_f0 clamp 1200");
 
 var v_cat = preset_build(preset_house_cat());
@@ -305,12 +385,12 @@ assert_eq(crvoice_effective_f0(v_yng), T_EF0_YNG_DRAGON, "build young_dragon eff
 
 var v_eagle = preset_build(preset_bald_eagle());
 assert_eq(crvoice_species(v_eagle), PRANI_SP_RAPTOR, "build bald_eagle species Raptor");
-assert_eq(crvoice_effective_tract_scale(v_eagle), T_ETS_BALD_EAGLE, "build bald_eagle tract_scale 0.24");
+assert_real(crvoice_effective_tract_scale(v_eagle), T_ETS_BALD_EAGLE, 1, "build bald_eagle tract_scale 0.24");
 assert_eq(crvoice_effective_f0(v_eagle), T_EF0_BALD_EAGLE, "build bald_eagle effective_f0 clamp 2000");
 
 var v_raven = preset_build(preset_raven());
 assert_eq(crvoice_species(v_raven), PRANI_SP_CROW, "build raven species Crow");
-assert_eq(crvoice_effective_tract_scale(v_raven), T_ETS_RAVEN, "build raven tract_scale 0.39");
+assert_real(crvoice_effective_tract_scale(v_raven), T_ETS_RAVEN, 1, "build raven tract_scale 0.39");
 assert_eq(crvoice_effective_f0(v_raven), T_EF0_RAVEN, "build raven effective_f0 538.46");
 
 var v_cricket = preset_build(preset_field_cricket());
@@ -349,11 +429,11 @@ var zi = 0;
 while (zi < 8) { vec_push(zbuf, 0); zi = zi + 1; }
 assert_eq(t_all_finite(zbuf), 1, "control: all-zero buffer IS all-finite");
 assert_eq(vec_len(zbuf), 8, "control: all-zero buffer has the expected length");
-assert_eq(f64_gt(t_max_abs(zbuf), T_0_001), 0, "control: all-zero buffer FAILS the peak gate");
+assert_eq(pr_gt(t_max_abs(zbuf), T_0_001), 0, "control: all-zero buffer FAILS the peak gate");
 vec_set(zbuf, 3, T_1_0);
-assert_eq(f64_gt(t_max_abs(zbuf), T_0_001), 1, "control: t_max_abs sees a +1.0 sample");
-vec_set(zbuf, 3, f64_neg(T_1_0));
-assert_eq(f64_gt(t_max_abs(zbuf), T_0_001), 1, "control: t_max_abs sees a -1.0 sample (abs)");
+assert_eq(pr_gt(t_max_abs(zbuf), T_0_001), 1, "control: t_max_abs sees a +1.0 sample");
+vec_set(zbuf, 3, pr_neg(T_1_0));
+assert_eq(pr_gt(t_max_abs(zbuf), T_0_001), 1, "control: t_max_abs sees a -1.0 sample (abs)");
 vec_set(zbuf, 3, 0);
 vec_set(zbuf, 5, T_NAN);
 assert_eq(t_all_finite(zbuf), 0, "control: t_all_finite rejects NaN");
@@ -395,7 +475,7 @@ while (pi < n_presets) {
     } else {
         if (vec_len(buf) != 13230) { f_len = f_len + bit; bad = 1; }
         if (t_all_finite(buf) != 1) { f_fin = f_fin + bit; bad = 1; }
-        if (f64_gt(t_max_abs(buf), T_0_001) == 0) { f_amp = f_amp + bit; bad = 1; }
+        if (pr_gt(t_max_abs(buf), T_0_001) == 0) { f_amp = f_amp + bit; bad = 1; }
     }
     if (bad == 0) { n_ok = n_ok + 1; }
     bit = bit + bit;
@@ -503,9 +583,9 @@ assert_eq(t_pj_err(PRANI_SP_WOLF, T_INF, 0, 0), 1, "size +inf rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_NEG_INF, 0, 0), 1, "size -inf rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, 0, 0, 0), 1, "size 0.0 rejected (effective_f0 divides by size)");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_0_05, 0, 0), 1, "size 0.05 rejected (under the 0.1 floor)");
-assert_eq(t_pj_err(PRANI_SP_WOLF, f64_from(11), 0, 0), 1, "size 11.0 rejected (over the 10.0 ceiling)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, pr_from(11), 0, 0), 1, "size 11.0 rejected (over the 10.0 ceiling)");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_0_1, 0, 0), 0, "control: size 0.1 (the floor) accepted");
-assert_eq(t_pj_err(PRANI_SP_WOLF, f64_from(10), 0, 0), 0, "control: size 10.0 (the ceiling) accepted");
+assert_eq(t_pj_err(PRANI_SP_WOLF, pr_from(10), 0, 0), 0, "control: size 10.0 (the ceiling) accepted");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_4_0, 0, 0), 0, "control: size 4.0 (Ancient Dragon's) accepted");
 
 test_group("preset_from_json_str -- f0_offset range +/-(f0_max - f0_min), per species");
@@ -516,17 +596,17 @@ test_group("preset_from_json_str -- f0_offset range +/-(f0_max - f0_min), per sp
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, T_NAN, 0), 1, "f0_offset NaN rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, T_INF, 0), 1, "f0_offset +inf rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, T_NEG_INF, 0), 1, "f0_offset -inf rejected");
-assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_from(1051), 0), 1, "f0_offset +1051 rejected for Wolf (span 1050)");
-assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_neg(f64_from(1051)), 0), 1, "f0_offset -1051 rejected for Wolf");
-assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_from(3000), 0), 1, "f0_offset +3000 rejected for Wolf");
-assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_from(1050), 0), 0, "control: +1050 (the bound) ok for Wolf");
-assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, f64_neg(f64_from(1050)), 0), 0, "control: f0_offset -1050 accepted for Wolf");
-assert_eq(t_pj_err(PRANI_SP_CRICKET, T_1_0, f64_from(3000), 0), 0, "control: SAME +3000 ok for Cricket (span 5000)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, pr_from(1051), 0), 1, "f0_offset +1051 rejected for Wolf (span 1050)");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, pr_neg(pr_from(1051)), 0), 1, "f0_offset -1051 rejected for Wolf");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, pr_from(3000), 0), 1, "f0_offset +3000 rejected for Wolf");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, pr_from(1050), 0), 0, "control: +1050 (the bound) ok for Wolf");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, pr_neg(pr_from(1050)), 0), 0, "control: f0_offset -1050 accepted for Wolf");
+assert_eq(t_pj_err(PRANI_SP_CRICKET, T_1_0, pr_from(3000), 0), 0, "control: SAME +3000 ok for Cricket (span 5000)");
 
 test_group("preset_from_json_str -- breathiness range [0.0, 1.0]");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_NAN), 1, "breathiness NaN rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_INF), 1, "breathiness +inf rejected");
-assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, f64_neg(T_0_1)), 1, "breathiness -0.1 rejected");
+assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, pr_neg(T_0_1)), 1, "breathiness -0.1 rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_1_5), 1, "breathiness 1.5 rejected");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, 0), 0, "control: breathiness 0.0 (the floor) accepted");
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_1_0, 0, T_1_0), 0, "control: breathiness 1.0 (the ceiling) accepted");
@@ -561,15 +641,15 @@ test_group("preset_make / preset_build -- the constructor contract (2.2.0)");
 # builders' to clamp, as before; only the codec ranges every field.
 assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, T_NAN, 0, 0), PRANI_ERR_INVALID_SPECIES,
   "preset_make refuses a NaN size (2.1.2 stored it verbatim)");
-assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, F64_ONE, T_NAN, 0), PRANI_ERR_INVALID_SPECIES,
+assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, PR_ONE, T_NAN, 0), PRANI_ERR_INVALID_SPECIES,
   "and a NaN f0_offset");
-assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, F64_ONE, 0, T_NAN), PRANI_ERR_INVALID_SPECIES,
+assert_eq(preset_make("NaN Probe", PRANI_SP_WOLF, PR_ONE, 0, T_NAN), PRANI_ERR_INVALID_SPECIES,
   "and a NaN breathiness");
-assert_eq(preset_make("Bad Tag", PRANI_SP_COUNT, F64_ONE, 0, 0), PRANI_ERR_INVALID_SPECIES,
+assert_eq(preset_make("Bad Tag", PRANI_SP_COUNT, PR_ONE, 0, 0), PRANI_ERR_INVALID_SPECIES,
   "and an unknown species tag");
-var bigp = preset_make("Huge", PRANI_SP_WOLF, f64_from(100), 0, 0);
+var bigp = preset_make("Huge", PRANI_SP_WOLF, pr_from(100), 0, 0);
 assert_eq(prani_is_err(bigp), 0, "control: a finite out-of-range size still builds a preset");
-assert_eq(CreatureVoice_size_scale(preset_build(bigp)), f64_from(10), "control: and preset_build clamps it to 10");
+assert_eq(CreatureVoice_size_scale(preset_build(bigp)), pr_from(10), "control: and preset_build clamps it to 10");
 assert_eq(preset_build(PRANI_ERR_ALLOC), PRANI_ERR_ALLOC, "an error handle passes through preset_build");
 # ...and the codec refuses to produce that same preset from a document.
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_NAN, 0, 0), 1, "the codec will not build that preset from JSON");
@@ -603,7 +683,7 @@ while (je_i < 32) {
 store8(je_name + 31, 34);
 store8(je_name + 32, 92);
 store8(je_name + 33, 0);
-var je_p = preset_make(je_name, PRANI_SP_WOLF, F64_ONE, 0, 0);
+var je_p = preset_make(je_name, PRANI_SP_WOLF, PR_ONE, 0, 0);
 var je_sb = str_builder_new();
 preset_to_json(je_p, je_sb);
 var je_back = preset_from_json_str(str_data(str_builder_build(je_sb)));

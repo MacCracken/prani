@@ -7,10 +7,10 @@
 # f64_from, f64_clamp, f64_floor, f64_to) + error.cyr for PRANI_ERR_* and the
 # prani_is_* range helpers. The module file itself has no `include` lines.
 #
-# FLOATS: the Rust oracle was f32 throughout; the Cyrius port is f64. The
-# per-sample recurrences (alpha filter, interpolation) are therefore evaluated
-# in f64 -- strictly more precise than the f32 oracle. Tests lock parity to the
-# f64 result via hand-computed golden values.
+# FLOATS: a real is the build's float, f64 or f32 (ADR-0010), and the per-sample
+# recurrences (alpha filter, interpolation) run in it. Tests hold both builds to
+# hand-computed f64 golden values: the f64 build exactly, the f32 build within the
+# measured bound (1 ulp per sample, 2e-7 relative on an energy).
 #
 # `&[f32]` sample buffers -> stdlib vec handles (f64 in each slot); both
 # functions build and return a NEW vec (Rust returned `Vec<f32>`).
@@ -82,8 +82,16 @@
 # ================================================================
 # Float constants (IEEE-754 hex bit patterns; decimal in comment).
 # ================================================================
+# prani:real-source
+#ifdef PRANI_F32
+#ifdef PRANI_F32
+
+var PR_SP_0_02  = 0x3CA3D70A;           # 0.02   air-absorption distance coeff
+var PR_SP_0_9   = 0x3F666666;           # 0.9    Doppler velocity clamp fraction
+#else
 var PR_SP_0_02  = 0x3f947ae147ae147b;   # 0.02   air-absorption distance coeff
 var PR_SP_0_9   = 0x3feccccccccccccd;   # 0.9    Doppler velocity clamp fraction
+#endif
 
 # ================================================================
 # spatial_apply_distance_attenuation -- inverse-distance amplitude law plus a
@@ -117,21 +125,21 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
     if (prani_is_positive(reference_distance) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
 
-    var dist = f64_max(distance, reference_distance);
-    var gain = f64_div(reference_distance, dist);
+    var dist = pr_max(distance, reference_distance);
+    var gain = pr_div(reference_distance, dist);
 
     # cutoff = max(20000 / (1 + distance*0.02), 200)
-    var denom = f64_add(F64_ONE, f64_mul(dist, PR_SP_0_02));
-    var cutoff = f64_max(f64_div(f64_from(20000), denom), f64_from(200));
+    var denom = pr_add(PR_ONE, pr_mul(dist, PR_SP_0_02));
+    var cutoff = pr_max(pr_div(pr_from(20000), denom), pr_from(200));
 
-    var rc = f64_div(F64_ONE, f64_mul(F64_TAU, cutoff));
-    var dt = f64_div(F64_ONE, sample_rate);
+    var rc = pr_div(PR_ONE, pr_mul(PR_TAU, cutoff));
+    var dt = pr_div(PR_ONE, sample_rate);
     # `> 0` is not sufficient: a subnormal rate overflows the reciprocal
     # (measured, 5e-324 -> dt = +inf -> alpha = inf/inf = NaN -> a NaN buffer).
     # The bar is "1/sample_rate is finite", i.e. sample_rate >~ 5.6e-309;
     # checking the quotient states that without hardcoding the exponent.
     if (prani_is_finite(dt) == 0) { return PRANI_ERR_INVALID_TRACT; }
-    var alpha = f64_div(dt, f64_add(rc, dt));
+    var alpha = pr_div(dt, pr_add(rc, dt));
 
     var output = prani_vec_new();
     if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
@@ -141,7 +149,7 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
     while (i < n) {
         var s = vec_get(samples, i);
         # filtered = prev + alpha * (s*gain - prev)
-        var filtered = f64_add(prev, f64_mul(alpha, f64_sub(f64_mul(s, gain), prev)));
+        var filtered = pr_add(prev, pr_mul(alpha, pr_sub(pr_mul(s, gain), prev)));
         prev = filtered;
         if (prani_vec_push(output, filtered) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
@@ -198,15 +206,15 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     # would overflow anything.
     if (prani_is_finite(velocity) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
-    var speed = f64_from(343);
+    var speed = pr_from(343);
     # clamp bounds computed as the port would: 343 * 0.9 (= 308.7), negated.
-    var bound = f64_mul(speed, PR_SP_0_9);
-    var v = f64_clamp(velocity, f64_neg(bound), bound);
-    var ratio = f64_div(speed, f64_add(speed, v));
+    var bound = pr_mul(speed, PR_SP_0_9);
+    var v = pr_clamp(velocity, pr_neg(bound), bound);
+    var ratio = pr_div(speed, pr_add(speed, v));
 
     var len = vec_len(samples);
     # out_len = (len / ratio) as usize  -- len as f64, divide, truncate.
-    var out_len = f64_to(f64_div(f64_from(len), ratio));
+    var out_len = pr_to(pr_div(pr_from(len), ratio));
     # Moving away stretches a buffer up to 1.9x, so one past ~1.41e8 samples can
     # outgrow a vec. Refused before the first push, which would be a process exit.
     if (prani_buffer_len_ok(out_len) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -216,9 +224,9 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     var i = 0;
     while (i < out_len) {
         # src = i * ratio;  idx = trunc(src);  frac = src - idx
-        var src = f64_mul(f64_from(i), ratio);
-        var idx = f64_to(src);
-        var frac = f64_sub(src, f64_from(idx));
+        var src = pr_mul(pr_from(i), ratio);
+        var idx = pr_to(src);
+        var frac = pr_sub(src, pr_from(idx));
 
         var s0 = 0;
         if (idx < len) { s0 = vec_get(samples, idx); }
@@ -226,8 +234,11 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
         if ((idx + 1) < len) { s1 = vec_get(samples, idx + 1); }
 
         # s0 + (s1 - s0) * frac
-        if (prani_vec_push(output, f64_add(s0, f64_mul(f64_sub(s1, s0), frac))) < 0) { return PRANI_ERR_ALLOC; }
+        if (prani_vec_push(output, pr_add(s0, pr_mul(pr_sub(s1, s0), frac))) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
     return output;
 }
+
+# prani:real-source-end
+#endif

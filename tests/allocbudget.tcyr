@@ -44,30 +44,53 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/spatial.cyr"
+include "src/f64/spatial.cyr"
 include "src/emotion.cyr"
+include "src/f64/emotion.cyr"
 include "src/fatigue.cyr"
+include "src/f64/fatigue.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/preset.cyr"
+include "src/f64/preset.cyr"
 include "src/stream.cyr"
+include "src/f64/stream.cyr"
 include "src/ffi.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
+#ifdef PRANI_F32
+var AB_SR    = 0x472C4400;           # 44100.0
+var AB_D005  = 0x3D4CCCCD;           # 0.05 s
+var AB_D010  = 0x3DCCCCCD;           # 0.10 s
+var AB_VAL   = 0xBF000000;           # -0.5 valence
+var AB_ARO   = 0x3F4CCCCD;           # 0.8  arousal
+#else
 var AB_SR    = 0x40e5888000000000;   # 44100.0
 var AB_D005  = 0x3fa999999999999a;   # 0.05 s
 var AB_D010  = 0x3fb999999999999a;   # 0.10 s
 var AB_VAL   = 0xbfe0000000000000;   # -0.5 valence
 var AB_ARO   = 0x3fe999999999999a;   # 0.8  arousal
+#endif
 
 # ================================================================
 # PER-SAMPLE PATHS -- these must be exactly 0. Anything above zero here is
@@ -76,10 +99,10 @@ var AB_ARO   = 0x3fe999999999999a;   # 0.8  arousal
 test_group("budget: per-sample paths allocate nothing");
 
 var ab_dc = dcblocker_new();
-dcblocker_process(ab_dc, F64_ONE);          # warm
+dcblocker_process(ab_dc, PR_ONE);          # warm
 var ab_m0 = alloc_used();
 var ab_i = 0;
-while (ab_i < 1000) { dcblocker_process(ab_dc, F64_ONE); ab_i = ab_i + 1; }
+while (ab_i < 1000) { dcblocker_process(ab_dc, PR_ONE); ab_i = ab_i + 1; }
 assert_eq(alloc_used() - ab_m0, 0, "dcblocker_process: 0 B over 1000 samples");
 # control: the blocker really ran -- its state moved off the reset value
 assert_neq(DcBlocker_y_prev(ab_dc), 0, "control: dcblocker_process actually ran");
@@ -97,7 +120,7 @@ assert_eq(prani_is_finite(ab_seen), 1, "control: the rng actually produced value
 # allocate, or every assertion above is vacuous.
 ab_m0 = alloc_used();
 var ab_waste = vec_new();
-vec_push(ab_waste, F64_ONE);
+vec_push(ab_waste, PR_ONE);
 assert_gt(alloc_used() - ab_m0, 0, "control: alloc_used() detects a real allocation");
 
 # ================================================================
@@ -122,10 +145,10 @@ assert_eq(prani_is_err(ab_out), 0, "control: evaluate succeeded (not a fast erro
 # prani_ffi_voice_set_size is an RTPC a host may call every frame, per creature.
 # 2.0.3's F7 took it from 168 B/call to 0 by rebuilding in place; this pins it.
 var ab_fv = prani_ffi_voice_create(0);
-prani_ffi_voice_set_size(ab_fv, F64_ONE);
+prani_ffi_voice_set_size(ab_fv, PR_ONE);
 ab_m0 = alloc_used();
 ab_i = 0;
-while (ab_i < 100) { prani_ffi_voice_set_size(ab_fv, F64_ONE); ab_i = ab_i + 1; }
+while (ab_i < 100) { prani_ffi_voice_set_size(ab_fv, PR_ONE); ab_i = ab_i + 1; }
 assert_eq((alloc_used() - ab_m0) / 100, 0, "ffi_voice_set_size: 0 B/call (2.0.3 F7 holds)");
 assert_neq(ab_fv, 0, "control: the FFI voice handle is real");
 
@@ -135,7 +158,7 @@ assert_neq(ab_fv, 0, "control: the FFI voice handle is real");
 # ================================================================
 test_group("budget: stream_fill_buffer, the audio-callback path");
 
-var ab_st = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
+var ab_st = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, PR_ONE);
 var ab_buf = vec_new();
 prani_vec_push_zeros(ab_buf, 512);
 stream_fill_buffer(ab_st, ab_buf);          # warm (2.2.1: stream_new builds the tract)
@@ -152,7 +175,7 @@ var ab_fill = (alloc_used() - ab_m0) / 10;
 # 2.0.9. The bar is that one source, measured here: prani's own share is 0 B, so
 # any byte prani adds fails, while svara resizing its source moves the bar.
 ab_m0 = alloc_used();
-var ab_gs = svara_glottal_new(f64_from(400), AB_SR);
+var ab_gs = svara_glottal_new(f64_from(400), pr_to64(AB_SR));
 var ab_glottal = alloc_used() - ab_m0;
 assert_eq(svara_is_err(ab_gs), 0, "control: the reference svara_glottal_new built a source");
 assert_gt(ab_glottal, 0, "control: and it allocated, so the bar below is not 0");
@@ -161,7 +184,7 @@ assert_eq(stream_samples_rendered(ab_st) > 512, 1, "control: the fills actually 
 # The FIRST fill is a callback too. Through 2.2.0 it built the tract (10,504 B at
 # 2.2.0); 2.2.1 builds the tract and sizes the block in stream_new, so the first
 # fill costs what every later one does.
-var ab_st1 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
+var ab_st1 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, PR_ONE);
 ab_m0 = alloc_used();
 var ab_n1 = stream_fill_buffer(ab_st1, ab_buf);
 assert_lte(alloc_used() - ab_m0, ab_glottal, "the first fill: <= one svara_glottal_new as well");
@@ -198,7 +221,7 @@ test_group("budget: 2.2.0's allocation-free paths");
 
 # A cat-purr stream rendered each fill through the ALLOCATING crtract_synthesize_purr:
 # a fresh vec per callback, 8,088 B at 512 samples, measured on 2.1.2.
-var ab_cp = stream_new(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
+var ab_cp = stream_new(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, PRANI_INTENT_IDLE, AB_SR, PR_ONE);
 stream_fill_buffer(ab_cp, ab_buf);          # warm
 ab_m0 = alloc_used();
 ab_i = 0;
@@ -225,13 +248,13 @@ assert_eq(ab_sv, 100, "control: and it answered every call");
 # one-off contour and its storage, not by a per-block term.
 var ab_hw = crvoice_new(PRANI_SP_WOLF);
 var ab_gw = crvoice_new(PRANI_SP_WOLF);
-crvoice_vocalize(ab_hw, PRANI_VOC_HOWL, AB_SR, F64_ONE);
-crvoice_vocalize(ab_gw, PRANI_VOC_GROWL, AB_SR, F64_ONE);
+crvoice_vocalize(ab_hw, PRANI_VOC_HOWL, AB_SR, PR_ONE);
+crvoice_vocalize(ab_gw, PRANI_VOC_GROWL, AB_SR, PR_ONE);
 ab_m0 = alloc_used();
-var ab_howl_out = crvoice_vocalize(ab_hw, PRANI_VOC_HOWL, AB_SR, F64_ONE);
+var ab_howl_out = crvoice_vocalize(ab_hw, PRANI_VOC_HOWL, AB_SR, PR_ONE);
 var ab_howl = alloc_used() - ab_m0;
 ab_m0 = alloc_used();
-var ab_growl_out = crvoice_vocalize(ab_gw, PRANI_VOC_GROWL, AB_SR, F64_ONE);
+var ab_growl_out = crvoice_vocalize(ab_gw, PRANI_VOC_GROWL, AB_SR, PR_ONE);
 var ab_growl = alloc_used() - ab_m0;
 assert_lte(ab_howl - ab_growl, 2048, "a 1 s howl costs at most 2 KB more than a growl (22,416 more at 2.1.2; 776 now)");
 assert_eq(vec_len(ab_howl_out), 44100, "control: the howl rendered a second");
@@ -258,7 +281,7 @@ assert_eq(PrEmotionOut_vocal_effort(ab_eo), PrEmotionOut_vocal_effort(ab_eref), 
 assert_eq(PrEmotionOut_pitch_scale(ab_eo), PrEmotionOut_pitch_scale(ab_eref), "pitch scale too");
 
 var ab_fs = fatigue_new();
-fatigue_record_call(ab_fs, F64_ONE, 0);
+fatigue_record_call(ab_fs, PR_ONE, 0);
 var ab_fo = fatigue_modifiers(ab_fs);
 ab_m0 = alloc_used();
 ab_i = 0;
@@ -271,17 +294,17 @@ assert_eq(alloc_used() - ab_m0, 0, "fatigue_modifiers_into: 0 B/call (fatigue_mo
 assert_eq(ab_fok, 1, "control: each call returned the caller's struct");
 assert_neq(FatigueModifiers_pitch_offset(ab_fo), 0, "control: the state was fatigued, so the offset is real");
 
-var ab_po = bridge_perturbation_from_urgency(F64_HALF);
+var ab_po = bridge_perturbation_from_urgency(PR_HALF);
 ab_m0 = alloc_used();
 ab_i = 0;
 var ab_pok = 1;
 while (ab_i < 100) {
-    if (bridge_perturbation_from_urgency_into(F64_HALF, ab_po) != ab_po) { ab_pok = 0; }
+    if (bridge_perturbation_from_urgency_into(PR_HALF, ab_po) != ab_po) { ab_pok = 0; }
     ab_i = ab_i + 1;
 }
 assert_eq(alloc_used() - ab_m0, 0, "bridge_perturbation_from_urgency_into: 0 B/call (the allocating form keeps 16)");
 assert_eq(ab_pok, 1, "control: each call returned the caller's struct");
-assert_eq(PrPerturbation_jitter_scale(ab_po), 0x3FFC000000000000, "control: jitter 1 + 0.5 x 1.5 = 1.75");
+assert_eq(PrPerturbation_jitter_scale(ab_po), pr_of64(0x3FFC000000000000), "control: jitter 1 + 0.5 x 1.5 = 1.75");
 
 var rc = assert_summary();
 syscall(60, rc);

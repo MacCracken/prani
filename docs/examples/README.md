@@ -4,9 +4,19 @@ Five worked programs. **CI builds and runs every one on each push**
 (`scripts/run-examples.sh`), so they cannot rot against the API.
 
 ```sh
-sh scripts/run-examples.sh                 # all five
+sh scripts/run-examples.sh                         # all five, f64 build
+PRANI_FORMAT=f32 sh scripts/run-examples.sh        # all five, f32 build
 cyrius build docs/examples/basic.cyr build/examples/basic && ./build/examples/basic
+cyrius build -D PRANI_F32 docs/examples/basic.cyr build/examples/basic32
 ```
+
+**They are written for either float format** ([ADR-0010](../adr/0010-two-float-formats.md)).
+Their arithmetic is the `pr_*` primitives (`pr_from(44100)`, `pr_div`, `pr_lt`),
+their constants are `#ifdef PRANI_F32` pairs, and what they print is widened with
+`pr_to64` for `fmt_float`. So the same file builds in the f64 build and, under
+`-D PRANI_F32`, in the f32 build, and CI runs both. A call into svara directly (the
+streaming example's allocation reference) widens its arguments, because svara is f64
+in both.
 
 Each example includes the dependency bundles and **`dist/prani.cyr`** — the
 published bundle — rather than `src/*.cyr`. That is deliberate: building them

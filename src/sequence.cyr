@@ -19,6 +19,9 @@
 # #derive(Serialize); CallPhrase's element vec hand-rolled (see below). Display
 # tests dropped (no Display in Cyrius).
 
+# prani:real-source
+#ifdef PRANI_F32
+
 var PRANI_CHORUS_PRIME = 7919;   # seed multiplier for chorus RNG (voices.len * 7919)
 
 # ================================================================
@@ -70,7 +73,7 @@ var PRANI_SEQ_MAX_SAMPLES = 16777216;
 # A duration, a gap, an inter-call interval and a timing spread share it.
 #must_use
 fn prani_seq_seconds_ok(x) {
-    return prani_in_range(x, 0, f64_from(PRANI_SEQ_MAX_SECONDS));
+    return prani_in_range(x, 0, pr_from(PRANI_SEQ_MAX_SECONDS));
 }
 
 # 1 iff `samples` -- an f64 SAMPLE COUNT, not seconds -- is within the
@@ -80,7 +83,7 @@ fn prani_seq_seconds_ok(x) {
 # back the per-call buffers a bout or a chorus leaves behind.
 #must_use
 fn prani_seq_samples_ok(samples) {
-    return prani_in_range(samples, 0, f64_from(PRANI_SEQ_MAX_SAMPLES));
+    return prani_in_range(samples, 0, pr_from(PRANI_SEQ_MAX_SAMPLES));
 }
 
 # 1 iff `n` syntheses may be driven from one entry-point call: [0, MAX_COUNT].
@@ -102,6 +105,58 @@ fn prani_seq_count_ok(n) {
 # TYPED i64 for #derive(Serialize) → auto CallElement_to_json / _from_json_str.
 # f64 fields (duration/gap) are typed i64 so their exact bit patterns serialize
 # losslessly (the derive's 6-digit float writer would lose precision).
+#ifdef PRANI_F32
+#derive(accessors)
+struct CallElement {
+    vocalization: i64;
+    duration: i64;
+    gap: i64;
+}
+
+# Pr64CallElement -- CallElement as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of CallElement's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64CallElement {
+    vocalization: i64;
+    duration: i64;
+    gap: i64;
+}
+
+# CallElement_to_json(self, sb) -- the f64 build's document for this CallElement: each real widened,
+# which is exact (ADR-0010).
+fn CallElement_to_json(self, sb) {
+    var w[24];
+    Pr64CallElement_set_vocalization(&w, CallElement_vocalization(self));
+    Pr64CallElement_set_duration(&w, pr_to64(CallElement_duration(self)));
+    Pr64CallElement_set_gap(&w, pr_to64(CallElement_gap(self)));
+    return Pr64CallElement_to_json(&w, sb);
+}
+
+# pr64_call_element_narrow(w) -- a new CallElement from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_call_element_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(CallElement));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    CallElement_set_vocalization(self, Pr64CallElement_vocalization(w));
+    CallElement_set_duration(self, pr_of64(Pr64CallElement_duration(w)));
+    CallElement_set_gap(self, pr_of64(Pr64CallElement_gap(w)));
+    return self;
+}
+
+# CallElement_from_json_str(json) -- CallElement from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn CallElement_from_json_str(json) {
+    return pr64_call_element_narrow(Pr64CallElement_from_json_str(json));
+}
+
+# CallElement_from_json(pairs) -- the pairs form, likewise.
+fn CallElement_from_json(pairs) {
+    return pr64_call_element_narrow(Pr64CallElement_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct CallElement {
@@ -109,6 +164,7 @@ struct CallElement {
     duration: i64;
     gap: i64;
 }
+#endif
 
 # call_element_new(vocalization, duration, gap) -- one element of a CallPhrase:
 # which vocalization to utter, for how long, and how much silence follows it.
@@ -142,6 +198,66 @@ fn sequence_call_element_new(vocalization, duration, gap) {
 # ================================================================
 # TYPED i64 for #derive(Serialize) → auto CallBout_to_json / _from_json_str.
 # f64 fields (call_duration/interval) typed i64 → exact bit-pattern serialization.
+#ifdef PRANI_F32
+#derive(accessors)
+struct CallBout {
+    vocalization: i64;
+    count: i64;
+    call_duration: i64;
+    interval: i64;
+    intent: i64;
+}
+
+# Pr64CallBout -- CallBout as its JSON document holds it, every real an f64 bit pattern, in both
+# builds (ADR-0010). Its derived encoder and decoders do the work of CallBout's below, so
+# the f32 build reads and writes exactly the f64 build's documents.
+#derive(accessors)
+#derive(Serialize)
+struct Pr64CallBout {
+    vocalization: i64;
+    count: i64;
+    call_duration: i64;
+    interval: i64;
+    intent: i64;
+}
+
+# CallBout_to_json(self, sb) -- the f64 build's document for this CallBout: each real widened,
+# which is exact (ADR-0010).
+fn CallBout_to_json(self, sb) {
+    var w[40];
+    Pr64CallBout_set_vocalization(&w, CallBout_vocalization(self));
+    Pr64CallBout_set_count(&w, CallBout_count(self));
+    Pr64CallBout_set_call_duration(&w, pr_to64(CallBout_call_duration(self)));
+    Pr64CallBout_set_interval(&w, pr_to64(CallBout_interval(self)));
+    Pr64CallBout_set_intent(&w, CallBout_intent(self));
+    return Pr64CallBout_to_json(&w, sb);
+}
+
+# pr64_call_bout_narrow(w) -- a new CallBout from the document form w, each real rounded once to
+# f32; w passed through when it is not a struct.
+fn pr64_call_bout_narrow(w) {
+    if (w <= 0) { return w; }
+    var self = prani_alloc(sizeof(CallBout));
+    if (self < 0) { return self; }   # PRANI_ERR_ALLOC (ADR-0008)
+    CallBout_set_vocalization(self, Pr64CallBout_vocalization(w));
+    CallBout_set_count(self, Pr64CallBout_count(w));
+    CallBout_set_call_duration(self, pr_of64(Pr64CallBout_call_duration(w)));
+    CallBout_set_interval(self, pr_of64(Pr64CallBout_interval(w)));
+    CallBout_set_intent(self, Pr64CallBout_intent(w));
+    return self;
+}
+
+# CallBout_from_json_str(json) -- CallBout from any build's document: the f64 build's derived
+# decoder, then each real rounded once to f32 (ADR-0010).
+fn CallBout_from_json_str(json) {
+    return pr64_call_bout_narrow(Pr64CallBout_from_json_str(json));
+}
+
+# CallBout_from_json(pairs) -- the pairs form, likewise.
+fn CallBout_from_json(pairs) {
+    return pr64_call_bout_narrow(Pr64CallBout_from_json(pairs));
+}
+#else
 #derive(accessors)
 #derive(Serialize)
 struct CallBout {
@@ -151,6 +267,7 @@ struct CallBout {
     interval: i64;
     intent: i64;
 }
+#endif
 
 # call_bout_new(vocalization, count, call_duration, interval, intent) -- a bout
 # is the same vocalization repeated `count` times with `interval` seconds of
@@ -206,11 +323,11 @@ fn sequence_call_bout_synthesize(self, voice, sample_rate) {
     # an interval per call refused a valid one-call bout with a long interval.
     var gaps = count - 1;
     if (gaps < 0) { gaps = 0; }
-    var want = f64_mul(f64_add(f64_mul(call_duration, f64_from(count)), f64_mul(interval, f64_from(gaps))),
+    var want = pr_mul(pr_add(pr_mul(call_duration, pr_from(count)), pr_mul(interval, pr_from(gaps))),
       sample_rate);
     if (prani_seq_samples_ok(want) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
-    var gap_samples = f64_to(f64_mul(interval, sample_rate));
+    var gap_samples = pr_to(pr_mul(interval, sample_rate));
     var output = prani_vec_new();
     if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
     var i = 0;
@@ -330,8 +447,8 @@ fn sequence_call_phrase_from_json_str(json) {
         # The duration/gap ranges are the constructor's, reused rather than
         # restated, so the codec and the builder can never disagree.
         var e = sequence_call_element_new(voc,
-          bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "duration")),
-          bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "gap")));
+          pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "duration"))),
+          pr_of64(bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "gap"))));
         # A refused allocation is not a bad document: report it as itself.
         if (e == PRANI_ERR_ALLOC) { return e; }
         if (prani_is_err(e) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -364,10 +481,10 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
         if (el <= 0) { return prani_handle_code(el, PRANI_ERR_INVALID_VOCALIZATION); }
         if (prani_seq_seconds_ok(CallElement_duration(el)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
         if (prani_seq_seconds_ok(CallElement_gap(el)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-        want = f64_add(want, f64_add(CallElement_duration(el), CallElement_gap(el)));
+        want = pr_add(want, pr_add(CallElement_duration(el), CallElement_gap(el)));
         k = k + 1;
     }
-    if (prani_seq_samples_ok(f64_mul(want, sample_rate)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_seq_samples_ok(pr_mul(want, sample_rate)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     var output = prani_vec_new();
     if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
@@ -381,7 +498,7 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
         if (prani_is_err(ext_rc) == 1) { return ext_rc; }
         # Unreachable after the pre-pass (gap >= 0, sample_rate > 0); checked so
         # a future path in reports rather than appending nothing in silence.
-        var gap_rc = prani_vec_push_zeros(output, f64_to(f64_mul(CallElement_gap(element), sample_rate)));
+        var gap_rc = prani_vec_push_zeros(output, pr_to(pr_mul(CallElement_gap(element), sample_rate)));
         if (prani_is_err(gap_rc) == 1) { return gap_rc; }
         i = i + 1;
     }
@@ -419,13 +536,13 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
     # half, an ALARM one (x0.7) ended in 30% silence. The oracle had the same.
     var scale_mods = prani_intent_modifiers(intent);
     if (prani_is_err(scale_mods) == 1) { return scale_mods; }
-    var call_seconds = f64_mul(duration, IntentModifiers_duration_scale(scale_mods));
-    var span = f64_add(call_seconds, f64_mul(f64_from(2), timing_spread));
-    var want = f64_mul(f64_mul(span, f64_from(voice_count)), sample_rate);
+    var call_seconds = pr_mul(duration, IntentModifiers_duration_scale(scale_mods));
+    var span = pr_add(call_seconds, pr_mul(pr_from(2), timing_spread));
+    var want = pr_mul(pr_mul(span, pr_from(voice_count)), sample_rate);
     if (prani_seq_samples_ok(want) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
-    var max_offset_samples = f64_to(f64_mul(timing_spread, sample_rate));
-    var base_samples = f64_to(f64_mul(call_seconds, sample_rate));
+    var max_offset_samples = pr_to(pr_mul(timing_spread, sample_rate));
+    var base_samples = pr_to(pr_mul(call_seconds, sample_rate));
     # total length includes the spread for late-starting voices. Both terms are
     # now non-negative and bounded by MAX_SAMPLES, so the sum cannot overflow.
     var total_len = base_samples + max_offset_samples * 2;
@@ -456,7 +573,7 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
         while (i < m) {
             var idx = offset + i;
             if (idx < total_len) {
-                vec_set(mix, idx, f64_add(vec_get(mix, idx), vec_get(call, i)));
+                vec_set(mix, idx, pr_add(vec_get(mix, idx), vec_get(call, i)));
             }
             i = i + 1;
         }
@@ -464,7 +581,10 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
     }
 
     # normalize by 1/sqrt(voice_count) to prevent clipping
-    var scale = f64_div(F64_ONE, f64_sqrt(f64_from(voice_count)));
+    var scale = pr_div(PR_ONE, pr_sqrt(pr_from(voice_count)));
     prani_vec_scale(mix, scale);
     return mix;
 }
+
+# prani:real-source-end
+#endif

@@ -41,19 +41,29 @@ Synthesize a wolf howl (Cyrius):
 ```
 # a fresh Wolf voice → a 2-second howl at 44.1 kHz
 var voice = crvoice_new(PRANI_SP_WOLF);
-var samples = crvoice_vocalize(voice, PRANI_VOC_HOWL, f64_from(44100), f64_from(2));
-# samples is a vec of f64 (or a negative PRANI_ERR_* on failure)
+var samples = crvoice_vocalize(voice, PRANI_VOC_HOWL, pr_from(44100), pr_from(2));
+# samples is a vec of reals (or a negative PRANI_ERR_* on failure)
 
 # a preset character with a territorial intent
 var alpha = preset_build(preset_alpha_wolf());
-var call = crvoice_vocalize_with_intent(alpha, PRANI_VOC_HOWL, PRANI_INTENT_TERRITORIAL, f64_from(44100), f64_from(3));
+var call = crvoice_vocalize_with_intent(alpha, PRANI_VOC_HOWL, PRANI_INTENT_TERRITORIAL, pr_from(44100), pr_from(3));
 
 # a wolf-pack chorus
 var pack = vec_new();
 vec_push(pack, crvoice_new(PRANI_SP_WOLF));
 vec_push(pack, crvoice_new(PRANI_SP_WOLF));
-var chorus = sequence_synthesize_chorus(pack, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_from(44100), f64_from(3), F64_HALF);
+var chorus = sequence_synthesize_chorus(pack, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, pr_from(44100), pr_from(3), PR_HALF);
 ```
+
+**Two float formats** ([ADR-0010](docs/adr/0010-two-float-formats.md)). A *real* is
+prani's float: an f64 by default, or an f32 when the build defines `PRANI_F32`
+(`defines = ["PRANI_F32"]` in your `[build]`, or `-D PRANI_F32`). Every prani value
+follows the choice: samples, rates, durations, parameters. Write your own arithmetic
+over `pr_*` (`pr_mul`, `pr_from`, `pr_of64` for an f64 literal) and it builds in
+either. The f64 build is 2.2.1's arithmetic, bit for bit. The f32 build is held to
+it for accuracy: render levels within a relative 1e-6, single computations within
+an ulp or two. JSON documents carry f64 bit patterns in both, so one build reads the
+other's.
 
 Every constructor returns a negative `PRANI_ERR_*` on failure, including
 `PRANI_ERR_ALLOC` for a refused allocation (2.2.0), and every renderer passes an

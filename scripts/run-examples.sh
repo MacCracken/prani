@@ -17,7 +17,15 @@
 set -eu
 
 EX_DIR="${EX_DIR:-docs/examples}"
-OUT_DIR="${OUT_DIR:-build/examples}"
+# The float format to build them in (ADR-0010): f64, the default, or f32, which
+# builds with -D PRANI_F32 as a consumer's [build] defines would. CI runs both.
+PRANI_FORMAT="${PRANI_FORMAT:-f64}"
+case "$PRANI_FORMAT" in
+    f64) FMT_FLAGS="" ;;
+    f32) FMT_FLAGS="-D PRANI_F32" ;;
+    *) echo "error: PRANI_FORMAT must be f64 or f32, not '$PRANI_FORMAT'" >&2; exit 1 ;;
+esac
+OUT_DIR="${OUT_DIR:-build/examples/$PRANI_FORMAT}"
 # The examples docs/examples/README.md documents. Each must be present: through
 # 2.2.0 the script failed only on finding none, so a deleted or renamed example
 # left the gate green (audit D11, 2026-11-17). An extra example is built too.
@@ -51,7 +59,7 @@ for src in "$EX_DIR"/*.cyr; do
 
     name=$(basename "$src" .cyr)
     bin="$OUT_DIR/$name"
-    printf '── %s\n' "$name"
+    printf '── %s (%s)\n' "$name" "$PRANI_FORMAT"
 
     # `cyrius audit` formats and lints src/, tests/ and benches/ only, and through
     # 2.2.0 two examples had drifted from cyrfmt and one carried two over-long
@@ -71,7 +79,10 @@ for src in "$EX_DIR"/*.cyr; do
         continue
     fi
 
-    if cyr build "$src" "$bin" >"$OUT_DIR/$name.build.log" 2>&1; then
+    # $FMT_FLAGS is empty or one -D flag: unquoted on purpose, so it splits into
+    # nothing or two words.
+    # shellcheck disable=SC2086
+    if cyr build $FMT_FLAGS "$src" "$bin" >"$OUT_DIR/$name.build.log" 2>&1; then
         if "$bin"; then
             printf '   ok\n'
         else

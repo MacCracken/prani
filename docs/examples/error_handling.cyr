@@ -40,15 +40,21 @@ include "dist/prani.cyr"
 #   EX_SR_44100  44100.0 Hz  the rate to use unless the example is about rates
 #   EX_SR_1200    1200.0 Hz  svara's floor, exactly
 #   EX_DUR_005      0.05 s   long enough to be real audio, short enough to stay instant
+#ifdef PRANI_F32
+var EX_SR_44100 = 0x472C4400;
+var EX_SR_1200  = 0x44960000;
+var EX_DUR_005  = 0x3D4CCCCD;
+#else
 var EX_SR_44100 = 0x40e5888000000000;
 var EX_SR_1200  = 0x4092c00000000000;
 var EX_DUR_005  = 0x3fa999999999999a;
+#endif
 
 # The two ways to build a non-finite f64 in Cyrius, since there is no NaN
 # literal either. Both are refused by section 4 -- that is the point of having
 # them here rather than only in a comment.
-fn ex_nan()     { return f64_div(0, 0); }               # 0/0
-fn ex_pos_inf() { return f64_div(f64_from(1), 0); }     # 1/0
+fn ex_nan()     { return pr_div(0, 0); }               # 0/0
+fn ex_pos_inf() { return pr_div(pr_from(1), 0); }     # 1/0
 
 # The same VoicePreset document twice, differing in ONE field. prani's codec
 # writes f64 fields as their exact i64 BIT PATTERN rather than as a decimal, so
@@ -311,7 +317,7 @@ fn main() {
       PRANI_ERR_SVARA);
     # One Hz higher is the whole difference: 0.05 s * 1201 truncates to 60.
     ex_call("crvoice_vocalize(wolf, HOWL, 1201.0, 0.05)   <- one Hz higher");
-    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, f64_from(1201), EX_DUR_005), 60);
+    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, pr_from(1201), EX_DUR_005), 60);
     ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, 0.05)");
     ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, EX_DUR_005), 2205);
 
@@ -360,7 +366,7 @@ fn main() {
     println("what makes the rejections above meaningful rather than blanket:");
     println("");
 
-    var lion = crvoice_with_size(crvoice_new(PRANI_SP_LION), f64_from(3));
+    var lion = crvoice_with_size(crvoice_new(PRANI_SP_LION), pr_from(3));
     if (prani_is_err(lion) == 1) {
         println("building the lion failed -- nothing below would mean anything");
         return 1;
@@ -382,9 +388,9 @@ fn main() {
     # =========================================================================
     ex_section("4. A number that is not a number, or is out of range  (ADR-0006)");
     # =========================================================================
-    println("f64_clamp(NaN, lo, hi) is NaN: every comparison against NaN is");
+    println("pr_clamp(NaN, lo, hi) is NaN: every comparison against NaN is");
     println("false, so NaN walks through every clamp in the tree untouched. And");
-    println("f64_to(NaN) is 0, so a sample count derived from one looks legal");
+    println("pr_to(NaN) is 0, so a sample count derived from one looks legal");
     println("and the render loop simply never runs. Measured before 2.0.5: one");
     println("of those returned a full-length all-NaN buffer as a success, the");
     println("other an empty one. Both are now refused at the entry point,");
@@ -395,16 +401,16 @@ fn main() {
     println("rejected sample rate is INVALID_TRACT.");
     println("");
 
-    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, f64_div(0, 0))          <- NaN s");
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, pr_div(0, 0))          <- NaN s");
     ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, ex_nan()),
       PRANI_ERR_INVALID_VOCALIZATION);
-    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, f64_div(f64_from(1), 0)) <- +inf s");
+    ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, pr_div(pr_from(1), 0)) <- +inf s");
     ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, ex_pos_inf()),
       PRANI_ERR_INVALID_VOCALIZATION);
     ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, -0.05)                  <- negative s");
-    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, f64_neg(EX_DUR_005)),
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, pr_neg(EX_DUR_005)),
       PRANI_ERR_INVALID_VOCALIZATION);
-    ex_call("crvoice_vocalize(wolf, HOWL, f64_div(0, 0), 0.05)             <- NaN Hz");
+    ex_call("crvoice_vocalize(wolf, HOWL, pr_div(0, 0), 0.05)             <- NaN Hz");
     ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, ex_nan(), EX_DUR_005),
       PRANI_ERR_INVALID_TRACT);
 
@@ -432,10 +438,10 @@ fn main() {
     println("");
     ex_put("    ");
     println(EX_PRESET_OK);
-    println("        size = 4608983858650965606 = 0x3ff6666666666666 =  1.4");
+    println("        size = 4608983858650965606 = pr_of64(0x3ff6666666666666) =  1.4");
     ex_put("    ");
     println(EX_PRESET_BIG);
-    println("        size = 4626322717216342016 = 0x4034000000000000 = 20.0");
+    println("        size = 4626322717216342016 = pr_of64(0x4034000000000000) = 20.0");
     println("");
 
     ex_call("preset_from_json_str(... \"size\": 1.4 ...)");

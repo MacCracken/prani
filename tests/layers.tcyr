@@ -26,29 +26,58 @@ include "lib/hisab.cyr"
 include "lib/goonj.cyr"
 include "lib/naad.cyr"
 include "lib/svara.cyr"
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
+include "src/f64/rng.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
 include "src/spatial.cyr"
+include "src/f64/spatial.cyr"
 include "src/vocalization.cyr"
 include "src/fatigue.cyr"
+include "src/f64/fatigue.cyr"
 include "src/emotion.cyr"
+include "src/f64/emotion.cyr"
 include "src/sequence.cyr"
+include "src/f64/sequence.cyr"
 include "src/species.cyr"
+include "src/f64/species.cyr"
 include "src/bridge.cyr"
+include "src/f64/bridge.cyr"
 include "src/tract.cyr"
+include "src/f64/tract.cyr"
 include "src/voice.cyr"
+include "src/f64/voice.cyr"
 include "src/preset.cyr"
+include "src/f64/preset.cyr"
 include "src/stream.cyr"
+include "src/f64/stream.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
+#ifdef PRANI_F32
+var LV_SR = 0x472C4400;            # 44100.0
+var LV_D = 0x3DCCCCCD;             # 0.1 s
+var LV_D2 = 0x3E4CCCCD;            # 0.2 s: past the cricket's 4 syllables, into its silence
+var LV_E09 = 0x3F666666;           # effort 0.9
+#else
 var LV_SR = 0x40e5888000000000;    # 44100.0
 var LV_D = 0x3FB999999999999A;     # 0.1 s
 var LV_D2 = 0x3FC999999999999A;    # 0.2 s: past the cricket's 4 syllables, into its silence
 var LV_E09 = 0x3FECCCCCCCCCCCCD;   # effort 0.9
-var LV_TOL = 0x3E112E0BE826D695;   # 1e-9, relative
+#endif
+# The levels are the f64 build's, recorded in f64, and both builds are held to them
+# (ADR-0010): the f64 build within a relative 1e-9, as since 2.2.1, and the f32 build
+# within the bound measured for it.
+var LV_TOL64 = 0x3E112E0BE826D695;   # 1e-9, relative
+# f32: measured 7.7e-9 .. 6.4e-7 across the 15 (2.3.0; the stream howl is the largest).
+# At 1e-6 the f32 run is an accuracy gate, not the mutant catcher: the fire-breath
+# moves the dragon's roar by about 1e-6, which only the f64 run's 1e-9 can see.
+var LV_TOL = t_per(LV_TOL64, 0x3EB0C6F7A0B5ED8D);   # f32: 1e-6, relative
 
 # lv_rms(v) -- root-mean-square of a vec.
 fn lv_rms(v) {
@@ -56,7 +85,7 @@ fn lv_rms(v) {
     var acc = 0;
     var i = 0;
     while (i < n) {
-        var x = vec_get(v, i);
+        var x = pr_to64(vec_get(v, i));
         acc = f64_add(acc, f64_mul(x, x));
         i = i + 1;
     }
@@ -88,7 +117,8 @@ fn lv_chorus() {
         vec_push(vs, crvoice_new(PRANI_SP_WOLF));
         k = k + 1;
     }
-    return sequence_synthesize_chorus(vs, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, LV_SR, LV_D, 0x3F847AE147AE147B);
+    var TL_LAYE_113_0 = pr_of64(0x3F847AE147AE147B);
+    return sequence_synthesize_chorus(vs, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, LV_SR, LV_D, TL_LAYE_113_0);
 }
 
 # lv_pin(name, v, n, rms_ref) -- the render is n samples and its RMS is within a
@@ -99,7 +129,7 @@ fn lv_pin(name, v, n, rms_ref) {
     if (prani_is_err(v) == 1) { return 0; }
     assert_eq(vec_len(v), n, "at the recorded length");
     var rel = f64_abs(f64_sub(f64_div(lv_rms(v), rms_ref), F64_ONE));
-    assert_eq(f64_le(rel, LV_TOL), 1, "its RMS is the recorded level, within a relative 1e-9");
+    assert_eq(f64_le(rel, LV_TOL), 1, "its RMS is the recorded level, within a relative 1e-9 (f32: 1e-6)");
     return 0;
 }
 

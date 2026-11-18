@@ -28,25 +28,39 @@ output = "build/prani"
 # separate module, same as svara/naad.
 modules = [
     # L0 foundations (no internal deps)
+    "src/real.cyr",      # the float format (ADR-0010): f64, or f32 under PRANI_F32
     "src/error.cyr",
+    "src/f64/error.cyr",   # its f64 build (generated, ADR-0010)
     "src/logging.cyr",   # sakshi-backed structured logging (tracing replacement)
     "src/rng.cyr",
+    "src/f64/rng.cyr",   # its f64 build (generated, ADR-0010)
     "src/dsp.cyr",
+    "src/f64/dsp.cyr",   # its f64 build (generated, ADR-0010)
     "src/spatial.cyr",
+    "src/f64/spatial.cyr",   # its f64 build (generated, ADR-0010)
     "src/vocalization.cyr",
     "src/fatigue.cyr",
+    "src/f64/fatigue.cyr",   # its f64 build (generated, ADR-0010)
     # L1
     "src/emotion.cyr",
+    "src/f64/emotion.cyr",   # its f64 build (generated, ADR-0010)
     "src/sequence.cyr",   # CallElement/CallBout/CallPhrase structs (used by species)
+    "src/f64/sequence.cyr",   # its f64 build (generated, ADR-0010)
     "src/species.cyr",
+    "src/f64/species.cyr",   # its f64 build (generated, ADR-0010)
     "src/bridge.cyr",
+    "src/f64/bridge.cyr",   # its f64 build (generated, ADR-0010)
     # L2 — svara vocal-tract bridge
     "src/tract.cyr",
+    "src/f64/tract.cyr",   # its f64 build (generated, ADR-0010)
     # L3 — voice orchestration
     "src/voice.cyr",
+    "src/f64/voice.cyr",   # its f64 build (generated, ADR-0010)
     # L4 — composites
     "src/preset.cyr",
+    "src/f64/preset.cyr",   # its f64 build (generated, ADR-0010)
     "src/stream.cyr",
+    "src/f64/stream.cyr",   # its f64 build (generated, ADR-0010)
     # L5 — FFI surface
     "src/ffi.cyr",
 ]

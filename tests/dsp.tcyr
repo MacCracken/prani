@@ -3,9 +3,13 @@
 # blocker passes the first sample, then rings down by R each step, and drives a
 # constant DC input toward zero. serde round-trip dropped (no serde).
 
+include "src/real.cyr"
 include "src/error.cyr"
+include "src/f64/error.cyr"
 include "src/logging.cyr"
 include "src/dsp.cyr"
+include "src/f64/dsp.cyr"
+include "tests/realt.cyr"
 
 alloc_init();
 
@@ -13,44 +17,44 @@ alloc_init();
 test_group("DcBlocker first-sample + decay (constant DC = 1.0)");
 var b = dcblocker_new();
 # y0 = 1 - 0 + R*0 = 1.0 (first sample passes)
-assert_eq(dcblocker_process(b, F64_ONE), F64_ONE, "y0 == 1.0");
+assert_eq(dcblocker_process(b, PR_ONE), PR_ONE, "y0 == 1.0");
 # y1 = 1 - 1 + R*1 = R = 0.995 (exact)
-assert_eq(dcblocker_process(b, F64_ONE), PRANI_DCBLOCK_R, "y1 == R (0.995)");
+assert_eq(dcblocker_process(b, PR_ONE), PRANI_DCBLOCK_R, "y1 == R (0.995)");
 # y2 = 1 - 1 + R*R = R^2; strictly less than y1 (ringing down)
-var y2 = dcblocker_process(b, F64_ONE);
-assert_eq(f64_lt(y2, PRANI_DCBLOCK_R), 1, "y2 < y1 (decaying)");
-assert_eq(f64_gt(y2, 0), 1, "y2 still positive");
+var y2 = dcblocker_process(b, PR_ONE);
+assert_eq(pr_lt(y2, PRANI_DCBLOCK_R), 1, "y2 < y1 (decaying)");
+assert_eq(pr_gt(y2, 0), 1, "y2 still positive");
 
 # ================================================================
 test_group("DcBlocker converges to ~0 on sustained DC");
 var b2 = dcblocker_new();
 var i = 0;
-var last = F64_ONE;
+var last = PR_ONE;
 while (i < 4000) {
-    last = dcblocker_process(b2, F64_ONE);
+    last = dcblocker_process(b2, PR_ONE);
     i = i + 1;
 }
 # after 4000 samples of DC, output should be tiny (< epsilon-ish tolerance)
-assert_eq(f64_lt(f64_abs(last), 0x3F50624DD2F1A9FC), 1, "DC driven below 1e-3");
+assert_eq(pr_lt(pr_abs(last), pr_of64(0x3F50624DD2F1A9FC)), 1, "DC driven below 1e-3");
 
 # ================================================================
 test_group("DcBlocker reset clears memory");
 var b3 = dcblocker_new();
-dcblocker_process(b3, F64_ONE);
-dcblocker_process(b3, F64_ONE);
+dcblocker_process(b3, PR_ONE);
+dcblocker_process(b3, PR_ONE);
 dcblocker_reset(b3);
 # after reset, first sample passes at full amplitude again
-assert_eq(dcblocker_process(b3, F64_ONE), F64_ONE, "post-reset y0 == 1.0");
+assert_eq(dcblocker_process(b3, PR_ONE), PR_ONE, "post-reset y0 == 1.0");
 
 # ================================================================
 test_group("DcBlocker process_buffer (in-place)");
 var buf = vec_new();
-vec_push(buf, F64_ONE);
-vec_push(buf, F64_ONE);
-vec_push(buf, F64_ONE);
+vec_push(buf, PR_ONE);
+vec_push(buf, PR_ONE);
+vec_push(buf, PR_ONE);
 var b4 = dcblocker_new();
 dcblocker_process_buffer(b4, buf);
-assert_eq(vec_get(buf, 0), F64_ONE, "buf[0] == 1.0 (first passes)");
+assert_eq(vec_get(buf, 0), PR_ONE, "buf[0] == 1.0 (first passes)");
 assert_eq(vec_get(buf, 1), PRANI_DCBLOCK_R, "buf[1] == R");
 
 # ================================================================
@@ -61,8 +65,8 @@ assert_eq(prani_map_naad_error((0 - 1)), PRANI_ERR_SYNTHESIS_FAILED, "naad err -
 # serde roundtrip (ports the Rust #[derive(Serialize, Deserialize)] on DcBlocker).
 test_group("DcBlocker serde roundtrip");
 var dcs = dcblocker_new();
-dcblocker_process(dcs, F64_ONE);   # advance state so fields are non-default
-dcblocker_process(dcs, F64_ONE);
+dcblocker_process(dcs, PR_ONE);   # advance state so fields are non-default
+dcblocker_process(dcs, PR_ONE);
 var sb = str_builder_new();
 DcBlocker_to_json(dcs, sb);
 var jstr = str_data(str_builder_build(sb));
@@ -85,7 +89,11 @@ assert_eq(memeq(jstr, jstr_2, strlen(jstr)), 1, "json idempotent");
 # guard, and the copy helper that has no range at all.
 # ================================================================
 
+#ifdef PRANI_F32
+var NAN_BITS = 0x7FC00000;           # canonical quiet NaN
+#else
 var NAN_BITS = 0x7FF8000000000000;   # canonical quiet NaN
+#endif
 
 # ----------------------------------------------------------------
 # The reason dcblocker_process is not guarded per sample: it is recursive, so
@@ -96,39 +104,39 @@ test_group("DcBlocker NaN latches the state permanently (unguarded, by decision)
 var bn = dcblocker_new();
 assert_eq(prani_is_finite(dcblocker_process(bn, NAN_BITS)), 0, "NaN in -> NaN out");
 # the input has RECOVERED and every later sample is still poisoned
-assert_eq(prani_is_finite(dcblocker_process(bn, F64_ONE)), 0, "next finite sample still NaN");
+assert_eq(prani_is_finite(dcblocker_process(bn, PR_ONE)), 0, "next finite sample still NaN");
 assert_eq(prani_is_finite(dcblocker_process(bn, 0)), 0, "and the one after that");
 assert_eq(prani_is_finite(DcBlocker_y_prev(bn)), 0, "y_prev is latched non-finite");
 # reset is the named cure, and it works
 dcblocker_reset(bn);
-assert_eq(dcblocker_process(bn, F64_ONE), F64_ONE, "after reset the filter is clean again");
+assert_eq(dcblocker_process(bn, PR_ONE), PR_ONE, "after reset the filter is clean again");
 
 # +inf is no safer than NaN here, unlike at a clamp site (f64_clamp DOES bound
 # an infinity -- see tests/error.tcyr). y0 = +inf, then y1 = 1 - inf + r*inf.
 test_group("DcBlocker +inf latches too (inf - inf = NaN on the second sample)");
 var bi = dcblocker_new();
 assert_eq(prani_is_finite(dcblocker_process(bi, PRANI_POS_INF)), 0, "y0 non-finite");
-assert_eq(prani_is_finite(dcblocker_process(bi, F64_ONE)), 0, "y1 non-finite");
-assert_eq(prani_is_finite(dcblocker_process(bi, F64_ONE)), 0, "y2 still non-finite");
+assert_eq(prani_is_finite(dcblocker_process(bi, PR_ONE)), 0, "y1 non-finite");
+assert_eq(prani_is_finite(dcblocker_process(bi, PR_ONE)), 0, "y2 still non-finite");
 
 # process_buffer detects the latch (O(1) per buffer, logged) but does NOT
 # repair it and does NOT change the buffer contents -- the whole tail is NaN.
 test_group("process_buffer detects but does not repair the latch");
 var bl = dcblocker_new();
 var lbuf = vec_new();
-vec_push(lbuf, F64_ONE);
+vec_push(lbuf, PR_ONE);
 vec_push(lbuf, NAN_BITS);
-vec_push(lbuf, F64_ONE);
+vec_push(lbuf, PR_ONE);
 dcblocker_process_buffer(bl, lbuf);
-assert_eq(vec_get(lbuf, 0), F64_ONE, "samples before the NaN are filtered normally");
+assert_eq(vec_get(lbuf, 0), PR_ONE, "samples before the NaN are filtered normally");
 assert_eq(prani_is_finite(vec_get(lbuf, 1)), 0, "the NaN sample");
 assert_eq(prani_is_finite(vec_get(lbuf, 2)), 0, "and everything after it");
 assert_eq(prani_is_finite(DcBlocker_y_prev(bl)), 0, "state left poisoned, not fabricated back");
 # a clean filter over a clean buffer leaves finite state (the detector stays quiet)
 var lok = vec_new();
-vec_push(lok, F64_ONE);
+vec_push(lok, PR_ONE);
 dcblocker_process_buffer(dcblocker_new(), lok);
-assert_eq(vec_get(lok, 0), F64_ONE, "clean buffer unchanged in behaviour");
+assert_eq(vec_get(lok, 0), PR_ONE, "clean buffer unchanged in behaviour");
 
 # ----------------------------------------------------------------
 # prani_vec_push_zeros: n in [0, i64::MAX]. 0 is VALID, negative is REPORTED.
@@ -151,8 +159,8 @@ assert_eq(vec_len(pz), 3, "still untouched -- behaviour identical, only the code
 # A NaN-derived count from the real expression (seconds * sample_rate) is 0 since
 # cyrius 6.6.8. Nothing here can tell that from a legal 0, which is why every call
 # site ranges the f64 before the cast (see prani_sample_count_ok).
-var pz_gap = f64_to(f64_mul(f64_div(0, 0), f64_from(44100)));
-assert_eq(pz_gap, 0, "f64_to(NaN gap * 44100) is 0");
+var pz_gap = pr_to(pr_mul(pr_div(0, 0), pr_from(44100)));
+assert_eq(pz_gap, 0, "pr_to(NaN gap * 44100) is 0");
 assert_eq(prani_vec_push_zeros(pz, pz_gap), 0, "so it appends nothing and cannot be reported here");
 assert_eq(vec_len(pz), 3, "and the buffer is untouched");
 
@@ -160,9 +168,9 @@ assert_eq(vec_len(pz), 3, "and the buffer is untouched");
 # i64::MAX to a negative around timing_spread 1e14 s, and the old helper turned
 # that into an empty mix with no complaint.
 test_group("push_zeros: F10's wrapped chorus length is reported");
-var f10_off = f64_to(f64_mul(f64_from(100000000000000), f64_from(48000)));
+var f10_off = pr_to(pr_mul(pr_from(100000000000000), pr_from(48000)));
 assert_eq(f10_off > 0, 1, "max_offset_samples itself is positive");
-var f10_total = f64_to(f64_mul(F64_ONE, f64_from(48000))) + f10_off * 2;
+var f10_total = pr_to(pr_mul(PR_ONE, pr_from(48000))) + f10_off * 2;
 assert_eq(f10_total < 0, 1, "base + max_offset*2 wraps NEGATIVE (F10)");
 assert_eq(prani_vec_push_zeros(pz, f10_total), PRANI_ERR_INVALID_VOCALIZATION,
   "the wrapped chorus length is reported, not silently empty");
@@ -185,7 +193,7 @@ assert_eq(prani_vec_push_zeros(pz_full, 0), 0, "control: appending nothing is st
 # ----------------------------------------------------------------
 test_group("extend has no range: it copies bit patterns without interpreting them");
 var ex_src = vec_new();
-vec_push(ex_src, F64_ONE);
+vec_push(ex_src, PR_ONE);
 vec_push(ex_src, NAN_BITS);
 var ex_dst = vec_new();
 assert_eq(prani_vec_extend(ex_dst, ex_src), PRANI_ERR_NONE, "extend returns ERR_NONE");
