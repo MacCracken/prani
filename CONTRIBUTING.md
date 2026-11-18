@@ -21,9 +21,12 @@ oracle kept in git history, not the build — nothing in CI or the release runs
 
   ```sh
   CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-  curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+  curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" | \
     CYRIUS_VERSION="$CYRIUS_VERSION" sh
   ```
+
+  The installer is fetched at the pinned tag too, not from `main`, so an unchanged
+  prani commit always installs the same way (CI does the same).
 
 - A Rust toolchain is needed **only** to build the oracle — checked out from
   `2.0.3` — and to re-run the benchmark comparison against it. That comparison

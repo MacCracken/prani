@@ -20,6 +20,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.3.1] - the deferred decisions
+
+Patch release: the three items the 2.2.1 sweep left on roadmap 2.3.x, each settled by
+ADR-0010's bar of accuracy over the Rust's numbers. Two change what a render returns,
+and one is CI's.
+
+No dependency moves: cyrius 6.7.18, svara 3.14.0, naad 2.3.5, hisab 3.5.0, goonj
+2.3.2, sakshi 2.5.10. The consumer floor stays cyrius 6.7.2, for both formats.
+**2,546 assertions / 22 suites, in each format.**
+
+### Changed
+
+- ⚠ **A pitch the sample rate cannot represent is refused**
+  ([ADR-0011](docs/adr/0011-a-pitch-past-nyquist-is-refused.md), audit V4), with
+  `PRANI_ERR_INVALID_TRACT`. Through 2.3.0 a source at or past Nyquist rendered as
+  success: silence at exactly sample_rate / 2 (a half-size cricket at 8 kHz, RMS
+  3.3e-14), and an alias past it (a cricket's 4500 Hz at 8 kHz came out at 3500 Hz).
+  Each path checks the pitch it renders, after its own clamp:
+  - the laryngeal f0;
+  - the syringeal f0 up to 2 kHz, and the second source, 1.498 × f0, above it;
+  - the stridulatory and vibratile carriers;
+  - the purr's cycle rate, which 2.2.1 bounded only by the sample rate itself.
+
+  At 8 kHz that refuses all 12 of the songbird's vocalizations, 6 of the raptor's and 3
+  of the cricket's. Every one of them was an alias there through 2.3.0, and all 21
+  render at 16 kHz. A stream retires on the fill that meets it and names the cause.
+- ⚠ **A steady wind does not shift the pitch**
+  ([ADR-0012](docs/adr/0012-a-steady-wind-does-not-shift-the-pitch.md), audit C10).
+  `bridge_doppler_velocity_from_wind` returns 0 for every finite input, the radial
+  velocity a steady wind adds to the Doppler shift between a source and a listener at
+  rest: f_r / f_s = (c + w·n̂) / (c + w·n̂) = 1. Through 2.3.0 it returned the Rust's
+  `wind × cos(angle)`, which spatial reads as a receding source. A 10 m/s tailwind
+  turned 1000 samples into 1029 and a headwind into 970. A non-finite input returns
+  NaN.
+
+### Fixed
+
+- **CI and the release workflow fetch cyrius's installer at the pinned tag**, not from
+  `main`. The tag is read from `cyrius.cyml`, as the version already was. An unchanged
+  prani commit now always installs the same way. Exercised for 2.3.1, which review D
+  could not do: the tag's installer installs cyrius 6.7.18 with its checksum and Ed25519
+  signature verified.
+
+### Verified
+
+- **Every new regression assertion fails on 2.3.0.** The V4 group's ten refusals all
+  render as success there, its seven controls pass, and so do the wind checks (1029 and
+  970 samples). Both groups pass in both formats.
+- **The audio moved only where ADR-0011 puts it**, in the whole-surface sweep against
+  tag 2.3.0, in each format:
+  - 20 of 404 renders changed from success to `PRANI_ERR_INVALID_TRACT`, every one a
+    pitch past Nyquist: the songbird and the raptor at 8 kHz, through intents, bouts and
+    the builders, and the half-size cricket;
+  - the songbird's and the raptor's streams at 8 kHz retire on their first fill, so
+    those 8 stream buffers are the only samples that moved (1,728 of 690,429);
+  - 3 of 953 hostile cases changed, all refusals: the songbird, the crow and the raptor
+    howling through a 1201 Hz tract, whose Nyquist is 600 Hz;
+  - no other sample or length moved, and all 26 JSON documents are byte-identical.
+- **Gates.**
+  - All 22 suites pass in each format (2,546 assertions each), and so do the
+    fuzz harness and the five examples.
+  - `cyrius audit` exits 0, and `scripts/check-alloc.sh` and `gen-f64.sh --check`
+    pass. Every file is clean under `cyrfmt` and lint, and `cyrius deps --verify` is
+    50/50.
+
+### Docs
+
+- ADR-0011 and ADR-0012, and the ADR index.
+- `input-ranges.md`: the pitch guards.
+- CONTRIBUTING: the pinned installer.
+- Roadmap: the 2.3.x lane is done and removed.
+
 ## [2.3.0] - two float formats
 
 Minor release: prani builds in either float format, **f64 or f32**

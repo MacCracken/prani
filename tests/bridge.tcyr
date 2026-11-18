@@ -137,17 +137,18 @@ assert_eq(pr_lt(pr_abs(pr_sub(bridge_absorption_factor(pr_from(100), pr_from(120
 assert_eq(bridge_absorption_factor(PR_B_0_0, pr_neg(pr_from(1000))), PR_B_0_5, "extreme cold -> clamp 0.5");
 
 # ================================================================
-test_group("doppler_velocity_from_wind -- wind*cos(angle)");
-# cos(0) = 1 -> 10.0 (exact for cos(0)).
-assert_eq(pr_lt(pr_abs(pr_sub(bridge_doppler_velocity_from_wind(pr_from(10), PR_B_0_0), pr_from(10))), TOL), 1,
-  "wind 10, angle 0 -> 10.0");
-# cos(pi) = -1 -> -10.0.
-assert_eq(pr_lt(pr_abs(pr_sub(bridge_doppler_velocity_from_wind(pr_from(10), PR_PI), pr_neg(pr_from(10)))),
-    TOL), 1,
-  "wind 10, angle pi -> -10.0");
-# cos(pi/2) ~ 0 -> ~0.
-assert_eq(pr_lt(pr_abs(bridge_doppler_velocity_from_wind(pr_from(5), pr_of64(F64_PI_2))), TOL), 1,
-  "wind 5, angle pi/2 -> ~0");
+test_group("doppler_velocity_from_wind -- a steady wind adds no Doppler velocity (ADR-0012)");
+# Source and listener at rest: f_r / f_s = (c + w.n) / (c + w.n) = 1 at every bearing.
+# Through 2.3.0 it was wind * cos(angle) (10.0 at angle 0, -10.0 at pi).
+assert_eq(bridge_doppler_velocity_from_wind(pr_from(10), PR_B_0_0), 0, "wind 10 toward the listener -> 0");
+assert_eq(bridge_doppler_velocity_from_wind(pr_from(10), PR_PI), 0, "wind 10 away from the listener -> 0");
+assert_eq(bridge_doppler_velocity_from_wind(pr_from(5), pr_of64(F64_PI_2)), 0, "wind 5 across the axis -> 0");
+assert_eq(bridge_doppler_velocity_from_wind(pr_from(30), pr_from(3)), 0, "a gale at any bearing -> 0");
+# a non-finite input is passed on, not read as a still day
+var TL_WIND_NAN = pr_of64(0x7FF8000000000000);
+assert_eq(prani_is_nan(bridge_doppler_velocity_from_wind(TL_WIND_NAN, 0)), 1, "a NaN wind -> NaN");
+assert_eq(prani_is_nan(bridge_doppler_velocity_from_wind(pr_from(10), TL_WIND_NAN)), 1, "a NaN bearing -> NaN");
+assert_eq(prani_is_nan(bridge_doppler_velocity_from_wind(PRANI_POS_INF, 0)), 1, "an infinite wind -> NaN");
 
 # ================================================================
 test_group("pitch_scale_from_valence -- clamp(1+v*0.15, 0.7, 1.3)");

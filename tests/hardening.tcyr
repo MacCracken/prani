@@ -949,5 +949,77 @@ var rd_solo = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_WOLF), PRANI_VOC
   pr_from(8000), pr_of64(0x3FB999999999999A));
 assert_eq(vec_len(rd_ch), vec_len(rd_solo), "a MATING chorus spans its call (2.2.0: 800 of the call's 1600)");
 
+# ================================================================
+test_group("2.3.1 V4 -- a pitch at or past Nyquist is refused, not rendered (ADR-0011)");
+# Through 2.3.0 a source pitched at or above sample_rate / 2 rendered as success: at
+# exactly Nyquist a sine samples as zero (a half-size cricket at 8 kHz gave 0.1 s of
+# RMS 3.3e-14), and past it a tone aliases to another pitch (a cricket's 4500 Hz at
+# 8 kHz came out at 3500 Hz). Each path now refuses the pitch it would render.
+var nq_d = pr_of64(0x3FB999999999999A);   # 0.1 s
+var nq_8k = pr_from(8000);
+# through vocalize: the two 2.3.0 symptoms, and a control at a rate that holds them
+var nq_half = crvoice_with_size(crvoice_new(PRANI_SP_CRICKET), PR_HALF);
+assert_eq(crvoice_vocalize(nq_half, PRANI_VOC_CHIRP, nq_8k, nq_d), PRANI_ERR_INVALID_TRACT,
+  "a half-size cricket at 8 kHz (2.3.0: success, RMS 3.3e-14)");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_CHIRP, nq_8k, nq_d), PRANI_ERR_INVALID_TRACT,
+  "a cricket's 4500 Hz at 8 kHz (2.3.0: success, aliased to 3500 Hz)");
+assert_eq(prani_is_err(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_CHIRP, H_SR, nq_d)), 0,
+  "control: the same cricket at 44.1 kHz renders");
+# each path, at Nyquist and one hertz below it
+var nq_cr = crtract_new(species_params(PRANI_SP_CRICKET), nq_8k);
+var nq_o = crtract_options_default();
+assert_eq(crtract_synthesize_stridulatory(nq_cr, pr_from(4000), 64, nq_o), PRANI_ERR_INVALID_TRACT,
+  "stridulatory: a carrier at Nyquist");
+assert_eq(prani_is_err(crtract_synthesize_stridulatory(nq_cr, pr_from(3999), 64, nq_o)), 0,
+  "control: and one hertz below it renders");
+assert_eq(crtract_synthesize_stridulatory(nq_cr, pr_neg(pr_from(4000)), 64, nq_o), PRANI_ERR_INVALID_TRACT,
+  "a negative carrier is its magnitude's pitch");
+var nq_be = crtract_new(species_params(PRANI_SP_BEE), nq_8k);
+assert_eq(crtract_synthesize_vibratile(nq_be, pr_from(4000), 64), PRANI_ERR_INVALID_TRACT, "vibratile: at Nyquist");
+assert_eq(prani_is_err(crtract_synthesize_vibratile(nq_be, pr_from(3999), 64)), 0, "control: below it renders");
+# laryngeal, at a rate svara accepts and a wolf can pass: 2 kHz, Nyquist 1000 Hz
+var nq_2k = pr_from(2000);
+var nq_wo = crtract_new(species_params(PRANI_SP_WOLF), nq_2k);
+assert_eq(crtract_synthesize(nq_wo, pr_from(1000), 64, nq_o), PRANI_ERR_INVALID_TRACT,
+  "laryngeal: a wolf at 1000 Hz through a 2 kHz tract (svara accepts the pitch)");
+assert_eq(prani_is_err(crtract_synthesize(nq_wo, pr_from(900), 64, nq_o)), 0, "control: 900 Hz renders");
+# syringeal: past 2 kHz two tones, the second 1.498 x f0, and that one is checked
+var nq_sb = crtract_new(species_params(PRANI_SP_SONGBIRD), nq_8k);
+assert_eq(crtract_synthesize(nq_sb, pr_from(3000), 64, nq_o), PRANI_ERR_INVALID_TRACT,
+  "syringeal: 3000 Hz, whose second source is 4494 Hz");
+assert_eq(prani_is_err(crtract_synthesize(nq_sb, pr_from(2500), 64, nq_o)), 0,
+  "control: 2500 Hz, whose second source is 3745 Hz, renders");
+# the purr's cycle rate, which 2.2.1 bounded only by the sample rate itself
+var nq_ca = crtract_new(species_params(PRANI_SP_CAT), nq_8k);
+assert_eq(crtract_synthesize_purr(nq_ca, 64, pr_from(4000)), PRANI_ERR_INVALID_TRACT, "purr: a cycle rate at Nyquist");
+assert_eq(prani_is_err(crtract_synthesize_purr(nq_ca, 64, pr_from(27))), 0, "control: a cat's 27 Hz renders");
+# a stream retires on its first fill and names the cause (ADR-0003)
+var nq_st = stream_new(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_CHIRP, PRANI_INTENT_IDLE, nq_8k, nq_d);
+assert_eq(prani_is_err(nq_st), 0, "control: the stream itself is built");
+var nq_buf = vec_new();
+prani_vec_push_zeros(nq_buf, 256);
+assert_eq(stream_fill_buffer(nq_st, nq_buf), 0, "a cricket stream at 8 kHz fills nothing");
+assert_eq(stream_last_error(nq_st), PRANI_ERR_INVALID_TRACT, "and says why");
+
+# ================================================================
+test_group("2.3.1 C10 -- a steady wind does not shift the pitch (ADR-0012)");
+# bridge's wind term fed to spatial's Doppler, as a host composing the two would.
+# Through 2.3.0 a 10 m/s tailwind came back as +10 m/s, which spatial reads as
+# receding: 1000 samples resampled to 1029, a lowered pitch.
+var wd_in = vec_new();
+var wd_i = 0;
+while (wd_i < 1000) { vec_push(wd_in, pr_sin(pr_div(pr_from(wd_i), pr_from(7)))); wd_i = wd_i + 1; }
+var wd_v = bridge_doppler_velocity_from_wind(pr_from(10), 0);
+var wd_out = spatial_apply_doppler_shift(wd_in, wd_v, H_SR);
+assert_eq(vec_len(wd_out), 1000, "a 10 m/s tailwind leaves 1000 samples as 1000 (2.3.0: 1029)");
+var wd_same = 1;
+wd_i = 0;
+while (wd_i < 1000) { if (vec_get(wd_out, wd_i) != vec_get(wd_in, wd_i)) { wd_same = 0; } wd_i = wd_i + 1; }
+assert_eq(wd_same, 1, "and every sample is the input's: no shift at all");
+var wd_hv = bridge_doppler_velocity_from_wind(pr_from(10), PR_PI);
+assert_eq(vec_len(spatial_apply_doppler_shift(wd_in, wd_hv, H_SR)), 1000, "nor does a headwind (2.3.0: 970)");
+assert_eq(vec_len(spatial_apply_doppler_shift(wd_in, pr_from(10), H_SR)) != 1000, 1,
+  "control: a source receding at 10 m/s does shift it");
+
 var rc = assert_summary();
 syscall(60, rc);

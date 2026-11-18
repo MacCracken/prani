@@ -208,6 +208,10 @@ fn vecs_same(a, b) {
 }
 
 var SR8 = pr_from(8000);
+# 16 kHz for the cricket: its 4500 Hz song is past 8 kHz's Nyquist, and since 2.3.1 a
+# pitch the rate cannot represent is refused (ADR-0011). Through 2.3.0 this case
+# rendered it at 8 kHz, aliased to 3500 Hz, and called it success.
+var SR16 = pr_from(16000);
 #ifdef PRANI_F32
 var D005 = 0x3D4CCCCD;            # 0.05 s
 var HALF = 0x3F000000;            # 0.5
@@ -262,7 +266,9 @@ fn case_tract_wolf() { return crtract_new(species_params(PRANI_SP_WOLF), SR8); }
 fn case_tract_snake() { return crtract_new(species_params(PRANI_SP_SNAKE), SR8); }
 # A tract, then 400 samples through it -- for each of the five apparatus.
 fn case_synth(sp) {
-    var t = crtract_new(species_params(sp), SR8);
+    var sr = SR8;
+    if (sp == PRANI_SP_CRICKET) { sr = SR16; }
+    var t = crtract_new(species_params(sp), sr);
     if (prani_is_err(t) == 1) { return t; }
     var o = crtract_options_new(0, HALF);
     if (prani_is_err(o) == 1) { return o; }
@@ -292,9 +298,10 @@ fn species_params_f0(sp) {
 # A voice, then one vocalization, from scratch: VOC_SP / VOC_V select it.
 var VOC_SP = 0;
 var VOC_V = 0;
-# The selected species' vocalization at 8 kHz for 0.05 s.
+var VOC_SR = 0;   # set per pair below: 8 kHz, or 16 kHz for a song 8 kHz cannot hold
+# The selected species' vocalization at VOC_SR for 0.05 s.
 fn case_vocalize() {
-    return crvoice_vocalize(crvoice_new(VOC_SP), VOC_V, SR8, D005);
+    return crvoice_vocalize(crvoice_new(VOC_SP), VOC_V, VOC_SR, D005);
 }
 # A voice built through the whole builder chain, then a vocalization with intent.
 fn case_vocalize_built() {
@@ -485,12 +492,17 @@ var vz_cases = 0;
 var vz_reported = 0;
 var vz_requests = 0;
 var vz_controls = 0;
+var vz_at16 = 0;
 while (vz_sp < PRANI_SP_COUNT) {
     var vz_v = 0;
     while (vz_v < PRANI_VOC_COUNT) {
         if (species_supports_vocalization(vz_sp, vz_v) == 1) {
             VOC_SP = vz_sp;
             VOC_V = vz_v;
+            # 2.3.1 (ADR-0011): a pitch past 8 kHz's Nyquist is refused, where through
+            # 2.3.0 it aliased and rendered as success. Such a pair is swept at 16 kHz.
+            VOC_SR = SR8;
+            if (case_vocalize() == PRANI_ERR_INVALID_TRACT) { VOC_SR = SR16; vz_at16 = vz_at16 + 1; }
             var vz_n = fi_count(&case_vocalize);
             vz_requests = vz_requests + vz_n;
             vz_reported = vz_reported + fi_sweep(&case_vocalize, vz_n, PRANI_ERR_ALLOC);
@@ -504,6 +516,9 @@ while (vz_sp < PRANI_SP_COUNT) {
 }
 test_group("refused: crvoice_vocalize, every species x every vocalization it supports");
 assert_gte(vz_cases, 100, "control: the sweep covers every supported pair (127 at 2.2.0)");
+# measured 2.3.1: the songbird's 12 pairs, the raptor's 6 (its second syrinx source,
+# 1.498 x f0, passes 4 kHz) and the cricket's 3, every one of which aliased at 8 kHz.
+assert_eq(vz_at16, 21, "the pairs whose song 8 kHz cannot hold are swept at 16 kHz");
 assert_gte(vz_requests, vz_cases * 8, "control: and each makes a real number of allocations");
 assert_eq(vz_reported, 2 * vz_requests, "every refusal in every pair is PRANI_ERR_ALLOC");
 assert_eq(vz_controls, vz_cases, "control: one past the last request gives the unrefused samples, bit for bit");

@@ -138,12 +138,22 @@ fn bridge_absorption_factor(humidity_pct, temp_c) {
 # Wind / aerodynamics -> Doppler
 # ---------------------------------------------------------------------------
 
-# bridge_doppler_velocity_from_wind -- doppler_velocity_from_wind. Projects wind
-# onto the source-listener axis: wind_speed * cos(angle). angle 0 = toward
-# listener, pi = away.
+# bridge_doppler_velocity_from_wind -- doppler_velocity_from_wind: the radial
+# velocity a steady wind adds to a Doppler shift between a source and a listener at
+# rest (angle 0 = wind blowing from the source toward the listener, pi = away).
+#
+# That velocity is 0 (2.3.1, ADR-0012). Sound travels at c + w.n along the axis,
+# but every wavefront the source emits reaches the listener, so the received
+# frequency is the emitted one: f_r / f_s = (c + w.n) / (c + w.n) = 1. Through 2.3.0
+# this returned the wind's component along the axis, wind * cos(angle), as the
+# Rust did (2.0.3:rust-old/src/bridge.rs:127), and spatial_apply_doppler_shift
+# reads a positive velocity as receding: a 10 m/s tailwind lowered the pitch, and
+# 1000 samples came back as 1029. Any sign is a shift physics does not make. A
+# non-finite input is passed on as NaN, not read as a still day.
 #must_use
 fn bridge_doppler_velocity_from_wind(wind_speed_ms, angle_rad) {
-    return f64_mul(wind_speed_ms, f64_cos(angle_rad));
+    if (prani_finite2(wind_speed_ms, angle_rad) == 0) { return f64_div(0, 0); }   # NaN
+    return 0;
 }
 
 # ---------------------------------------------------------------------------

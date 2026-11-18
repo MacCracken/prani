@@ -10,43 +10,10 @@
 
 | Release | Lane | Status |
 |---|---|---|
-| **2.3.x** | [What the 2.2.1 sweep deferred](#23x--what-the-221-sweep-deferred) | can start today |
 | **2.x.x** | [A raw C ABI](#2xx--a-raw-c-abi-conditional) | conditional on a host that needs it |
 | ⛔ | [Blocked upstream](#-blocked-upstream) | waiting on other repos |
 
 ---
-
-## 2.3.x — what the 2.2.1 sweep deferred
-
-**Source**: [`docs/audit/2026-11-17-audit.md`](../audit/2026-11-17-audit.md). The
-sweep confirmed 53 findings, and 2.2.1 repairs 49 of them. A7 is blocked upstream
-(below), and B13 and C13 are kept, with the reasons in the report. What is left
-here is C10, a second decision found while verifying, and a CI gap review D
-suspected but could not exercise.
-
-- [ ] **Decide what wind does to pitch (audit C10).** `bridge_doppler_velocity_from_wind`
-      returns `+wind` for angle 0, which the oracle documents as wind blowing from the
-      source toward the listener. `spatial_apply_doppler_shift` reads `+` as receding,
-      so a tailwind lowers the pitch: 1,000 samples come back as 1,029. Both halves
-      are the oracle's (`2.0.3:rust-old/src/bridge.rs:115-128`,
-      `2.0.3:rust-old/src/spatial.rs:46`). The physics does not pick a sign: a steady
-      wind shifts nothing when the source and listener are both at rest, because both
-      move against the medium together. The options are to negate it (a tailwind
-      raises the pitch), to keep the sign and say so, or to retire the function as a
-      shift with no physical basis. **Needs an ADR either way**, since each is a
-      divergence or a removal.
-- [ ] **Decide whether a pitch at or above Nyquist is refused.** Found while measuring
-      ADR-0009. A half-size cricket at 8 kHz has its carrier above 4 kHz, and it
-      renders 0.1 s of numerical silence (RMS 3.3e-14) as success. Neither svara nor
-      the oracle refuses such a pitch: `svara_glottal_new` checks its own f0 range,
-      not the sample rate's. Refusing it would make prani stricter than svara for
-      laryngeal voices too, so it is a contract decision (ADR-0001's "never fabricate"
-      against svara's own floor) and not a guard to add quietly.
-- [ ] **CI fetches the installer from cyrius `main`.** The toolchain version is pinned
-      from `cyrius.cyml`, which is correct, but `install.sh` itself comes from the
-      default branch. Fetch it at the pinned tag instead, reading the tag from
-      `cyrius.cyml` as the version is read, never hardcoded (CLAUDE.md). Suspected
-      by review D and not exercised: this tree cannot run CI.
 
 ## 2.x.x — a raw C ABI (conditional)
 

@@ -5,7 +5,14 @@
 
 ## Version
 
-**2.3.0** — two float formats
+**2.3.1** — the deferred decisions. A pitch the sample rate cannot represent is
+refused ([ADR-0011](../adr/0011-a-pitch-past-nyquist-is-refused.md)), and a steady
+wind adds no Doppler shift
+([ADR-0012](../adr/0012-a-steady-wind-does-not-shift-the-pitch.md)). CI and the
+release workflow fetch cyrius's installer at the pinned tag. **2546
+assertions / 22 suites, in each format.**
+
+On top of **2.3.0** — two float formats
 ([ADR-0010](../adr/0010-two-float-formats.md)). A real is f64 by default and f32 when
 the build defines `PRANI_F32`, from one bundle. The f64 build is 2.2.1's arithmetic,
 bit for bit: the 716,010-line sweep is byte-identical to tag 2.2.1, JSON included.
@@ -15,8 +22,8 @@ phase stay f64. Documents carry f64 bit patterns in both builds. The 2.2.1 work
 underneath is unchanged ([audit](../audit/2026-11-17-audit.md),
 [ADR-0009](../adr/0009-renders-do-not-depend-on-how-they-are-cut.md)). No dependency
 moved since 2.1.2 (cyrius 6.7.18, svara **3.14.0**). Consumers still need
-**cyrius 6.7.2 or later**, in either format. **2520 assertions / 22 suites,
-in each format**, audit exit 0, and both builds are warning-free.
+**cyrius 6.7.2 or later**, in either format. Audit exit 0, and both builds are
+warning-free.
 
 Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
 cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
@@ -107,7 +114,7 @@ oracle at `2.0.3`.
 ## Tests
 
 `cyrius audit` is green end to end as of 2.3.0: fmt · lint · docs · tests · bench,
-**exit 0**. 22 suites / **2520 assertions, in each format** (770 at 2.0.3;
+**exit 0**. 22 suites / **2546 assertions, in each format** (770 at 2.0.3;
 2.0.4 added 430 closing the parity shortfalls — see
 [`rust-test-parity.md`](rust-test-parity.md)), plus the decoders' fuzz harness,
 `tests/prani.fcyr` (2.2.1). Measured with `for t in tests/*.tcyr; do cyrius test $t;
@@ -123,13 +130,13 @@ the format, the f64 time base, and document portability (the same bytes from eit
 build). `tests/realt.cyr` holds the shared helpers: `assert_real` is exact in the f64
 build and within a measured ulp budget in the f32 build.
 
-`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **242** at 2.2.1) is the
+`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **263** at 2.3.1) is the
 P(-1) sweeps' regression suite — one group per repaired finding, each written so it FAILS on
 the tree before it (the memory-safety groups crash the process there). Every group
 carries controls so it cannot pass vacuously. It also holds the two allocation
 budgets, measured with `alloc_used()` rather than asserted as wall-clock.
 
-`tests/allocrefused.tcyr` (2.2.0, **172** assertions) is the allocation contract's
+`tests/allocrefused.tcyr` (2.2.0, **173** assertions at 2.3.1) is the allocation contract's
 proof. It redefines `prani_alloc_raw` to refuse each of prani's own requests in
 every public path, singly and from then on, and requires exactly `PRANI_ERR_ALLOC`
 back. It redefines the stdlib `alloc` too, to reach naad's reporting constructors

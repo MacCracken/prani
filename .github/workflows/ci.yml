@@ -24,12 +24,15 @@ jobs:
         # the pin and hand it to the canonical upstream installer, which
         # fetches + lays out $HOME/.cyrius/{bin,lib}. Do NOT hand-roll
         # curl+tar+cp — scripts/install.sh is the supported entry point
-        # (matches patra / sigil).
+        # (matches patra / sigil). The installer itself is fetched at the SAME tag
+        # (2.3.1, audit 2026-11-17 D): from `main` it was whatever cyrius's default
+        # branch held that day, so a change there could break or alter a build of
+        # an unchanged prani commit. A tag's copy is immutable.
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+          curl -sSf "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 

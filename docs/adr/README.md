@@ -31,6 +31,8 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0008](0008-a-refused-allocation-is-reported.md) | A refused allocation is reported | Accepted |
 | [0009](0009-renders-do-not-depend-on-how-they-are-cut.md) | A render does not depend on how it is cut | Accepted |
 | [0010](0010-two-float-formats.md) | prani builds in either float format: f64, or f32 | Accepted |
+| [0011](0011-a-pitch-past-nyquist-is-refused.md) | A pitch the sample rate cannot represent is refused | Accepted |
+| [0012](0012-a-steady-wind-does-not-shift-the-pitch.md) | A steady wind does not shift the pitch | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
@@ -70,3 +72,9 @@ faithfully, five of them making the audio depend on where a render was cut.
 the f64 build stays 2.2.1's arithmetic, bit for bit, and an f32 build is one define
 away. It also states the bar the f32 build is held to: accuracy against the f64 build,
 not the Rust's f32 bits, since the Rust defined what prani does and not its numbers.
+
+0011 and 0012 are roadmap 2.3.x, the two decisions the 2.2.1 sweep deferred, settled by
+ADR-0010's bar of accuracy over the Rust's numbers. 0011 refuses a pitch at or past
+Nyquist, which rendered silence or an alias as success. 0012 makes the wind's Doppler
+term the physically correct 0: a steady wind does not change the pitch heard between a
+source and a listener at rest.

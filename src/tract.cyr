@@ -534,6 +534,18 @@ fn crtract_glottal_new(clamped_f0, sr, params, pert) {
     return glottal;
 }
 
+# crtract_pitch_ok(f0, sr) -- 1 iff a source pitched at f0 can be rendered at sr:
+# |f0| below Nyquist, sr / 2 (2.3.1, ADR-0011). At exactly sr / 2 a sine samples as
+# sin(pi * n), zero at every sample, and above it a tone aliases to another pitch.
+# Either way the render is not the pitch asked for, and through 2.3.0 it came back
+# as success: a half-size cricket at 8 kHz rendered 0.1 s of numerical silence
+# (RMS 3.3e-14). Checked once per call, after each path's clamp, on the pitch the
+# path actually renders.
+#must_use
+fn crtract_pitch_ok(f0, sr) {
+    return pr_lt(pr_abs(f0), pr_mul(sr, PR_HALF));
+}
+
 # synthesize_laryngeal -- glottal source through the vocal tract (mammals).
 # Returns a vec (heap ptr) on success or a negative PRANI_ERR_* on failure.
 #
@@ -566,6 +578,7 @@ fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
     # own range; the oracle's f32::clamp panicked.
     if (pr_gt(lo, hi)) { return PRANI_ERR_INVALID_SPECIES; }
     var clamped_f0 = pr_clamp(f0, lo, hi);
+    if (crtract_pitch_ok(clamped_f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # ADR-0011
 
     # non-stationary perturbation: jitter/shimmer scaled by block intensity, and
     # the excitation at the oracle's level (see THE EXCITATION LEVEL above).
@@ -634,6 +647,11 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
     var lo = pr_max(SpeciesParams_f0_min(params), pr_from(20));
     if (pr_gt(lo, SpeciesParams_f0_max(params))) { return PRANI_ERR_INVALID_SPECIES; }   # audit B11
     var clamped_f0 = pr_clamp(f0, lo, SpeciesParams_f0_max(params));
+    # ADR-0011: the pitch each path renders. Through svara (to 2 kHz) that is the f0;
+    # above it, two tones, the second a fifth up, so the second is the one to check.
+    var top_f0 = clamped_f0;
+    if (pr_gt(clamped_f0, pr_from(2000))) { top_f0 = pr_mul(clamped_f0, PR_TR_1_498); }
+    if (crtract_pitch_ok(top_f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }
 
     var output = out;
     vec_truncate(output, 0);
@@ -756,6 +774,7 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
     # shorter than one chirp, so a cricket never reached its inter-chirp silence.
     var t0 = CreatureTract_clock(self);
     if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
+    if (crtract_pitch_ok(f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # ADR-0011: the carrier
     var output = out;
     vec_truncate(output, 0);
 
@@ -861,6 +880,7 @@ fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
     var sr = CreatureTract_sample_rate(self);
     var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009), as in stridulatory
     if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
+    if (crtract_pitch_ok(f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # ADR-0011: the carrier
     var mod_rate = pr_mul(f0, PR_TR_0_5);
     var output = out;
     vec_truncate(output, 0);
@@ -1043,7 +1063,7 @@ fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
     # or past the sample rate up past 1, where it latched; either way the tract's
     # own JSON was then refused. The cat purr asks for 20-35 Hz.
     if (pr_lt(purr_f0, 0)) { return PRANI_ERR_INVALID_TRACT; }
-    if (pr_ge(purr_f0, sr)) { return PRANI_ERR_INVALID_TRACT; }
+    if (crtract_pitch_ok(purr_f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # ADR-0011 (was < sr)
     var tract = CreatureTract_tract(self);
     var rng = CreatureTract_rng(self);
     var phase_inc = pr_div(purr_f0, sr);

@@ -58,6 +58,14 @@ it is reported as `PRANI_ERR_ALLOC` since 2.2.0
 ([ADR-0008](../adr/0008-a-refused-allocation-is-reported.md)); past it, the stdlib still
 ends the process, which is why the count is checked first.
 
+### A pitch the rate cannot represent (2.3.1)
+
+Every synthesis path refuses a source pitched at or past Nyquist with
+`PRANI_ERR_INVALID_TRACT` ([ADR-0011](../adr/0011-a-pitch-past-nyquist-is-refused.md)),
+checked on the pitch it renders after its own clamp. Through 2.3.0 such a pitch came
+back as success: silence at exactly sample_rate / 2, and an alias past it. At 8 kHz that
+refuses the songbird, the raptor's high calls and the cricket, whose songs pass 4 kHz.
+
 ### In the f32 build (2.3.0)
 
 The table above holds in both float formats ([ADR-0010](../adr/0010-two-float-formats.md)):
@@ -302,18 +310,18 @@ format itself:
 
 | Function | Parameter | Accepted range | Rejects with |
 |---|---|---|---|
-| `crtract_synthesize_laryngeal` | `f0` | finite (any finite value; the existing clamp to [max(f0_min,20), min(f0_max,2000)] bounds it) | `PRANI_ERR_INVALID_TRACT` |
+| `crtract_synthesize_laryngeal` | `f0` | finite (any finite value; the existing clamp to [max(f0_min,20), min(f0_max,2000)] bounds it), and the clamped f0 below sample_rate / 2 (2.3.1, ADR-0011) | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_synthesize_laryngeal` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_laryngeal` | `subharmonic_amp, perturbation_scale (SynthesisOptions)` | finite | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `crtract_synthesize_syringeal` | `f0` | finite | `PRANI_ERR_INVALID_TRACT` |
+| `crtract_synthesize_syringeal` | `f0` | finite; the pitch rendered below sample_rate / 2: the clamped f0 to 2 kHz, the second source (1.498 x f0) above it (2.3.1, ADR-0011) | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_synthesize_syringeal` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_syringeal` | `subharmonic_amp, perturbation_scale (SynthesisOptions)` | finite | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_synthesize_noise` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `crtract_synthesize_stridulatory` | `f0` | finite | `PRANI_ERR_INVALID_TRACT` |
+| `crtract_synthesize_stridulatory` | `f0` | finite, and \|f0\| below sample_rate / 2 (2.3.1, ADR-0011) | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_synthesize_stridulatory` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `crtract_synthesize_vibratile` | `f0` | finite | `PRANI_ERR_INVALID_TRACT` |
+| `crtract_synthesize_vibratile` | `f0` | finite, and \|f0\| below sample_rate / 2 (2.3.1, ADR-0011) | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_synthesize_vibratile` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
-| `crtract_synthesize_purr` | `purr_f0` | finite | `PRANI_ERR_INVALID_TRACT` |
+| `crtract_synthesize_purr` | `purr_f0` | finite, in [0, sample_rate / 2) (2.2.1 bounded it by sample_rate; 2.3.1, ADR-0011) | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_synthesize_purr` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_apply_spectral_tilt` | `tilt_db` | finite | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_from_json_str` | `phase` | [0, 1] inclusive | `PRANI_ERR_INVALID_TRACT` |
