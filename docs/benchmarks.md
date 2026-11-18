@@ -193,7 +193,8 @@ gate.** What it buys is a gate nobody will be tempted to switch off.
 | `dcblocker_process`, `prani_rng_next_f32` | **0 B** | per-sample; one byte here is 44 KB/s retained |
 | `prani_ffi_voice_set_size` | **0 B** | an RTPC a host calls per frame, per creature (pins 2.0.3's F7) |
 | `emotion_evaluate` | ≤ **40 B/call** | one `PrEmotionOut`, which the caller receives — it is the result, not waste |
-| `stream_fill_buffer` | ≤ **one `svara_glottal_new`** (560 B today) | the audio-callback path; prani's own share is **0 B**. **Was 8,800 B at 2.0.6** |
+| `emotion_evaluate_into`, `fatigue_modifiers_into`, `bridge_perturbation_from_urgency_into` | **0 B** | 2.2.1's per-frame forms: the caller owns the result struct |
+| `stream_fill_buffer` | ≤ **one `svara_glottal_new`** (560 B today) | the audio-callback path; prani's own share is **0 B**. **Was 8,800 B at 2.0.6.** Since 2.2.1 the first fill is held to the same bar (10,504 B at 2.2.0, when it built the tract) |
 | `crvoice_vocalize` | **sub-linear in duration** | allocation may scale with the audio produced, never with the number of calls |
 
 Every budget carries a **control** — a `<= N` assertion passes trivially if the
@@ -203,7 +204,10 @@ fixed setup and survives any buffer-growth change while still catching per-block
 overhead being retained.
 
 ⚠ **`stream_fill_buffer`'s residual is a behaviour question, not a perf one.** It
-is one `svara_glottal_new` per block: 512 B through svara 3.6.0, 488 B once svara
+is one `svara_glottal_new` per block. Since 2.2.1 that block is the stream's own
+20 ms (882 samples at 44.1 kHz, ADR-0009), not the host's buffer, so a 512-sample
+fill retains one source or none: 560, 560, 0, 560, 0 B across a 2205-sample drain.
+The source has been 512 B through svara 3.6.0, 488 B once svara
 3.6.3 reused a 24 B scratch, and 560 B since svara 3.13.0 added a tilt memo and a
 tone's state to the source. Since 2.1.2 the gate measures that one source in the
 suite rather than writing its size down, so prani's share is held at 0 B while

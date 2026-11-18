@@ -72,13 +72,11 @@ struct VoicePreset {
 # Internal builder -- fills every field in declaration order. `name` is the
 # display string (a cstring literal), restoring the Rust `name: Cow<str>` field.
 #
-# DELIBERATELY UNVALIDATED (2.0.5): this returns a VoicePreset with no error
-# channel, exactly like the crvoice_with_* builders it feeds, so a guard here
-# would have to invent one -- the constructor-contract change is roadmap 2.1.0.
-# The two ways a caller's number becomes a preset are ranged instead where an
-# error CAN be reported: preset_from_json_str above validates every field of an
-# untrusted document, and a NaN handed straight to preset_make survives into
-# preset_build (see there).
+# What it refuses (2.2.0, 2.2.1): a null name, an unknown species tag and a NaN in
+# any number, each with PRANI_ERR_INVALID_SPECIES. A finite out-of-range number is
+# stored clamped to the builders' rails (audit A4), so preset_build makes the same
+# voice it always did and preset_to_json writes what preset_from_json_str (below)
+# accepts. That decoder ranges every field of an untrusted document on top.
 #must_use
 fn preset_make(name, species, size, f0_offset, breathiness) {
     # 2.2.0: the constructor refuses what the builder chain in preset_build would
@@ -91,14 +89,66 @@ fn preset_make(name, species, size, f0_offset, breathiness) {
     if (prani_is_nan(size) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     if (prani_is_nan(f0_offset) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     if (prani_is_nan(breathiness) == 1) { return PRANI_ERR_INVALID_SPECIES; }
+    # 2.2.1 (audit A3): a preset has a name; a null one crashed preset_to_json.
+    if (name == 0) { return PRANI_ERR_INVALID_SPECIES; }
+    # 2.2.1 (audit A4): store what preset_build would clamp each field to, with the
+    # builders' own rails. The built voice is the same as before; what changes is
+    # that preset_to_json now writes values preset_from_json_str accepts, so prani's
+    # own output always reads back. A size of 20 used to be stored as 20, built as
+    # 10, and refused when its own JSON came back.
+    var row[128];
+    var sp = species_params_into(&row, species);
+    var span = f64_sub(SpeciesParams_f0_max(sp), SpeciesParams_f0_min(sp));
     var self = prani_alloc(sizeof(VoicePreset));
     if (self < 0) { return self; }   # PRANI_ERR_ALLOC (2.2.0)
     VoicePreset_set_name(self, name);
     VoicePreset_set_species(self, species);
-    VoicePreset_set_size(self, size);
-    VoicePreset_set_f0_offset(self, f0_offset);
-    VoicePreset_set_breathiness(self, breathiness);
+    VoicePreset_set_size(self, f64_clamp(size, PR_P_0_1, f64_from(10)));
+    VoicePreset_set_f0_offset(self, f64_clamp(f0_offset, f64_neg(span), span));
+    VoicePreset_set_breathiness(self, f64_clamp(breathiness, 0, F64_ONE));
     return self;
+}
+
+# preset_json_add_cstr(sb, p) -- the NUL-terminated `p` as a quoted JSON string
+# (RFC 8259, section 7): `"` and `\` escaped, \b \f \n \r \t named, any other control
+# byte as \u00XX, everything else verbatim. These are the bytes the stdlib's
+# str_builder_add_json_cstr writes, built from str_builder_putc alone, because that
+# function is newer than cyrius 6.7.2, the floor a consumer may build prani on.
+# prani never passes 0 (preset_make refuses a null name).
+fn preset_json_add_cstr(sb, p) {
+    str_builder_putc(sb, 34);
+    var n = strlen(p);
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i);
+        var esc = 0;
+        if (c == 34) { esc = 34; }
+        if (c == 92) { esc = 92; }
+        if (c == 8) { esc = 98; }
+        if (c == 12) { esc = 102; }
+        if (c == 10) { esc = 110; }
+        if (c == 13) { esc = 114; }
+        if (c == 9) { esc = 116; }
+        if (esc != 0) {
+            str_builder_putc(sb, 92);
+            str_builder_putc(sb, esc);
+        } elif (c < 32) {
+            str_builder_add_cstr(sb, "\\u00");
+            str_builder_putc(sb, preset_hex_digit((c >> 4) & 15));
+            str_builder_putc(sb, preset_hex_digit(c & 15));
+        } else {
+            str_builder_putc(sb, c);
+        }
+        i = i + 1;
+    }
+    str_builder_putc(sb, 34);
+    return 0;
+}
+
+# preset_hex_digit(d) -- the lowercase hex character for 0 <= d < 16.
+fn preset_hex_digit(d) {
+    if (d < 10) { return 48 + d; }
+    return 87 + d;
 }
 
 # VoicePreset serde -- restores the Rust `#[derive(Serialize, Deserialize)]`.
@@ -109,9 +159,15 @@ fn preset_make(name, species, size, f0_offset, breathiness) {
 # `name` is a plain display string with no JSON-special characters, so it is
 # emitted between literal quotes. Roundtrip is idempotent (fixed key order).
 fn preset_to_json(self, sb) {
-    str_builder_add_cstr(sb, "{\"name\":\"");
-    str_builder_add_cstr(sb, VoicePreset_name(self));
-    str_builder_add_cstr(sb, "\",\"species\":");
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_SPECIES); }   # ADR-0008
+    if (sb <= 0) { return prani_handle_code(sb, PRANI_ERR_INVALID_SPECIES); }   # ADR-0008
+    # 2.2.1 (audit A3): the name is written as a JSON string, escaped. It used to go
+    # out raw between two quotes, so a name holding a quote or a backslash, which
+    # preset_from_json_str decodes happily, re-encoded into a document prani's own
+    # decoder refused, and a crafted one could add keys.
+    str_builder_add_cstr(sb, "{\"name\":");
+    preset_json_add_cstr(sb, VoicePreset_name(self));
+    str_builder_add_cstr(sb, ",\"species\":");
     str_builder_add_int(sb, VoicePreset_species(self));
     str_builder_add_cstr(sb, ",\"size\":");
     str_builder_add_int(sb, VoicePreset_size(self));
@@ -197,18 +253,17 @@ fn preset_from_json_str(json) {
 #   new(species).with_size(size).with_f0_offset(f0_offset).with_breathiness(br)
 #
 # NOT a validation point (2.0.5), but since 2.2.0 an error passes through it: an
-# error handle, and any refusal from the builders it chains. A preset built by
-# preset_from_json_str cannot carry an out-of-range field (that codec rejects
-# them), and since 2.2.0 preset_make refuses a NaN; a preset whose fields were
-# set raw afterwards can still carry one past every f64_clamp (audit F11). It is
-# caught at the fallible point of use downstream --
+# error handle, and any refusal from the builders it chains, which refuse a NaN a
+# preset's fields were set to raw. A preset from preset_make or
+# preset_from_json_str cannot carry one. Anything else is caught at the fallible
+# point of use downstream --
 # crvoice_vocalize and the tract constructor, which return PRANI_ERR_* -- which
 # covers every path to svara without changing this signature.
 #must_use
 fn preset_build(self) {
     # 2.2.0: an error handle passes through, and so does a refused crvoice_new:
     # the with_* builders below hand an error straight back.
-    if (prani_is_err(self) == 1) { return self; }
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_SPECIES); }
     return crvoice_with_breathiness(
       crvoice_with_f0_offset(
         crvoice_with_size(

@@ -31,7 +31,7 @@ Procedural synthesis of non-human voices: wolves, cats, lions, birds, snakes, in
 prani is a Cyrius library. Build the smoke binary and run a suite:
 
 ```sh
-cyrius deps                              # resolve svara/naad/hisab/goonj/sakshi
+cyrius deps                              # resolve svara/naad/hisab/goonj
 cyrius build src/main.cyr build/prani    # compile
 cyrius test tests/voice.tcyr             # run one parity suite
 ```
@@ -82,7 +82,7 @@ include "lib/prani.cyr"
 ```toml
 [deps.prani]
 git = "https://github.com/MacCracken/prani.git"
-tag = "2.2.0"
+tag = "2.2.1"
 modules = ["dist/prani.cyr"]
 ```
 

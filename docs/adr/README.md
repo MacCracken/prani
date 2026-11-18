@@ -29,6 +29,7 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0006](0006-reject-non-finite-numeric-input.md) | prani rejects non-finite numeric input the oracle accepted | Accepted |
 | [0007](0007-the-corrected-pulse-at-the-oracles-level.md) | svara's corrected pulse, at the oracle's level | Accepted |
 | [0008](0008-a-refused-allocation-is-reported.md) | A refused allocation is reported | Accepted |
+| [0009](0009-renders-do-not-depend-on-how-they-are-cut.md) | A render does not depend on how it is cut | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
@@ -58,3 +59,8 @@ with 0001, but the response is a calibration rather than a check.
 public-surface change since the port: every constructor can now return
 `PRANI_ERR_ALLOC`, a code the oracle's enum never had. It also revisits ADR-0003,
 whose retirement rule it keeps while adding a way to ask why a stream retired.
+
+0009 comes out of the 2.2.1 P(-1) sweep
+([`docs/audit/2026-11-17-audit.md`](../audit/2026-11-17-audit.md)). It is the first
+ADR to repair the oracle itself: six render defects that parity had carried over
+faithfully, five of them making the audio depend on where a render was cut.

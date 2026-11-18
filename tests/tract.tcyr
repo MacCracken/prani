@@ -5,8 +5,8 @@
 # sequence -> species -> tract). The prani modules carry no `include` lines --
 # this entry orders them. sequence.cyr is pulled in only for the CallBout struct
 # species_bout_template references; its synthesize methods forward-reference
-# crvoice_* (voice.cyr, not included) which are UNREACHABLE here, so undefined-fn
-# WARNINGS for crvoice_* are EXPECTED and fine (not link errors).
+# crvoice_vocalize_with_intent (voice.cyr, not included), which is UNREACHABLE
+# here, so that one undefined-fn WARNING is EXPECTED and fine (not a link error).
 #
 # PARITY APPROACH: exact svara-internal bit parity vs the f32 Rust oracle is not
 # attainable -- f32->f64 widening diverges through svara's own DSP (glottal pulse
@@ -208,15 +208,17 @@ assert_eq(vec_len(out_strid_lo), 64, "stridulatory low-carrier length 64");
 assert_eq(t_all_finite(out_strid_lo), 1, "stridulatory low-carrier all finite");
 
 # ================================================================
-# The inter-chirp silence arm (src/tract.cyr:389-391, porting
-# 2.0.3:rust-old/src/tract.rs:277-279) is UNREACHABLE through crvoice_vocalize
-# at any duration, in the port and in the oracle alike: pos_in_chirp is
-# `i % chirp_period` over the index WITHIN one synthesize call, and vocalize
-# renders in blocks of sample_rate*0.02 = 882 samples at 44100, so pos_in_chirp
-# never exceeds 881 while chirp_active is 5880. The oracle's own
-# test_cricket_pulse_train passes on the per-syllable envelope, not on the gap
-# its comment names. Reaching the arm needs ONE synthesize call longer than
-# chirp_active, which is what this group does.
+# The inter-chirp silence arm (crtract_synthesize_stridulatory's
+# pos_in_chirp >= chirp_active branch, porting 2.0.3:rust-old/src/tract.rs:277-279).
+# Through 2.2.0 it was UNREACHABLE through crvoice_vocalize at any duration, in the
+# port and in the oracle alike: pos_in_chirp was `i % chirp_period` over the index
+# WITHIN one synthesize call, and vocalize renders in blocks of sample_rate*0.02 =
+# 882 samples at 44100, so pos_in_chirp never exceeded 881 while chirp_active is
+# 5880. The oracle's own test_cricket_pulse_train passes on the per-syllable
+# envelope, not on the gap its comment names. Since 2.2.1 (ADR-0009) pos_in_chirp
+# runs on the tract's clock, so vocalize reaches the gap (tests/voice.tcyr's cricket
+# group). This group reaches it in ONE call on a fresh tract, whose clock starts at
+# 0, so it renders what 2.2.0 rendered.
 test_group("stridulatory inter-chirp silence (direct call past chirp_active)");
 # At 44100: chirp_period = 44100/2.5 = 17640, chirp_active = (44100/30)*4 = 5880.
 # 12000 samples therefore spans one full active chirp then 6120 samples of gap.
@@ -226,7 +228,7 @@ assert_eq(prani_is_err(out_gap), 0, "gap-spanning stridulatory non-error");
 assert_eq(vec_len(out_gap), 12000, "gap-spanning stridulatory length 12000");
 assert_eq(t_all_finite(out_gap), 1, "gap-spanning stridulatory all finite");
 # The arm pushes exact 0, but dcblocker_process_buffer runs over the whole buffer
-# (src/tract.cyr:410) and its pole is 0.995, so the tail decays rather than
+# (the end of crtract_synthesize_stridulatory) and its pole is 0.995, so the tail decays rather than
 # snapping to zero -- ~1100 samples to fall below 1e-3 from a 0.25-scale signal.
 # Sample well past that: [10000, 12000) must be near-silent to the last sample.
 assert_eq(t_count_below(out_gap, T_1EM3, 10000, 12000), 2000, "inter-chirp gap is silent end to end (2000/2000)");
@@ -299,7 +301,8 @@ assert_eq(vec_get(buf2, 1), T_0_5, "neutral tilt leaves x[1] unchanged");
 test_group("reset -- clears phase");
 var ct_r = crtract_new(species_params(PRANI_SP_WOLF), T_SR);
 # advance phase via the subharmonic path
-crtract_synthesize(ct_r, T_220, 32, crtract_options_new(T_0_25, T_0_5));
+var ct_r_out = crtract_synthesize(ct_r, T_220, 32, crtract_options_new(T_0_25, T_0_5));
+assert_eq(prani_is_err(ct_r_out), 0, "control: the render that advances the phase succeeded");
 assert_neq(CreatureTract_phase(ct_r), 0, "phase advanced before reset");
 crtract_reset(ct_r);
 assert_eq(CreatureTract_phase(ct_r), 0, "reset clears phase to 0");
@@ -316,7 +319,8 @@ assert_eq(SynthesisOptions_perturbation_scale(od), 0, "default perturbation_scal
 # rng/phase/dc_blocker/sample_rate/params roundtrip exactly (bit patterns).
 test_group("CreatureTract serde roundtrip");
 var tser = crtract_new(species_params(PRANI_SP_WOLF), f64_from(8000));
-crtract_synthesize_purr(tser, 100, f64_from(27));   # advances phase + rng + dc_blocker
+var tser_out = crtract_synthesize_purr(tser, 100, f64_from(27));   # advances phase + rng + dc_blocker
+assert_eq(prani_is_err(tser_out), 0, "control: the purr that advances the state succeeded");
 var tsb = str_builder_new();
 crtract_to_json(tser, tsb);
 var tjson = str_data(str_builder_build(tsb));
@@ -378,7 +382,7 @@ assert_eq(t_vecs_equal(post, post3), 1, "deserialized tract == fresh tract + res
 # Control: the ORIGINAL, continued from its own live svara filter memory, must
 # DIFFER -- otherwise the assertion above would hold vacuously for a tract whose
 # synthesis never touched svara state at all. crtract_synthesize_purr routes every
-# sample through svara_tract_process_sample (src/tract.cyr:496), so it does.
+# sample through svara_tract_process_sample, so it does.
 var post_orig = crtract_synthesize_purr(tser, 16, f64_from(27));
 assert_eq(t_vecs_equal(post, post_orig), 0, "control: the original's live svara memory does NOT survive the roundtrip");
 
@@ -798,6 +802,46 @@ var vt_m0 = alloc_used();
 var vt_rc = crtract_set_formant_blend(vt_t, fb_t, fb_b, T_0_5);
 assert_eq(alloc_used() - vt_m0, 0, "a formant blend allocates nothing (80 B per call through 2.1.2)");
 assert_eq(vt_rc, PRANI_ERR_NONE, "control: and it was a real, accepted blend");
+
+# ================================================================
+test_group("2.2.1 D16 -- the allocating per-apparatus wrappers render what _into renders");
+# crtract_synthesize_laryngeal / _syringeal / _noise / _vibratile had no caller in
+# any suite. Each is prani_vec_new plus its _into; held here to the _into render of
+# an identical fresh tract, bit for bit.
+var aw_ok = 1;
+var aw_sp = PRANI_SP_WOLF;
+var aw_n = 0;
+while (aw_n < 4) {
+    var aw_species = PRANI_SP_WOLF;
+    if (aw_n == 1) { aw_species = PRANI_SP_CROW; }
+    if (aw_n == 2) { aw_species = PRANI_SP_SNAKE; }
+    if (aw_n == 3) { aw_species = PRANI_SP_BEE; }
+    var aw_a = crtract_new(species_params(aw_species), T_SR);
+    var aw_b = crtract_new(species_params(aw_species), T_SR);
+    var aw_o = crtract_options_default();
+    var aw_x = 0;
+    var aw_y = vec_new();
+    if (aw_n == 0) {
+        aw_x = crtract_synthesize_laryngeal(aw_a, T_220, 256, aw_o);
+        aw_y = crtract_synthesize_laryngeal_into(aw_b, T_220, 256, aw_o, aw_y);
+    } elif (aw_n == 1) {
+        aw_x = crtract_synthesize_syringeal(aw_a, f64_from(800), 256, aw_o);
+        aw_y = crtract_synthesize_syringeal_into(aw_b, f64_from(800), 256, aw_o, aw_y);
+    } elif (aw_n == 2) {
+        aw_x = crtract_synthesize_noise(aw_a, 256);
+        aw_y = crtract_synthesize_noise_into(aw_b, 256, aw_y);
+    } else {
+        aw_x = crtract_synthesize_vibratile(aw_a, f64_from(250), 256);
+        aw_y = crtract_synthesize_vibratile_into(aw_b, f64_from(250), 256, aw_y);
+    }
+    if (prani_is_err(aw_x) == 1) { aw_ok = 0; }
+    if (prani_is_err(aw_y) == 1) { aw_ok = 0; }
+    if (aw_ok == 1) {
+        if (t_vecs_equal(aw_x, aw_y) == 0) { aw_ok = 0; }
+    }
+    aw_n = aw_n + 1;
+}
+assert_eq(aw_ok, 1, "each of the four wrappers equals its _into, bit for bit");
 
 var rc = assert_summary();
 syscall(60, rc);

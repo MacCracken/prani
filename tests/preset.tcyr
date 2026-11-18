@@ -574,5 +574,41 @@ assert_eq(preset_build(PRANI_ERR_ALLOC), PRANI_ERR_ALLOC, "an error handle passe
 # ...and the codec refuses to produce that same preset from a document.
 assert_eq(t_pj_err(PRANI_SP_WOLF, T_NAN, 0, 0), 1, "the codec will not build that preset from JSON");
 
+# ================================================================
+test_group("2.2.1 -- the name escaper writes the stdlib's bytes, and every name reads back");
+# preset_to_json escapes the name with prani's own preset_json_add_cstr, because the
+# stdlib's str_builder_add_json_cstr is newer than cyrius 6.7.2, prani's consumer
+# floor: a 6.7.2 consumer of the first 2.2.1 draft could not build preset_to_json.
+# Held to the stdlib's output for every byte 1..255 on this toolchain, which has it.
+var je_buf = alloc(8);
+var je_same = 1;
+var je_b = 1;
+while (je_b < 256) {
+    store64(je_buf, je_b);   # the byte, then NULs
+    var je_a = str_builder_new();
+    preset_json_add_cstr(je_a, je_buf);
+    var je_s = str_builder_new();
+    str_builder_add_json_cstr(je_s, je_buf);
+    if (streq(str_data(str_builder_build(je_a)), str_data(str_builder_build(je_s))) == 0) { je_same = 0; }
+    je_b = je_b + 1;
+}
+assert_eq(je_same, 1, "all 255 one-byte names escape exactly as the stdlib escapes them");
+# A name holding every ASCII control byte, a quote and a backslash survives a roundtrip.
+var je_name = alloc(40);
+var je_i = 0;
+while (je_i < 32) {
+    store8(je_name + je_i, je_i + 1);
+    je_i = je_i + 1;
+}
+store8(je_name + 31, 34);
+store8(je_name + 32, 92);
+store8(je_name + 33, 0);
+var je_p = preset_make(je_name, PRANI_SP_WOLF, F64_ONE, 0, 0);
+var je_sb = str_builder_new();
+preset_to_json(je_p, je_sb);
+var je_back = preset_from_json_str(str_data(str_builder_build(je_sb)));
+assert_eq(prani_is_err(je_back), 0, "a name of control bytes, a quote and a backslash reads back");
+assert_eq(streq(VoicePreset_name(je_back), je_name), 1, "byte for byte");
+
 var rc = assert_summary();
 syscall(60, rc);

@@ -107,12 +107,14 @@ fn fatigue_new() {
 # fatigue() -- current fatigue level (0.0-1.0). Accessor-style getter.
 #must_use
 fn fatigue_fatigue(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     return FatigueState_fatigue(self);
 }
 
 # alarm_habituation() -- current alarm habituation level (0.0-1.0).
 #must_use
 fn fatigue_alarm_habituation(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     return FatigueState_alarm_habituation(self);
 }
 
@@ -131,6 +133,7 @@ fn fatigue_alarm_habituation(self) {
 # answer in ADR-0001's sense, because no substitute value is invented.
 # DIVERGENCE: the f32 oracle accepted all of these and poisoned itself.
 fn fatigue_record_call(self, duration, is_alarm) {
+    if (self <= 0) { return 0; }   # ADR-0008
     if (prani_in_range(duration, 0, PR_FAT_MAX_DURATION_S) == 0) {
         prani_log_error("prani: fatigue record_call duration out of range, call not recorded");
         return 0;
@@ -165,6 +168,7 @@ fn fatigue_record_call(self, duration, is_alarm) {
 # negative duration runs the recovery backwards with no ceiling to stop it.
 # DIVERGENCE: the f32 oracle accepted all of these.
 fn fatigue_rest(self, duration) {
+    if (self <= 0) { return 0; }   # ADR-0008
     if (prani_in_range(duration, 0, PR_FAT_MAX_DURATION_S) == 0) {
         prani_log_error("prani: fatigue rest duration out of range, rest not recorded");
         return 0;
@@ -187,6 +191,7 @@ fn fatigue_rest(self, duration) {
 # reinforce_alarm() -- the last alarm's threat was real. Sets the reinforced
 # flag, drops habituation by 0.3 (floored at 0), and resets the alarm count.
 fn fatigue_reinforce_alarm(self) {
+    if (self <= 0) { return 0; }   # ADR-0008
     FatigueState_set_alarm_reinforced(self, 1);
     var h = f64_sub(FatigueState_alarm_habituation(self), PR_FAT_HAB_REINFORCE);
     FatigueState_set_alarm_habituation(self, f64_max(h, 0));
@@ -195,11 +200,13 @@ fn fatigue_reinforce_alarm(self) {
 
 # clear_reinforcement() -- reset the reinforcement flag (start of a new bout).
 fn fatigue_clear_reinforcement(self) {
+    if (self <= 0) { return 0; }   # ADR-0008
     FatigueState_set_alarm_reinforced(self, 0);
 }
 
 # reset() -- clear all fatigue and habituation state (== *self = new()).
 fn fatigue_reset(self) {
+    if (self <= 0) { return 0; }   # ADR-0008
     FatigueState_set_fatigue(self, 0);
     FatigueState_set_alarm_habituation(self, 0);
     FatigueState_set_bout_calling_time(self, 0);
@@ -226,10 +233,10 @@ struct FatigueModifiers {
     jitter_scale: i64;
 }
 
-# modifiers_make(f0_scale, amplitude_scale, breathiness_add, jitter_add) --
-# construct a FatigueModifiers. The four fields are applied multiplicatively
-# (f0/amplitude) and additively (breathiness/jitter) to a voice's parameters;
-# an unfatigued creature is (1.0, 1.0, 0.0, 0.0). Callers normally get one from
+# modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale) --
+# construct a FatigueModifiers. pitch_offset (Hz) and breathiness_delta are added to
+# a voice's parameters, amplitude_scale and jitter_scale multiply them; an
+# unfatigued creature is (0.0, 0.0, 1.0, 1.0). Callers normally get one from
 # fatigue_modifiers(), not from here -- this is the explicit constructor the
 # table and the tests build with.
 #
@@ -262,6 +269,31 @@ fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitt
     return m;
 }
 
+# modifiers_into(self, out) -- fatigue_modifiers, written into a caller-owned
+# FatigueModifiers and returning it, or a negative PRANI_ERR_*. Allocates nothing,
+# for a host that asks every frame (audit C11, 2.2.1): fatigue_modifiers keeps 32
+# bytes per call. The arithmetic is the one fatigue_modifiers does, which calls this.
+#must_use
+fn fatigue_modifiers_into(self, out) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    var fat = FatigueState_fatigue(self);
+    var hab = FatigueState_alarm_habituation(self);
+    if (prani_in_range(fat, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (prani_in_range(hab, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    var pitch_offset = f64_neg(f64_mul(fat, PR_FAT_PITCH_DROP_HZ));
+    var breathiness_delta = f64_mul(fat, PR_FAT_BREATH_MAX);
+    var fatigue_amp = f64_sub(F64_ONE, f64_mul(fat, PR_FAT_AMP_FATIGUE_MAX));
+    var habituation_amp = f64_sub(F64_ONE, f64_mul(hab, PR_FAT_AMP_HAB_MAX));
+    var amplitude_scale = f64_mul(fatigue_amp, habituation_amp);
+    var jitter_scale = f64_add(F64_ONE, f64_mul(fat, PR_FAT_JITTER_SPAN));
+    FatigueModifiers_set_pitch_offset(out, pitch_offset);
+    FatigueModifiers_set_breathiness_delta(out, breathiness_delta);
+    FatigueModifiers_set_amplitude_scale(out, amplitude_scale);
+    FatigueModifiers_set_jitter_scale(out, jitter_scale);
+    return out;
+}
+
 # modifiers() -- current fatigue/habituation modifiers.
 #   pitch_offset      = -fatigue * 20.0            (up to -20 Hz at full fatigue)
 #   breathiness_delta =  fatigue * 0.2             (up to +0.2 at full fatigue)
@@ -269,22 +301,8 @@ fn fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitt
 #   jitter_scale      = 1 + fatigue * 1.5
 #must_use
 fn fatigue_modifiers(self) {
-    var fat = FatigueState_fatigue(self);
-    var hab = FatigueState_alarm_habituation(self);
-
-    # pitch_offset = -fatigue * 20.0
-    var pitch_offset = f64_neg(f64_mul(fat, PR_FAT_PITCH_DROP_HZ));
-
-    # breathiness_delta = fatigue * 0.2
-    var breathiness_delta = f64_mul(fat, PR_FAT_BREATH_MAX);
-
-    # amplitude_scale = (1 - fatigue*0.4) * (1 - habituation*0.5)
-    var fatigue_amp = f64_sub(F64_ONE, f64_mul(fat, PR_FAT_AMP_FATIGUE_MAX));
-    var habituation_amp = f64_sub(F64_ONE, f64_mul(hab, PR_FAT_AMP_HAB_MAX));
-    var amplitude_scale = f64_mul(fatigue_amp, habituation_amp);
-
-    # jitter_scale = 1 + fatigue * 1.5
-    var jitter_scale = f64_add(F64_ONE, f64_mul(fat, PR_FAT_JITTER_SPAN));
-
-    return fatigue_modifiers_make(pitch_offset, breathiness_delta, amplitude_scale, jitter_scale);
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    var out = prani_alloc(sizeof(FatigueModifiers));
+    if (out < 0) { return out; }   # PRANI_ERR_ALLOC (2.2.0)
+    return fatigue_modifiers_into(self, out);
 }

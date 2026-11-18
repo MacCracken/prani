@@ -109,7 +109,7 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
     # A null handle -- or an unchecked negative code chained in from a fallible
     # call like crvoice_vocalize -- reaches vec_len as load64(v+8): a SIGSEGV,
     # the same defect class ADR-0001 repaired in crtract_new.
-    if (samples < 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (samples <= 0) { return prani_handle_code(samples, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     # distance 0 is VALID: it clamps up to reference, exactly as 0.5 does.
     if (prani_is_non_negative(distance) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     # reference_distance is the numerator of the gain and the floor under dist;
@@ -190,7 +190,7 @@ fn spatial_apply_distance_attenuation(samples, distance, reference_distance, sam
 #must_use
 fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     # See spatial_apply_distance_attenuation for the handle guard.
-    if (samples < 1) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (samples <= 0) { return prani_handle_code(samples, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     # NaN is the live defect: it survives the clamp, so out_len becomes 0 and
     # the caller gets an empty buffer instead of an error.
     # +/-inf ARE clamped (measured) -- they are rejected because rendering an

@@ -171,6 +171,12 @@ fn main() {
     println("-----------------------------------------------------------");
 
     var wolf = crvoice_new(PRANI_SP_WOLF);
+    # Since 2.2.0 even crvoice_new can fail (PRANI_ERR_ALLOC), so it is checked
+    # before anything reads it.
+    if (prani_is_err(wolf) == 1) {
+        say("crvoice_new failed: "); println(prani_err_name(wolf));
+        return 1;
+    }
     say("a default wolf sits at "); fmt_float(crvoice_effective_f0(wolf), 1);
     println(" Hz (species f0_default / size_scale)");
 
@@ -225,6 +231,10 @@ fn main() {
     say("  species_supports_vocalization(snake, hiss) = ");
     println_int(species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HISS));
     var snake = crvoice_new(PRANI_SP_SNAKE);
+    if (prani_is_err(snake) == 1) {
+        say("crvoice_new(snake) failed: "); println(prani_err_name(snake));
+        return 1;
+    }
     var snake_buf = sequence_call_bout_synthesize(bout, snake, SR);
     if (prani_is_err(snake_buf) == 1) {
         say("  a howl bout on a snake voice returns ");
@@ -346,11 +356,25 @@ fn main() {
     # effective f0 is f0_default / size_scale, so the 0.8 wolf is a small, high
     # one and the 1.4 wolf is a big, low one. Mixing four copies of one default
     # voice would just be one signal at 4x amplitude.
+    var sizes = vec_new();
+    vec_push(sizes, SZ_0_8);
+    vec_push(sizes, f64_from(1));
+    vec_push(sizes, SZ_1_2);
+    vec_push(sizes, SZ_1_4);
     var voices = vec_new();
-    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), SZ_0_8));
-    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), f64_from(1)));
-    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), SZ_1_2));
-    vec_push(voices, crvoice_with_size(crvoice_new(PRANI_SP_WOLF), SZ_1_4));
+    var si = 0;
+    while (si < vec_len(sizes)) {
+        # crvoice_with_size passes crvoice_new's error through, so one check
+        # covers both calls.
+        var wv = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), vec_get(sizes, si));
+        if (prani_is_err(wv) == 1) {
+            say("building chorus voice "); fmt_int(si + 1); say(" failed: ");
+            println(prani_err_name(wv));
+            return 1;
+        }
+        vec_push(voices, wv);
+        si = si + 1;
+    }
 
     var vi = 0;
     while (vi < vec_len(voices)) {

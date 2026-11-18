@@ -138,13 +138,15 @@ test_group("budget: stream_fill_buffer, the audio-callback path");
 var ab_st = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
 var ab_buf = vec_new();
 prani_vec_push_zeros(ab_buf, 512);
-stream_fill_buffer(ab_st, ab_buf);          # warm: this one builds the tract
+stream_fill_buffer(ab_st, ab_buf);          # warm (2.2.1: stream_new builds the tract)
 ab_m0 = alloc_used();
 ab_i = 0;
 while (ab_i < 10) { stream_fill_buffer(ab_st, ab_buf); ab_i = ab_i + 1; }
 var ab_fill = (alloc_used() - ab_m0) / 10;
 # 8,800 B at 2.0.6 -> 512 at 2.0.10 -> 488 at 2.1.1 -> 560 since svara 3.13.0. The
 # residual is ONE svara_glottal_new per block inside crtract_synthesize_laryngeal.
+# Since 2.2.1 a block is the stream's own 20 ms (882 samples here), so a 512-sample
+# fill renders one block or none, and the average falls below the bar.
 # Closing it means caching the glottal source, which carries its phase across
 # blocks and CHANGES THE AUDIO -- a behaviour decision, not a perf one. See roadmap
 # 2.0.9. The bar is that one source, measured here: prani's own share is 0 B, so
@@ -156,6 +158,14 @@ assert_eq(svara_is_err(ab_gs), 0, "control: the reference svara_glottal_new buil
 assert_gt(ab_glottal, 0, "control: and it allocated, so the bar below is not 0");
 assert_lte(ab_fill, ab_glottal, "stream_fill_buffer: <= one svara_glottal_new per call (was 8,800 B at 2.0.6)");
 assert_eq(stream_samples_rendered(ab_st) > 512, 1, "control: the fills actually rendered audio");
+# The FIRST fill is a callback too. Through 2.2.0 it built the tract (10,504 B at
+# 2.2.0); 2.2.1 builds the tract and sizes the block in stream_new, so the first
+# fill costs what every later one does.
+var ab_st1 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
+ab_m0 = alloc_used();
+var ab_n1 = stream_fill_buffer(ab_st1, ab_buf);
+assert_lte(alloc_used() - ab_m0, ab_glottal, "the first fill: <= one svara_glottal_new as well");
+assert_eq(ab_n1, 512, "control: the first fill rendered a full buffer");
 
 # ================================================================
 # BATCH SYNTHESIS -- allocation here scales with the audio produced, which is
@@ -189,7 +199,7 @@ test_group("budget: 2.2.0's allocation-free paths");
 # A cat-purr stream rendered each fill through the ALLOCATING crtract_synthesize_purr:
 # a fresh vec per callback, 8,088 B at 512 samples, measured on 2.1.2.
 var ab_cp = stream_new(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, PRANI_INTENT_IDLE, AB_SR, F64_ONE);
-stream_fill_buffer(ab_cp, ab_buf);          # warm: builds the tract
+stream_fill_buffer(ab_cp, ab_buf);          # warm
 ab_m0 = alloc_used();
 ab_i = 0;
 while (ab_i < 10) { stream_fill_buffer(ab_cp, ab_buf); ab_i = ab_i + 1; }
@@ -226,6 +236,52 @@ var ab_growl = alloc_used() - ab_m0;
 assert_lte(ab_howl - ab_growl, 2048, "a 1 s howl costs at most 2 KB more than a growl (22,416 more at 2.1.2; 776 now)");
 assert_eq(vec_len(ab_howl_out), 44100, "control: the howl rendered a second");
 assert_eq(vec_len(ab_growl_out), 44100, "control: and so did the growl");
+
+# ================================================================
+# 2.2.1 (audit C11): the per-frame queries have forms that write into the
+# caller's struct. Each allocating form is prani_alloc plus its _into.
+# ================================================================
+test_group("budget: 2.2.1's per-frame _into forms allocate nothing");
+
+var ab_eo = emotion_evaluate(ab_em);
+ab_m0 = alloc_used();
+ab_i = 0;
+var ab_eok = 1;
+while (ab_i < 100) {
+    if (emotion_evaluate_into(ab_em, ab_eo) != ab_eo) { ab_eok = 0; }
+    ab_i = ab_i + 1;
+}
+assert_eq(alloc_used() - ab_m0, 0, "emotion_evaluate_into: 0 B/call (emotion_evaluate keeps 40)");
+assert_eq(ab_eok, 1, "control: each call returned the caller's struct, not an error");
+var ab_eref = emotion_evaluate(ab_em);
+assert_eq(PrEmotionOut_vocal_effort(ab_eo), PrEmotionOut_vocal_effort(ab_eref), "and wrote what evaluate returns");
+assert_eq(PrEmotionOut_pitch_scale(ab_eo), PrEmotionOut_pitch_scale(ab_eref), "pitch scale too");
+
+var ab_fs = fatigue_new();
+fatigue_record_call(ab_fs, F64_ONE, 0);
+var ab_fo = fatigue_modifiers(ab_fs);
+ab_m0 = alloc_used();
+ab_i = 0;
+var ab_fok = 1;
+while (ab_i < 100) {
+    if (fatigue_modifiers_into(ab_fs, ab_fo) != ab_fo) { ab_fok = 0; }
+    ab_i = ab_i + 1;
+}
+assert_eq(alloc_used() - ab_m0, 0, "fatigue_modifiers_into: 0 B/call (fatigue_modifiers keeps 32)");
+assert_eq(ab_fok, 1, "control: each call returned the caller's struct");
+assert_neq(FatigueModifiers_pitch_offset(ab_fo), 0, "control: the state was fatigued, so the offset is real");
+
+var ab_po = bridge_perturbation_from_urgency(F64_HALF);
+ab_m0 = alloc_used();
+ab_i = 0;
+var ab_pok = 1;
+while (ab_i < 100) {
+    if (bridge_perturbation_from_urgency_into(F64_HALF, ab_po) != ab_po) { ab_pok = 0; }
+    ab_i = ab_i + 1;
+}
+assert_eq(alloc_used() - ab_m0, 0, "bridge_perturbation_from_urgency_into: 0 B/call (the allocating form keeps 16)");
+assert_eq(ab_pok, 1, "control: each call returned the caller's struct");
+assert_eq(PrPerturbation_jitter_scale(ab_po), 0x3FFC000000000000, "control: jitter 1 + 0.5 x 1.5 = 1.75");
 
 var rc = assert_summary();
 syscall(60, rc);

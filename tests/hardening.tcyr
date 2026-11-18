@@ -17,7 +17,10 @@ include "src/error.cyr"
 include "src/logging.cyr"
 include "src/rng.cyr"
 include "src/dsp.cyr"
+include "src/spatial.cyr"
 include "src/vocalization.cyr"
+include "src/fatigue.cyr"
+include "src/emotion.cyr"
 include "src/sequence.cyr"
 include "src/species.cyr"
 include "src/bridge.cyr"
@@ -90,11 +93,13 @@ assert_eq(vec_len(hok), 2205, "control length is 0.05 s * 44100");
 test_group("F1 a rejected stream reports 0 written and retires");
 var hsv = crvoice_new(PRANI_SP_WOLF);
 var hs = stream_new(hsv, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), F64_ONE);
-assert_eq(prani_is_err(hs), 0, "stream_new itself does not build a tract");
+# 2.2.1 (ADR-0009, audit B10): stream_new builds the tract, so the rejection is its
+# to report; through 2.2.0 it constructed and the first fill failed.
+assert_eq(hs, PRANI_ERR_SVARA, "stream_new reports svara's rejection of the rate");
 var hbuf = vec_new();
 prani_vec_push_zeros(hbuf, 64);
-assert_eq(stream_fill_buffer(hs, hbuf), 0, "fill reports 0 written, not 64");
-assert_eq(stream_is_finished(hs), 1, "stream retires so a drain loop terminates");
+assert_eq(stream_fill_buffer(hs, hbuf), 0, "a fill on the error handle writes 0, not 64, and reads nothing");
+assert_eq(stream_is_finished(hs), 1, "and it reads as finished, so a drain loop terminates");
 
 # ================================================================
 # F2 (defense in depth) -- block_size floor.
@@ -239,10 +244,25 @@ var hb_out = crvoice_vocalize(hb, PRANI_VOC_HOWL, H_SR, H_DUR_005);
 var hb_used = alloc_used() - hb_before;
 assert_eq(prani_is_err(hb_out), 0, "control: the call still succeeds");
 assert_eq(vec_len(hb_out), 2205, "control: and still returns 0.05 s of audio");
-# 0.05 s @ 44100 is 2205 samples over 882-sample blocks = 3 blocks. The bound
-# below is deliberately loose -- it is a REGRESSION guard on the shape of the
-# allocation (a fixed set plus the sample buffers), not a golden byte count.
+# 2.2.1 (audit D3): this group's only bound was "under 1 MB" against a 16-byte
+# regression, and a SynthesisOptions per block survived every suite. The exact
+# test: 0.05 s (2205 samples, 3 blocks of 882) and 0.07 s (3087, 4 blocks) put
+# every buffer in the same capacity class (4096 and 1024 slots), so their
+# difference is what ONE more block costs -- one svara_glottal_new, svara's, and
+# nothing of prani's. One SynthesisOptions per block would add 16 bytes to it.
 assert_eq(hb_used < 1000000, 1, "one 0.05 s call stays under 1 MB retained");
+var hb7 = crvoice_new(PRANI_SP_WOLF);
+crvoice_vocalize(hb7, PRANI_VOC_HOWL, H_SR, 0x3FB1EB851EB851EC);   # warm, 0.07 s
+var hb7_before = alloc_used();
+var hb7_out = crvoice_vocalize(hb7, PRANI_VOC_HOWL, H_SR, 0x3FB1EB851EB851EC);
+var hb7_used = alloc_used() - hb7_before;
+var hb_g0 = alloc_used();
+var hb_g = svara_glottal_new(f64_from(400), H_SR);
+var hb_glottal = alloc_used() - hb_g0;
+assert_eq(vec_len(hb7_out) > 2646, 1, "control: 0.07 s is a fourth block (2646 = 3 x 882)");
+assert_gt(hb_glottal, 0, "control: a svara source allocates, so the equality below is not 0 = 0");
+assert_eq(hb7_used - hb_used, hb_glottal,
+  "one more 20 ms block costs exactly one svara_glottal_new, nothing of prani's");
 
 # ================================================================
 # F12 (CRITICAL, 2.0.5) -- the WHOLE band (1000, 7500] aborted the process.
@@ -295,13 +315,13 @@ assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, f64_from(8000), H_D
   "control: 8000 unaffected");
 assert_eq(vec_len(crvoice_vocalize(hlv, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
   "control: 44100 still returns 0.05 s of audio");
-# The FFI surface a host actually drives carries the same split -- but through
-# ADR-0003's contract, not through stream_start: stream_new does not build a
-# tract (it is the Option::get_or_insert_with slot), so a rate svara will refuse
-# still yields a handle and fails at the first fill, reporting 0 and retiring.
+# The FFI surface a host actually drives carries the same split. Since 2.2.1 the
+# stream builds its tract when it starts (ADR-0009), so a rate svara refuses is a
+# null handle from stream_start; through 2.2.0 it yielded a handle whose first
+# fill failed.
 var hfv = prani_ffi_voice_create(0);
 var hfs_lo = prani_ffi_stream_start(hfv, 0, 6, f64_from(1200), H_DUR_005);
-assert_neq(hfs_lo, 0, "FFI: 1200 Hz still yields a handle (no tract built yet)");
+assert_eq(hfs_lo, 0, "FFI: 1200 Hz yields a null handle (svara rejects the rate)");
 var hfbuf = vec_new();
 prani_vec_push_zeros(hfbuf, 64);
 assert_eq(prani_ffi_stream_fill(hfs_lo, hfbuf, 64), 0,
@@ -574,6 +594,319 @@ assert_eq(stream_next_block(h_long, VEC_CAP_MAX + 1), PRANI_ERR_INVALID_VOCALIZA
   "a single block past VEC_CAP_MAX is refused");
 assert_eq(stream_samples_rendered(h_long), 0, "and nothing was rendered");
 assert_eq(vec_len(stream_next_block(h_long, 64)), 64, "control: a smaller block still drains the stream");
+
+# ================================================================
+# 2.2.1 P(-1) sweep (docs/audit/2026-11-17-audit.md). Each group below fails on
+# the 2.2.0 tree; the dead-handle group ends that run with SIGSEGV.
+# ================================================================
+test_group("2.2.1 A6/C1/C2/B9 -- a dead handle is answered, never read");
+# 2.2.0 made constructors return negative codes and passed them through the
+# renderers, but left the rest of the surface reading whatever it was handed: the
+# FFI setters, the emotion and fatigue functions, the JSON writers, the tract's
+# reset/tilt/blend/options, an error element inside a phrase. Each SIGSEGV'd on
+# 2.2.0. Now an error comes back as itself (prani_handle_code) and a null as the
+# module's category code; a function that returns nothing does nothing.
+var dh_e = PRANI_ERR_ALLOC;
+var dh_sb = str_builder_new();
+assert_eq(emotion_valence(dh_e), dh_e, "emotion_valence(error) is the error");
+assert_eq(emotion_arousal(0), PRANI_ERR_INVALID_VOCALIZATION, "emotion_arousal(null) is the category code");
+assert_eq(emotion_update(dh_e, 0, 0), 0, "emotion_update(error) is a no-op");
+assert_eq(emotion_set(0, 0, 0), 0, "emotion_set(null) is a no-op");
+assert_eq(emotion_valence_zone(dh_e), dh_e, "emotion_valence_zone(error)");
+assert_eq(emotion_arousal_zone(dh_e), dh_e, "emotion_arousal_zone(error)");
+assert_eq(emotion_select_vocalization(dh_e), dh_e, "emotion_select_vocalization(error)");
+assert_eq(emotion_select_intent(dh_e), dh_e, "emotion_select_intent(error)");
+assert_eq(emotion_evaluate(0), PRANI_ERR_INVALID_VOCALIZATION, "emotion_evaluate(null)");
+assert_eq(fatigue_modifiers(dh_e), dh_e, "fatigue_modifiers(error)");
+assert_eq(fatigue_fatigue(dh_e), dh_e, "fatigue_fatigue(error)");
+assert_eq(fatigue_record_call(dh_e, F64_ONE, 0), 0, "fatigue_record_call(error) is a no-op");
+assert_eq(fatigue_rest(0, F64_ONE), 0, "fatigue_rest(null) is a no-op");
+assert_eq(fatigue_reinforce_alarm(dh_e), 0, "fatigue_reinforce_alarm(error) is a no-op");
+assert_eq(fatigue_reset(dh_e), 0, "fatigue_reset(error) is a no-op");
+assert_eq(prani_ffi_voice_set_effort(dh_e, 0x3FE0000000000000), 0, "prani_ffi_voice_set_effort(error) is a no-op");
+assert_eq(prani_ffi_voice_set_size(dh_e, F64_ONE), 0, "prani_ffi_voice_set_size(error) is a no-op");
+assert_eq(prani_ffi_voice_apply_lombard(dh_e, f64_from(60)), 0, "prani_ffi_voice_apply_lombard(error) is a no-op");
+assert_eq(crvoice_set_vocal_effort(dh_e, F64_ONE), 0, "crvoice_set_vocal_effort(error) is a no-op");
+assert_eq(crvoice_apply_lombard_effect(0, f64_from(60)), 0, "crvoice_apply_lombard_effect(null) is a no-op");
+assert_eq(crvoice_reset_individual(dh_e), dh_e, "crvoice_reset_individual(error)");
+assert_eq(crvoice_species(dh_e), dh_e, "crvoice_species(error)");
+assert_eq(crvoice_effective_f0(0), PRANI_ERR_INVALID_SPECIES, "crvoice_effective_f0(null)");
+assert_eq(crvoice_to_json(dh_e, dh_sb), dh_e, "crvoice_to_json(error)");
+assert_eq(crtract_to_json(dh_e, dh_sb), dh_e, "crtract_to_json(error)");
+assert_eq(preset_to_json(dh_e, dh_sb), dh_e, "preset_to_json(error)");
+assert_eq(sequence_call_phrase_to_json(dh_e, dh_sb), dh_e, "sequence_call_phrase_to_json(error)");
+assert_eq(crtract_reset(dh_e), 0, "crtract_reset(error) is a no-op");
+assert_eq(crtract_apply_spectral_tilt(dh_e, 0, H_SR), dh_e, "crtract_apply_spectral_tilt(error samples)");
+assert_eq(prani_vec_extend(vec_new(), dh_e), dh_e, "prani_vec_extend(error src)");
+assert_eq(prani_vec_push_zeros(dh_e, 4), dh_e, "prani_vec_push_zeros(error vec)");
+var dh_t = crtract_new(species_params(PRANI_SP_WOLF), H_SR);
+var dh_fb = vec_new();
+vec_push(dh_fb, f64_from(500)); vec_push(dh_fb, f64_from(1500)); vec_push(dh_fb, f64_from(2500));
+assert_eq(crtract_set_formant_blend(dh_t, dh_e, dh_fb, F64_ONE), dh_e, "crtract_set_formant_blend(error target)");
+assert_eq(crtract_synthesize(dh_t, f64_from(220), 64, dh_e), dh_e, "crtract_synthesize(error options)");
+assert_eq(crtract_synthesize_into(dh_t, f64_from(220), 64, crtract_options_default(), 0),
+  PRANI_ERR_INVALID_VOCALIZATION,
+  "crtract_synthesize_into(null out)");
+assert_eq(spatial_apply_distance_attenuation(dh_e, F64_ONE, F64_ONE, H_SR), dh_e,
+  "spatial attenuation keeps a chained error (C7)");
+assert_eq(stream_next_block(dh_e, 64), dh_e, "stream_next_block(error) keeps its code");
+assert_eq(crvoice_vocalize(0, PRANI_VOC_HOWL, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "crvoice_vocalize(null voice)");
+# an error element inside a phrase, and a phrase over an error vec (C1)
+var dh_els = vec_new();
+vec_push(dh_els, sequence_call_element_new(PRANI_VOC_BARK, PRANI_POS_INF, 0));
+var dh_ph = sequence_call_phrase_new(dh_els, PRANI_INTENT_SOCIAL);
+assert_eq(sequence_call_phrase_synthesize(dh_ph, crvoice_new(PRANI_SP_WOLF), H_SR), PRANI_ERR_INVALID_VOCALIZATION,
+  "a phrase holding an error element reports it");
+assert_eq(sequence_call_phrase_new(dh_e, PRANI_INTENT_SOCIAL), dh_e, "sequence_call_phrase_new(error elements)");
+# a null voice inside a chorus
+var dh_vs = vec_new();
+vec_push(dh_vs, crvoice_new(PRANI_SP_WOLF));
+vec_push(dh_vs, 0);
+assert_eq(sequence_synthesize_chorus(dh_vs, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_DUR_005, 0),
+  PRANI_ERR_INVALID_SPECIES, "a null voice in a chorus is reported");
+# controls: the same calls on live handles still work
+var dh_live = emotion_with_values(0x3FE0000000000000, 0x3FE0000000000000);
+assert_eq(prani_is_err(emotion_select_intent(dh_live)), 0, "control: a live emotion still selects");
+assert_eq(prani_is_err(crtract_synthesize(dh_t, f64_from(220), 64, crtract_options_default())), 0,
+  "control: a live tract still renders");
+
+# t_json_set(doc, keyq, rep) -- the cstring JSON `doc` with the value after the
+# first `keyq` (a quoted key and its colon) replaced by the cstring `rep`, or, for
+# rep == 0, with that field and its trailing comma dropped. 0 if keyq is absent.
+fn t_json_set(doc, keyq, rep) {
+    var n = strlen(doc);
+    var s = str_new(doc, n);
+    var at = str_index_of_cstr(s, keyq);
+    if (at < 0) { return 0; }
+    var vstart = at + strlen(keyq);
+    var rest = str_sub(s, vstart, n - vstart);
+    var c = str_index_of_cstr(rest, ",");
+    var b = str_index_of_cstr(rest, "}");
+    var vlen = c;
+    if (vlen < 0) { vlen = b; }
+    if (b >= 0) {
+        if (b < vlen) { vlen = b; }
+    }
+    var sb = str_builder_new();
+    if (rep == 0) {
+        str_builder_add(sb, str_sub(s, 0, at));
+        var after = vstart + vlen;
+        if (vlen == c) { after = after + 1; }
+        str_builder_add(sb, str_sub(s, after, n - after));
+    } else {
+        str_builder_add(sb, str_sub(s, 0, vstart));
+        str_builder_add_cstr(sb, rep);
+        str_builder_add(sb, str_sub(s, vstart + vlen, n - vstart - vlen));
+    }
+    return str_data(str_builder_build(sb));
+}
+
+test_group("2.2.1 A2/C4/C5/B5 -- a decoder refuses a field that is absent or not an integer");
+# bayan reads an absent or mistyped field as 0, and the four hand-written decoders
+# read without asking: no "species" decoded a Wolf, "vocal_effort":0.9 an effort of
+# 0.0, "formant0":800.0 a subnormal formant that rendered, "{}" an empty phrase,
+# and an absent rng pair a tract whose noise was exact silence. All succeeded on 2.2.0.
+var dj_sb = str_builder_new();
+crvoice_to_json(crvoice_new(PRANI_SP_CAT), dj_sb);
+var dj_voice = str_data(str_builder_build(dj_sb));
+assert_eq(prani_is_err(crvoice_from_json_str(dj_voice)), 0, "control: prani's own voice document decodes");
+assert_eq(crvoice_from_json_str(t_json_set(dj_voice, "\"species\":", 0)), PRANI_ERR_INVALID_SPECIES,
+  "voice: no species -> refused (2.2.0: a Wolf)");
+assert_eq(crvoice_from_json_str(t_json_set(dj_voice, "\"species\":", "\"cat\"")), PRANI_ERR_INVALID_SPECIES,
+  "voice: a string species -> refused");
+assert_eq(crvoice_from_json_str(t_json_set(dj_voice, "\"vocal_effort\":", "0.9")), PRANI_ERR_INVALID_SPECIES,
+  "voice: a float vocal_effort -> refused (2.2.0: 0.0)");
+assert_eq(crvoice_from_json_str(t_json_set(dj_voice, "\"f0_offset\":", 0)), PRANI_ERR_INVALID_SPECIES,
+  "voice: no f0_offset -> refused");
+assert_eq(crvoice_from_json_str(t_json_set(dj_voice, "\"formant0\":", "800.0")), PRANI_ERR_INVALID_SPECIES,
+  "voice params: a float formant -> refused (2.2.0: a 4e-321 Hz formant that rendered)");
+assert_eq(crvoice_from_json_str(t_json_set(dj_voice, "\"breathiness\":", 0)), PRANI_ERR_INVALID_SPECIES,
+  "voice params: no breathiness -> refused");
+assert_eq(prani_is_err(crvoice_from_json_str(t_json_set(dj_voice, "\"spectral_tilt\":", 0))), 0,
+  "control: no spectral_tilt still decodes, as the oracle's #[serde(default)] had it");
+var dj_tb = str_builder_new();
+crtract_to_json(crtract_new(species_params(PRANI_SP_SNAKE), H_SR), dj_tb);
+var dj_tract = str_data(str_builder_build(dj_tb));
+assert_eq(prani_is_err(crtract_from_json_str(dj_tract)), 0, "control: prani's own tract document decodes");
+assert_eq(crtract_from_json_str(t_json_set(dj_tract, "\"rng_inc\":", "0")), PRANI_ERR_INVALID_TRACT,
+  "tract: an even rng_inc -> refused (PCG32's increment is odd)");
+assert_eq(crtract_from_json_str(t_json_set(dj_tract, "\"rng_inc\":", "6")), PRANI_ERR_INVALID_TRACT,
+  "tract: any even rng_inc -> refused");
+assert_eq(crtract_from_json_str(t_json_set(t_json_set(dj_tract, "\"rng_state\":", 0), "\"rng_inc\":", 0)),
+  PRANI_ERR_INVALID_TRACT, "tract: no rng pair -> refused (2.2.0: a noise path of exact silence)");
+assert_eq(crtract_from_json_str(t_json_set(dj_tract, "\"phase\":", 0)), PRANI_ERR_INVALID_TRACT,
+  "tract: no phase -> refused");
+assert_eq(prani_is_err(crtract_from_json_str(t_json_set(dj_tract, "\"rng_inc\":", "7"))), 0,
+  "control: an odd rng_inc decodes");
+assert_eq(sequence_call_phrase_from_json_str("{}"), PRANI_ERR_INVALID_VOCALIZATION,
+  "phrase: {} -> refused (2.2.0: an empty ALARM phrase)");
+assert_eq(sequence_call_phrase_from_json_str("{\"intent\":1,\"elements\":[{}]}"), PRANI_ERR_INVALID_VOCALIZATION,
+  "phrase: an element of {} -> refused (2.2.0: a 0 s HOWL)");
+assert_eq(sequence_call_phrase_from_json_str("{\"intent\":1,\"elements\":{\"x\":1}}"), PRANI_ERR_INVALID_VOCALIZATION,
+  "phrase: elements that are not an array -> refused");
+assert_eq(sequence_call_phrase_from_json_str("{\"intent\":\"social\",\"elements\":[]}"), PRANI_ERR_INVALID_VOCALIZATION,
+  "phrase: a string intent -> refused");
+assert_eq(prani_is_err(sequence_call_phrase_from_json_str("{\"intent\":1,\"elements\":[]}")), 0,
+  "control: an empty element list is a phrase");
+
+test_group("2.2.1 -- a voice document's apparatus is its species'");
+# Found verifying the sweep (2026-11-17): the vocalization gate reads the species'
+# own row, the tract renders the params' apparatus. On 2.2.0 this "wolf" passed the
+# HOWL gate and rendered 4,410 samples of wing vibration as a successful howl.
+var ap_sb = str_builder_new();
+crvoice_to_json(crvoice_new(PRANI_SP_WOLF), ap_sb);
+var ap_doc = str_data(str_builder_build(ap_sb));
+assert_eq(prani_is_err(crvoice_from_json_str(ap_doc)), 0, "control: the wolf's own document decodes");
+assert_eq(crvoice_from_json_str(t_json_set(ap_doc, "\"apparatus\":", "3")), PRANI_ERR_INVALID_SPECIES,
+  "a wolf whose params say vibratile is refused");
+assert_eq(crvoice_from_json_str(t_json_set(ap_doc, "\"apparatus\":", "0")) > 0, 1,
+  "control: the same edit to the wolf's own apparatus (laryngeal) still decodes");
+
+test_group("2.2.1 -- a tract's clock survives JSON, and a document without one reads as 0");
+# ADR-0009 gave the tract a sample clock, and ADR-0005 restores prani's own state
+# from a document. Through 2.2.0 there was no clock to save.
+var ck_t = crtract_new(species_params(PRANI_SP_CRICKET), H_SR);
+var ck_o = crtract_synthesize_stridulatory(ck_t, f64_from(4500), 300, crtract_options_default());
+assert_eq(prani_is_err(ck_o), 0, "control: the render that advances the clock succeeded");
+assert_eq(CreatureTract_clock(ck_t), 300, "control: 300 samples advance the clock to 300");
+var ck_sb = str_builder_new();
+crtract_to_json(ck_t, ck_sb);
+var ck_doc = str_data(str_builder_build(ck_sb));
+var ck_r = crtract_from_json_str(ck_doc);
+assert_eq(prani_is_err(ck_r), 0, "control: the document decodes");
+assert_eq(CreatureTract_clock(ck_r), 300, "the clock roundtrips");
+var ck_old = crtract_from_json_str(t_json_set(ck_doc, "\"clock\":", 0));
+assert_eq(prani_is_err(ck_old), 0, "a document with no clock, as 2.2.0 wrote, decodes");
+assert_eq(CreatureTract_clock(ck_old), 0, "at clock 0, the time base such a tract had");
+assert_eq(crtract_from_json_str(t_json_set(ck_doc, "\"clock\":", "-1")), PRANI_ERR_INVALID_TRACT,
+  "a negative clock is refused");
+assert_eq(crtract_from_json_str(t_json_set(ck_doc, "\"clock\":", "\"x\"")), PRANI_ERR_INVALID_TRACT,
+  "a clock that is not an integer is refused");
+
+test_group("2.2.1 A3/A4 -- a preset's own JSON always reads back");
+var pj_q = preset_make("Big \"Bad\" Wolf", PRANI_SP_WOLF, F64_ONE, 0, 0);
+var pj_sb = str_builder_new();
+preset_to_json(pj_q, pj_sb);
+var pj_back = preset_from_json_str(str_data(str_builder_build(pj_sb)));
+assert_eq(prani_is_err(pj_back), 0, "a name with quotes re-reads (2.2.0 wrote it raw and refused its own output)");
+assert_eq(streq(VoicePreset_name(pj_back), "Big \"Bad\" Wolf"), 1, "and comes back the same name");
+var pj_b = preset_make("Dire\\Wolf", PRANI_SP_WOLF, F64_ONE, 0, 0);
+var pj_sb2 = str_builder_new();
+preset_to_json(pj_b, pj_sb2);
+assert_eq(streq(VoicePreset_name(preset_from_json_str(str_data(str_builder_build(pj_sb2)))), "Dire\\Wolf"), 1,
+  "a backslash survives the round trip");
+assert_eq(preset_make(0, PRANI_SP_WOLF, F64_ONE, 0, 0), PRANI_ERR_INVALID_SPECIES,
+  "a null name is refused (2.2.0: preset_to_json then crashed)");
+var pj_big = preset_make("Huge", PRANI_SP_WOLF, f64_from(20), 0, 0);
+var pj_sb3 = str_builder_new();
+preset_to_json(pj_big, pj_sb3);
+var pj_big_back = preset_from_json_str(str_data(str_builder_build(pj_sb3)));
+assert_eq(prani_is_err(pj_big_back), 0, "a size-20 preset's own JSON reads back (2.2.0 refused it)");
+assert_eq(VoicePreset_size(pj_big), f64_from(10), "because preset_make stores the 10 preset_build clamps it to");
+assert_eq(CreatureVoice_size_scale(preset_build(pj_big)), f64_from(10), "control: and the built voice is unchanged");
+
+test_group("2.2.1 A1/A5/B6/B7/B11 -- what the point-of-use guards missed");
+var pu_cat = crvoice_new(PRANI_SP_CAT);
+CreatureVoice_set_vocal_effort(pu_cat, PRANI_POS_INF);
+assert_eq(crvoice_vocalize(pu_cat, PRANI_VOC_PURR, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "an out-of-range effort on a purr is refused (2.2.0: an all-NaN purr as success)");
+var pu_cat2 = crvoice_new(PRANI_SP_CAT);
+CreatureVoice_set_vocal_effort(pu_cat2, 0x7FF8000000000000);
+assert_eq(crvoice_vocalize(pu_cat2, PRANI_VOC_PURR, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES, "and a NaN one");
+var pu_w = crvoice_new(PRANI_SP_WOLF);
+crvoice_set_vocal_effort(pu_w, 0x7FF8000000000000);
+crvoice_apply_lombard_effect(pu_w, 0x7FF8000000000000);
+assert_eq(CreatureVoice_vocal_effort(pu_w), 0x3FE0000000000000, "the two mutators ignore a NaN (2.2.0 stored it)");
+var pu_z = crvoice_new(PRANI_SP_WOLF);
+CreatureVoice_set_size_scale(pu_z, 0);
+assert_eq(crvoice_vocalize(pu_z, PRANI_VOC_HOWL, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "size_scale 0 is refused (2.2.0 rendered a fabricated f0_max as success)");
+var pu_t = crtract_new(species_params(PRANI_SP_CAT), H_SR);
+assert_eq(crtract_synthesize_purr(pu_t, 100, f64_neg(f64_from(27))), PRANI_ERR_INVALID_TRACT,
+  "a negative purr f0 is refused (2.2.0 drove the phase out of [0, 1])");
+assert_eq(crtract_synthesize_purr(pu_t, 100, H_SR), PRANI_ERR_INVALID_TRACT, "and one at the sample rate");
+assert_eq(prani_is_err(crtract_synthesize_purr(pu_t, 100, f64_from(27))), 0, "control: 27 Hz purrs");
+assert_eq(prani_in_range(CreatureTract_phase(pu_t), 0, F64_ONE), 1, "control: and the phase stays in [0, 1]");
+var pu_bee = crtract_new(species_params(PRANI_SP_BEE), H_SR);
+assert_eq(crtract_synthesize(pu_bee, 0x7FEFFFFFFFFFFFFF, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
+  "an f0 whose phase overflows is refused (2.2.0: 256 NaN samples as success)");
+var pu_cri = crtract_new(species_params(PRANI_SP_CRICKET), H_SR);
+assert_eq(crtract_synthesize(pu_cri, 0x7FEFFFFFFFFFFFFF, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
+  "on the stridulatory path too");
+var pu_lo = crvoice_new(PRANI_SP_WOLF);
+SpeciesParams_set_f0_min(CreatureVoice_params(pu_lo), f64_from(10));
+SpeciesParams_set_f0_default(CreatureVoice_params(pu_lo), f64_from(10));
+SpeciesParams_set_f0_max(CreatureVoice_params(pu_lo), f64_from(10));
+assert_eq(crvoice_vocalize(pu_lo, PRANI_VOC_GROWL, H_SR, H_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "a species range below the 20 Hz floor is refused (2.2.0 rendered it at 20 Hz)");
+
+test_group("2.2.1 B8/C6/C8/C9 -- refused where it was accepted, accepted where it was refused");
+var r8 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, F64_ONE);
+SynthStream_set_spectral_tilt(r8, 0x7FF8000000000000);
+var r8_buf = vec_new();
+prani_vec_push_zeros(r8_buf, 256);
+assert_eq(stream_fill_buffer(r8, r8_buf), 0, "a rejected tilt fails the fill (2.2.0 wrote 256)");
+assert_eq(stream_is_finished(r8), 1, "and retires the stream (ADR-0003)");
+assert_eq(stream_last_error(r8), PRANI_ERR_INVALID_TRACT, "and says why");
+var r6_sb = str_builder_new();
+str_builder_add_cstr(r6_sb, "{\"fatigue\":4632233691727265792,\"alarm_habituation\":0,\"bout_calling_time\":0,");
+str_builder_add_cstr(r6_sb, "\"alarm_count\":0,\"alarm_reinforced\":0}");
+var r6 = FatigueState_from_json_str(str_data(str_builder_build(r6_sb)));
+assert_eq(fatigue_modifiers(r6), PRANI_ERR_INVALID_VOCALIZATION, "fatigue 50 is refused (2.2.0: amplitude -19)");
+assert_eq(prani_is_err(fatigue_modifiers(fatigue_new())), 0, "control: a fresh fatigue state derives modifiers");
+var r_bout = sequence_call_bout_new(PRANI_VOC_HOWL, 1, H_DUR_005, f64_from(400), PRANI_INTENT_IDLE);
+var r_bo = sequence_call_bout_synthesize(r_bout, crvoice_new(PRANI_SP_WOLF), H_SR);
+assert_eq(prani_is_err(r_bo), 0, "a one-call bout with a long interval renders (2.2.0 refused it)");
+assert_eq(vec_len(r_bo), 2205, "and is one call long: a bout has no interval after its last call");
+assert_eq(bridge_intent_from_threat_level(0x7FF8000000000000), PRANI_ERR_INVALID_VOCALIZATION,
+  "bridge: a NaN threat is refused (2.2.0: IDLE)");
+assert_eq(bridge_species_from_f0(0x7FF8000000000000), PRANI_ERR_INVALID_SPECIES, "bridge: a NaN f0 (2.2.0: SNAKE)");
+assert_eq(bridge_perturbation_from_urgency(0x7FF8000000000000), PRANI_ERR_INVALID_VOCALIZATION,
+  "bridge: a NaN urgency (2.2.0: a NaN jitter as success)");
+assert_eq(bridge_intent_from_threat_level(0x3FE999999999999A), PRANI_INTENT_DISTRESS, "control: 0.8 is DISTRESS");
+
+test_group("2.2.1 B2/B4/C3 -- render defects the oracle had too (ADR-0009)");
+# B2: at 8 kHz a dog's estimated F5 (1.5 x 2750 = 4125 Hz) crossed Nyquist, svara
+# refused the whole target, and the tract kept svara's default vowel (523 Hz F1).
+var rd_t = crtract_new(species_params(PRANI_SP_DOG), f64_from(8000));
+var rd_fv = SvVocalTract_formants(CreatureTract_tract(rd_t));
+assert_eq(SvFormant_frequency(vec_get(rd_fv, 0)), f64_from(550),
+  "a dog at 8 kHz keeps its own F1 (2.2.0: svara's 523)");
+assert_eq(SvFormant_frequency(vec_get(rd_fv, 2)), f64_from(2750), "and its F3");
+assert_eq(f64_lt(SvFormant_frequency(vec_get(rd_fv, 4)), f64_from(4000)), 1, "with F5 placed inside the band");
+assert_eq(f64_gt(SvFormant_frequency(vec_get(rd_fv, 4)), SvFormant_frequency(vec_get(rd_fv, 3))), 1,
+  "above F4, so the order holds");
+var rd_t44 = crtract_new(species_params(PRANI_SP_DOG), H_SR);
+var rd_f44 = SvVocalTract_formants(CreatureTract_tract(rd_t44));
+assert_eq(SvFormant_frequency(vec_get(rd_f44, 4)), f64_mul(f64_from(2750), 0x3ff8000000000000),
+  "control: at 44.1 kHz F5 is the plain 1.5 x F3 estimate, unchanged");
+# B4: a stream renders the voice it was given. Through 2.2.0 it built its tract from
+# the species table, so a breathiness override changed nothing in a stream.
+var rd_s1 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, H_DUR_005);
+var rd_s2 = stream_new(crvoice_with_breathiness(crvoice_new(PRANI_SP_WOLF), 0x3FECCCCCCCCCCCCD),
+  PRANI_VOC_HOWL, PRANI_INTENT_IDLE, H_SR, H_DUR_005);
+var rd_b1 = vec_new();
+prani_vec_push_zeros(rd_b1, 1024);
+var rd_b2 = vec_new();
+prani_vec_push_zeros(rd_b2, 1024);
+stream_fill_buffer(rd_s1, rd_b1);
+stream_fill_buffer(rd_s2, rd_b2);
+var rd_same = 1;
+var rd_i = 0;
+while (rd_i < 1024) {
+    if (vec_get(rd_b1, rd_i) != vec_get(rd_b2, rd_i)) { rd_same = 0; }
+    rd_i = rd_i + 1;
+}
+assert_eq(rd_same, 0, "a breathier voice streams differently (2.2.0: bit-identical to the default)");
+# C3: a chorus is as long as its calls. MATING doubles each call's duration.
+var rd_vs = vec_new();
+vec_push(rd_vs, crvoice_new(PRANI_SP_WOLF));
+var rd_ch = sequence_synthesize_chorus(rd_vs, PRANI_VOC_HOWL, PRANI_INTENT_MATING, f64_from(8000),
+  0x3FB999999999999A, 0);
+var rd_solo = crvoice_vocalize_with_intent(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_MATING,
+  f64_from(8000), 0x3FB999999999999A);
+assert_eq(vec_len(rd_ch), vec_len(rd_solo), "a MATING chorus spans its call (2.2.0: 800 of the call's 1600)");
 
 var rc = assert_summary();
 syscall(60, rc);

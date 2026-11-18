@@ -57,15 +57,20 @@ things to know about it:
 - Every `cyrius …` call re-resolves dependencies and races on `cyrius.lock`. If
   you run more than one at a time, serialize them: `flock /tmp/prani-build.lock cyrius …`.
 
-CI runs three gates **around** the audit that the audit itself does not — added
-across 2.0.4, 2.0.6 and 2.0.11. Run them before you push, or the PR fails on
+CI runs four gates **around** the audit that the audit itself does not — added
+across 2.0.4, 2.0.6, 2.0.11 and 2.2.0. Run them before you push, or the PR fails on
 something green locally:
 
 ```sh
 cyrius distlib && git diff --exit-code -- dist/  # bundle coherence: dist/ must match src/
-sh scripts/run-examples.sh                       # build + run all five docs/examples/
+sh scripts/run-examples.sh                       # fmt + lint + build + run all five docs/examples/
 sh scripts/bench-check.sh                        # timing delta vs benches/baseline.csv
+sh scripts/check-alloc.sh                        # every allocation goes through prani's funnel
 ```
+
+`cyrius fuzz tests/prani.fcyr` runs the decoders' fuzz harness (2.2.1): 1,500
+mutated documents against all four hand-written decoders. It is not a CI step; run
+it after touching a decoder or an encoder.
 
 Bundle coherence runs **before** the audit in CI, deliberately — see the
 benchmark warning below.
@@ -137,7 +142,11 @@ locally nothing stops you.
 `sh scripts/bench-check.sh` compares a run against `benches/baseline.csv` and
 prints a delta per benchmark. It is report-only (`BENCH_GATE=1.5` opts into
 failing past a factor). Allocation budgets, which are deterministic, are
-hard-gated instead in `tests/allocbudget.tcyr`.
+hard-gated instead in `tests/allocbudget.tcyr`. The baseline is a claim about one
+host and one toolchain, so re-record it after every toolchain or dependency bump,
+in a commit of its own: `sh scripts/bench-check.sh --write` takes each benchmark's
+fastest of three runs and writes the host, toolchain and tree into the header. A
+compare warns when the baseline's toolchain is not the one running.
 
 `./scripts/bench-history.sh` runs the same harness and appends each figure to
 `benches/history.csv` with a timestamp and git rev, so a regression is visible

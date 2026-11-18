@@ -109,6 +109,8 @@ fn dcblocker_process(b, x) {
 # repaired -- ADR-0001's rule is report, do not fabricate; the filter really is
 # poisoned and dcblocker_reset is the named cure.
 fn dcblocker_process_buffer(b, samples) {
+    if (b <= 0) { return prani_handle_code(b, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (samples <= 0) { return prani_handle_code(samples, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var was_finite = prani_is_finite(DcBlocker_y_prev(b));
     var n = vec_len(samples);
     var i = 0;
@@ -148,10 +150,27 @@ fn dcblocker_reset(b) {
 # code rather than a vec, is F1's class, not an input range: all three call
 # sites check prani_is_err before extending.)
 fn prani_vec_extend(dst, src) {
+    if (dst <= 0) { return prani_handle_code(dst, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (src <= 0) { return prani_handle_code(src, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var n = vec_len(src);
     var i = 0;
     while (i < n) {
         if (prani_vec_push(dst, vec_get(src, i)) < 0) { return PRANI_ERR_ALLOC; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# prani_vec_scale(v, k) -- multiply every sample of v by k, in place. 2.2.1
+# (audit A10): this loop was written out four times, in the cat purr, vocalize's
+# amplitude step, the chorus normalisation and the stream's block. Returns 0, or
+# passes a dead handle on.
+fn prani_vec_scale(v, k) {
+    if (v <= 0) { return prani_handle_code(v, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        vec_set(v, i, f64_mul(vec_get(v, i), k));
         i = i + 1;
     }
     return 0;
@@ -186,9 +205,9 @@ fn prani_vec_extend(dst, src) {
 #
 # The buffer is untouched either way, so no valid input changes behaviour and no
 # caller's output changes for ANY input: only the returned code moves, from 0 to
-# a negative, on counts that were already broken. The four call sites discard
-# the return today; this is the channel that lets them stop.
+# a negative, on counts that were already broken. Every call site checks it.
 fn prani_vec_push_zeros(v, n) {
+    if (v <= 0) { return prani_handle_code(v, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_buffer_len_ok(n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     # Both terms are within VEC_CAP_MAX here, so this sum cannot wrap.
     if (prani_buffer_len_ok(vec_len(v) + n) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }

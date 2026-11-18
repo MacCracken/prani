@@ -1,161 +1,142 @@
 # prani — Roadmap
 
-> **Open work only.** Completed milestones are not restated here — they live in
-> [`CHANGELOG.md`](../../CHANGELOG.md), and the port ledger is
-> [`port-audit.md`](port-audit.md). Current state is [`state.md`](state.md).
+> **What is still to do**, in release order. State lives in [`state.md`](state.md),
+> and everything shipped lives in [`../../CHANGELOG.md`](../../CHANGELOG.md). The port
+> ledger is [`port-audit.md`](port-audit.md).
+>
+> ⛔ marks work blocked outside this repo, with the blocker named. Everything else can
+> start today. Every item carries its provenance; an item with no source in the tree
+> is not on this roadmap.
 
-Every item carries its provenance. An item with no source in the tree is not on
-this roadmap.
-
-**The port is finished and the oracle is gone.** The 2.0.x arc ran from the
-language port through parity re-verification, input-range validation, runnable
-examples and the Rust comparison, and ended by retiring `rust-old/` in 2.0.8;
-2.0.9–2.0.11 then repaired what its own measurements found. All of it is in the
-CHANGELOG, and so is **2.2.0**, the first release that changed the public surface
-(the allocation-failure contract, ADR-0008). What is left below is **2.3.0**, the f32
-lane that 2.2.0 shipped without, plus two externally-blocked items and the watch
-list.
+| Release | Lane | Status |
+|---|---|---|
+| **2.3.0** | [f32 throughout, to match the oracle](#230--f32-throughout-to-match-the-oracle) | needs a decision first |
+| **2.3.x** | [What the 2.2.1 sweep deferred](#23x--what-the-221-sweep-deferred) | can start today |
+| **2.x.x** | [A raw C ABI](#2xx--a-raw-c-abi-conditional) | conditional on a host that needs it |
+| ⛔ | [Blocked upstream](#-blocked-upstream) | waiting on other repos |
 
 ---
 
-## 2.x — the work that changes the public surface
+## 2.3.0 — f32 throughout, to match the oracle
 
-### 2.3.0 — Lane A: f32 throughout, to match the oracle
+**Source**: 2.0.7's measured comparison (`docs/benchmarks.md`), and ganita 1.1.4's
+f32 scalar tier, which made the widening this port was built on optional.
 
-*Planned as one of 2.2.0's two lanes (and numbered 2.1.0 before that). Lane B, the
-allocation-failure contract, was ready first and shipped alone as 2.2.0. That
-followed this roadmap's own rule: do not hold a finished contract behind a blocked
-dependency. The dated records still call this lane by the older numbers.*
+- [ ] **Decide the lane: close it with an ADR, or re-scope it.** Both of the
+      dependencies it waited on decided to stay f64: naad's ADR-0008 and svara's
+      ADR-0008, *The synthesis core stays f64*. naad also measured ganita's f32 tier
+      routing through f64 (`sin` 15% slower, `exp` 93% slower), and `f32` cannot be a
+      fn return type at cyrius 6.7.18. So the only form this lane can take is a
+      hybrid: prani's own arithmetic in f32, widened at every svara call. That costs
+      work and buys neither bit-parity nor speed. The decision was left open on
+      2026-11-17.
+- [ ] **If kept:** prani's arithmetic is f32 end to end, the tolerance-loosened
+      assertions (`PRANI_EPSILON`, f32::EPSILON promoted) are bit-exact against the
+      oracle, and 2.0.7's comparison is re-run f32-vs-f32, so that what is left of the
+      15.7× gap is attributable to codegen.
 
-**Source**: 2.0.7's measured comparison, and the fact that the constraint this
-port was built on **no longer holds**.
+⚠ **f32 is not proven to be the cause of that 15.7×.** The oracle column is prani
+1.1.0 on svara 1.0.0, compiled by LLVM; the port column is cycc on svara 3.x. The
+honest prior is that codegen dominates and float width is second.
 
-`port-audit.md` has carried this as a standing convention since 2.0.0:
+## 2.3.x — what the 2.2.1 sweep deferred
 
-> **f32 → f64 everywhere** (svara/naad/hisab are f64-only; widening is **forced**
-> and improves precision)
+**Source**: [`docs/audit/2026-11-17-audit.md`](../audit/2026-11-17-audit.md). The
+sweep confirmed 53 findings, and 2.2.1 repairs 49 of them. A7 is blocked upstream
+(below), and B13 and C13 are kept, with the reasons in the report. What is left
+here is C10, a second decision found while verifying, and a CI gap review D
+suspected but could not exercise.
 
-**It is not forced any more.** ganita **1.1.4** ships a 23-function f32 scalar
-tier — `sin cos exp ln sqrt pow atan2 hypot cbrt floor ceil trunc round abs neg
-min max clamp lerp sign log2 exp2` — and it is **already vendored in
-`lib/ganita.cyr`**. prani calls nothing outside that set: no `tanh`, `sinh`,
-`cosh`, `asin` or `acos` appears anywhere in `src/`. Every one of prani's own
-190 `f64_mul`s, 69 `f64_add`s, 16 `f64_sin`s and 55 `f64_clamp`s has an f32
-equivalent available today.
+- [ ] **Decide what wind does to pitch (audit C10).** `bridge_doppler_velocity_from_wind`
+      returns `+wind` for angle 0, which the oracle documents as wind blowing from the
+      source toward the listener. `spatial_apply_doppler_shift` reads `+` as receding,
+      so a tailwind lowers the pitch: 1,000 samples come back as 1,029. Both halves
+      are the oracle's (`2.0.3:rust-old/src/bridge.rs:115-128`,
+      `2.0.3:rust-old/src/spatial.rs:46`). The physics does not pick a sign: a steady
+      wind shifts nothing when the source and listener are both at rest, because both
+      move against the medium together. The options are to negate it (a tailwind
+      raises the pitch), to keep the sign and say so, or to retire the function as a
+      shift with no physical basis. **Needs an ADR either way**, since each is a
+      divergence or a removal.
+- [ ] **Decide whether a pitch at or above Nyquist is refused.** Found while measuring
+      ADR-0009. A half-size cricket at 8 kHz has its carrier above 4 kHz, and it
+      renders 0.1 s of numerical silence (RMS 3.3e-14) as success. Neither svara nor
+      the oracle refuses such a pitch: `svara_glottal_new` checks its own f0 range,
+      not the sample rate's. Refusing it would make prani stricter than svara for
+      laryngeal voices too, so it is a contract decision (ADR-0001's "never fabricate"
+      against svara's own floor) and not a guard to add quietly.
+- [ ] **CI fetches the installer from cyrius `main`.** The toolchain version is pinned
+      from `cyrius.cyml`, which is correct, but `install.sh` itself comes from the
+      default branch. Fetch it at the pinned tag instead, reading the tag from
+      `cyrius.cyml` as the version is read, never hardcoded (CLAUDE.md). Suspected
+      by review D and not exercised: this tree cannot run CI.
 
-**What 2.0.7 measured, on one host, same species, same durations, same 44100 Hz:**
+## 2.x.x — a raw C ABI (conditional)
 
-| | Rust oracle (f32) | Cyrius port (f64) | |
-|---|---:|---:|---:|
-| `wolf_howl_1s` | 1.39 ms | 21.9 ms | **15.8× slower** |
-| median across 13 synthesis benchmarks | | | **15.7× slower** |
-| range | | | 9.9× – 17.4× |
-| realtime factor, wolf howl | **719×** | **45.6×** | |
+**Source**: the 2.0.0 roadmap's "Out of scope (for 2.0.0)" note.
 
-The gap is remarkably *uniform* — every apparatus, every duration, within a
-9.9–17.4× band. That is the signature of something systemic, not one slow path.
+- [ ] **Only if a non-Cyrius host needs one.** The `ffi` module is re-expressed in
+      Cyrius conventions (handles are pointers, buffers are vecs), so it is not
+      ABI-compatible with the old Rust `extern "C"` surface. No such host exists
+      today. Recorded so the decision is not rediscovered.
 
-⚠ **f32 is not proven to be the cause, and this item must not assume it is.**
-Three things differ between those two columns and only one is float width: the
-oracle is prani 1.1.0 on **svara 1.0.0 / naad 1.0.0** compiled by LLVM at
-`--release`; the port is 2.0.6 on **svara 3.5.4 / naad 2.2.2** compiled by cycc.
-Three major versions of the DSP dependency and a different optimizer sit in that
-15.7×. The honest prior is that **codegen dominates and float width is second**.
+---
 
-What makes f32 worth doing anyway, independent of the ratio:
+## ⛔ Blocked upstream
 
-1. **Parity.** The oracle is f32. The port's whole correctness bar is "matches
-   what Rust did", and every tolerance loosened in the suites
-   (`PRANI_EPSILON` = f32::EPSILON promoted to f64) exists because of the
-   widening. f32 would let those become bit-exact.
-2. **SIMD width.** cycc has `f32v8` — eight lanes against `f64v4`'s four. A
-   vectorised f32 DSP path has twice the lanes of the f64 one.
-3. **Half the memory traffic** on every sample buffer, on a bump allocator that
-   never frees.
-
-**Blocked on the dependencies, and that is the point.** prani cannot do this
-alone: `svara_glottal_next_sample` and `svara_tract_process_sample` are called
-per sample and are f64 on both sides. Filed as **P0 on svara and naad**. Until
-they move, prani could convert only its own arithmetic and would widen at the
-boundary — a hybrid that costs work and buys neither parity nor speed.
-
-**Do not start this before svara and naad have.** Sequence: naad → svara → prani.
-
-> **Update, 2.1.1 (2026-11-07): both P0s are closed, and neither dependency will
-> move.** naad measured `filter_biquad_process_sample` at 18.3 ns in f64 and in f32,
-> and closed its P0 in its ADR-0008. svara followed in its own ADR-0008, *The
-> synthesis core stays f64*, which says prani's roadmap is no longer blocked on it.
-> naad also found that ganita's f32 tier routes through f64 (`sin` 15% slower, `exp`
-> 93%) and that `f32` cannot be a fn return type at cyrius 6.7.18. So the hybrid
-> above is the only form this lane can take. **It needs a decision: close it with an
-> ADR as svara did, or re-scope it.** That decision is not made here.
-
-**Done when**: prani's arithmetic is f32 end to end, the tolerance-loosened
-assertions are re-tightened to bit-exact against the oracle, and 2.0.7's
-comparison is re-run f32-vs-f32 so the remaining gap is attributable to codegen
-alone.
-
-### Consumer-green — kiran and joshua
-
-**Source**: the 2.0.0 criteria carried this unmet, and it is the one criterion
-still open.
-
-Neither consumer has ported up the stack, so this is **blocked externally** and
-has no version. It is the last real check on the FFI surface: nothing has driven
-`prani_ffi_stream_start` / `_fill` / `_is_finished` from a host callback, which is
-where 2.0.3's stream repairs (ADR-0003) would be exercised.
-
-**It no longer gates `rust-old/`'s retirement** — decided 2026-08-31, with
-2.0.6's `streaming.cyr` standing in for the lifecycle check. It remains open as
-real work: an example is not a host, and a host will find things an example
-cannot (threading, callback timing, lifetime across frames).
-
-### Conditional — a raw C ABI
-
-**Source**: the previous roadmap's "Out of scope (for 2.0.0)" note.
-
-The `ffi` module is re-expressed in Cyrius conventions (handles = pointers,
-buffers = vecs), so it is not ABI-compatible with the old Rust `extern "C"`
-surface. **Only worth building if a non-Cyrius host actually needs it** — no such
-consumer exists today. Recorded so the decision is not rediscovered.
+- [ ] ⛔ **Consumer-green: kiran and joshua.** The one 2.0.0 criterion still open.
+      Nothing has yet driven `prani_ffi_stream_start` / `_fill` / `_is_finished` from a
+      host callback, which is where the stream contract (ADR-0003, and since 2.2.0
+      `prani_ffi_stream_last_error`) would meet threading, callback timing and lifetime
+      across frames. 2.0.6's `docs/examples/streaming.cyr` stands in for the lifecycle;
+      an example is not a host. **Blocked on kiran and joshua porting up the stack.**
+- [ ] ⛔ **svara's own allocations stop at the null page.** prani reports every
+      refusal of its own allocations (ADR-0008), and what svara reports it passes on.
+      Refusals of svara's own fixed-size allocations end the process inside svara, and
+      `svara_tract_new` uses a `vec_push` that exits. That is svara's ADR-0009.
+      **Blocked on svara reporting more.** When it does, pass the codes on, and add the
+      windows to `tests/allocrefused.tcyr`'s naad section.
+- [ ] ⛔ **A vec cannot be created at its final size.** A render whose length is known
+      up front (`crvoice_vocalize_with_intent`'s output, the purr path) still grows
+      by doubling, because the stdlib has no `vec_with_capacity` and svara declined
+      to hand-build vec headers rather than depend on the layout. Found as audit A7.
+      **Blocked on a stdlib `vec_with_capacity`.** When it lands, pre-size through
+      `prani_vec_new`'s funnel, so the refusal is still reported (ADR-0008).
+- [ ] ⛔ **The derive-generated decoders take the last of two equal keys and accept
+      `05`.** `#derive(Serialize)` is the compiler's, so `PrRng`, `DcBlocker`, the
+      fatigue and emotion types, `IntentModifiers`, `SpeciesParams`, `CallElement` and
+      `CallBout` answer a duplicate key differently from prani's four hand-written
+      decoders, which bayan 1.11.1 made strict. Found at 2.1.1. **Blocked on cyrius's
+      derive.** When it changes, add the case to `tests/hardening.tcyr`'s duplicate-key
+      group.
+- ⛔ **Codegen.** The 15.7× against the Rust oracle is mostly cycc against LLVM, and
+  it belongs to cyrius.
 
 ---
 
 ## Watch items — not scheduled, but written down
 
-Things deliberately left alone, with the condition that would change that.
+Each is deliberately left alone, with the condition that would change that.
 
-- **Two duplications held at two instances.** CLAUDE.md says wait for the third
-  before extracting. `crtract_synthesize_stridulatory`'s bee branch is
-  byte-identical to `crtract_synthesize_vibratile`, and the `boundary_boost`
-  block is duplicated verbatim between `voice.cyr` and `stream.cyr`. **Extract on
-  the third instance**, not before. (Source: audit report, Refactor.)
-- **ADR-0003's retirement rule.** A failed `stream_fill_buffer` retires the
-  stream. 2.2.0 revisited this when a refused allocation became a third failure
-  cause (ADR-0008), and retirement stood: the bump arena frees nothing, so a refusal
-  is not one a later fill could wait out. `stream_last_error` now says which cause it
-  was. **Revisit if prani ever allocates from something that can free**, an arena a
-  host can reset for instance, because then a refusal can be transient.
-- **svara's sample-rate floor is a measurement, and it has already moved once.**
-  ADR-0001 chose not to restate svara's rule in prani source. That rule was
-  ">1000 Hz" until svara **3.5.4** repaired two defects prani found, after which
-  the real floor is **>1200 Hz** — svara's fixed 600 Hz subglottal bandpass needs
-  nyquist above 600. `tests/hardening.tcyr`'s **F12** group pins the 1200/1201
-  and 7500/7501 boundaries with controls. **If those controls fail, the floor
-  moved again — re-measure it, do not hardcode a new number in prani.**
+- **Two duplications held at two instances.** `crtract_synthesize_stridulatory`'s bee
+  branch is byte-identical to `crtract_synthesize_vibratile`, and the `boundary_boost`
+  block is duplicated between `voice.cyr` and `stream.cyr`. CLAUDE.md waits for the
+  third instance. **Extract on the third, not before.**
+- **ADR-0003's retirement rule.** A failed fill retires the stream; 2.2.0 kept that
+  for a refused allocation, because the bump arena frees nothing, so a refusal is not
+  one a later fill could wait out. **Revisit if prani ever allocates from something
+  that can free**, an arena a host can reset for instance.
+- **svara's sample-rate floor is a measurement.** It moved once, from >1000 Hz to
+  >1200 Hz at svara 3.5.4. `tests/hardening.tcyr`'s F12 group pins 1200/1201 and
+  7500/7501 with controls. **If those controls fail, re-measure; do not hardcode the
+  floor in prani** (ADR-0001).
 - **prani's excitation gain is solved against svara's pulse.** `PR_TR_EXC_GAIN`
-  (`src/tract.cyr`, THE EXCITATION LEVEL) puts svara 3.11.0's corrected Rosenberg
-  pulse back at the oracle's loudness: +7.37 dB, solved so the median of 56
-  reference renders matches 2.1.1. It divides svara's own `SV_G_ROSENBERG_GAIN`
-  back out, so a recalibration of that constant flows through. A change to the
-  pulse's shape does not. `tests/voice.tcyr`'s excitation-level group pins the
-  median, the ±7.5 dB spread and full scale, and `tests/tract.tcyr` pins the two
-  svara facts the maths rests on. **If either group fails on a svara bump,
-  re-solve the gain by the method in that block. Do not nudge it.**
-- **Re-running the Rust comparison depends on crates.io, not on this repo.**
-  The oracle at tag `2.0.3` builds against `svara 1.0.0` / `naad 1.0.0` /
-  `hisab 1.2.0`, checksums pinned in its `Cargo.lock`. **The risk that mattered
-  is spent**: 2.0.7 captured the comparison while it still built, and
-  `docs/benchmarks.md` records it with its method. If a crate is ever yanked, a
-  *re-run* becomes impossible — the recorded figures do not. Only revisit this if
-  someone needs a fresh comparison, e.g. after 2.3.0 Lane A makes it f32-vs-f32.
+  (ADR-0007) divides svara's `SV_G_ROSENBERG_GAIN` back out, so a recalibration of that
+  constant flows through, but a change to the pulse's shape does not.
+  `tests/voice.tcyr` pins the calibration and `tests/tract.tcyr` the svara facts it
+  rests on. **If either fails on a svara bump, re-solve the gain by the method in
+  `src/tract.cyr`. Do not nudge it.**
+- **Re-running the Rust comparison depends on crates.io.** The oracle at tag `2.0.3`
+  builds against svara 1.0.0, naad 1.0.0 and hisab 1.2.0, pinned in its `Cargo.lock`.
+  2.0.7 recorded the comparison while it built, and the figures stand. **Revisit only
+  for a fresh comparison**, such as an f32-vs-f32 run after 2.3.0.

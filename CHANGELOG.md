@@ -20,6 +20,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.2.1] - the second P(-1) sweep
+
+Patch release: a whole-tree audit, refactor, hardening and optimization sweep of
+2.2.0, and its repairs ([`docs/audit/2026-11-17-audit.md`](docs/audit/2026-11-17-audit.md)).
+Four independent reviews confirmed 53 findings (6 HIGH, 18 MEDIUM, 29 LOW), and
+verifying them turned up 4 more. **52 of the 57 are repaired**, each with a
+regression test that fails on 2.2.0. Six of the repaired defects were the oracle's
+own, and [ADR-0009](docs/adr/0009-renders-do-not-depend-on-how-they-are-cut.md)
+records the divergence.
+
+No dependency moves: cyrius 6.7.18, svara 3.14.0, naad 2.3.5, hisab 3.5.0, goonj
+2.3.2, sakshi 2.5.10. The consumer floor stays cyrius 6.7.2.
+**2,477 assertions / 21 suites.**
+
+**The audio changes where ADR-0009 says it does, and nowhere else.** At 44.1 kHz,
+9 of the 13 species render bit-identical to 2.2.0. Streams and the dog at 8 kHz
+move the most. No render changed its status or length, and none became non-finite.
+
+### Changed
+
+- ⚠ **A render no longer depends on how it is cut** (ADR-0009). Each of these was
+  faithful to `2.0.3:rust-old/`:
+  - **The tract keeps a sample clock** (B1). The syringeal dual source, the
+    stridulatory and the vibratile arms restarted time at every call, so through
+    vocalize's 20 ms blocks a cricket never fell silent between chirps. A 1 s
+    cricket chirp had 0 of 50 quiet windows; it now has 29, the same as one call.
+    `crtract_reset` zeroes the clock, and the tract's JSON carries it as `"clock"`.
+    A document without one, as 2.2.0 wrote, decodes at 0.
+  - **An estimated F4/F5 above Nyquist is placed in band** (B2). Through 2.2.0, svara
+    refused the whole target and the species was replaced by svara's default
+    vowel: a dog at 8 kHz rendered at 523/1588/2469 Hz instead of its own
+    550/1650/2750.
+  - **A stream renders vocalize's 20 ms blocks** (B3), with the tilt filter's state
+    carried across them. Through 2.2.0 it rendered one block per host fill, and its
+    level depended on the host's buffer size: an RMS spread of 6.0 dB (wolf) to
+    20.4 dB (lion) across fills of 32–800 samples. It is now bit-identical at every
+    buffer size.
+  - **A stream renders the voice it was given** (B4): the voice's own params plus
+    vocalize's effort breathiness delta, not the species table.
+  - **`stream_new` builds the tract** (B10). A sample rate svara refuses is
+    `PRANI_ERR_SVARA` from `stream_new`, not a first fill that returns 0. The first
+    fill costs what every later one does: 10,504 B at 2.2.0, at most one
+    `svara_glottal_new` now.
+  - **A chorus spans its calls** (C3). MATING doubles a call, and the mix used to cut
+    each one to half: 800 of 1,600 samples.
+- ⚠ **The four hand-written decoders require every field, present and an integer**
+  (A2, B5, C4, C5): `crvoice_from_json_str`, its nested params,
+  `crtract_from_json_str` and `sequence_call_phrase_from_json_str`. Through 2.2.0 an
+  absent or mistyped field read as 0. A voice without `"species"` decoded as a Wolf,
+  `"vocal_effort":0.9` as an effort of 0.0, `{}` as an empty phrase, and a tract
+  without its rng pair as one whose noise was exact silence.
+  - `spectral_tilt` stays optional, as the oracle's `#[serde(default)]` made it.
+  - The tract decoder refuses an even `rng_inc`, which `prani_rng_new` never makes.
+  - The voice decoder refuses a `params.apparatus` that is not its species' (V1). A
+    "wolf" whose params said vibratile used to pass the HOWL gate and render 4,410
+    samples of wing vibration as a successful howl.
+- ⚠ **The point-of-use guards range the voice's own `vocal_effort` (in [0, 1]) and
+  `size_scale` (> 0)** (A1, A5), in vocalize and the cat purr. A raw-set effort of 2.0
+  or a NaN size used to render as success. `crvoice_set_vocal_effort` and
+  `crvoice_apply_lombard_effect` ignore a NaN.
+- ⚠ **More inputs are refused** (B6, B7, B11, C6, C9):
+  - a `purr_f0` outside (0, sample_rate);
+  - an oscillator whose phase would overflow;
+  - a species range whose clamped `lo` exceeds `hi`;
+  - a fatigue state outside [0, 1] in `fatigue_modifiers`;
+  - a NaN in three bridge functions (`intent_from_threat_level`, `species_from_f0`,
+    `perturbation_from_urgency`).
+- **`preset_make` stores its fields clamped**, as the builders clamp, so a preset's own
+  JSON always reads back (A4). `preset_to_json` escapes the name, and a null name
+  is refused (A3). The escaping is prani's own, built on `str_builder_putc`, and
+  writes the stdlib's `str_builder_add_json_cstr` bytes, held to them for every
+  byte 1–255. The stdlib function is newer than cyrius 6.7.2, prani's consumer
+  floor.
+- **The bout ceiling counts `count − 1` gaps**, so a valid bout at the limit is no
+  longer refused (C8).
+- **Refactors.** `prani_vec_scale` replaces three copies of a scaling loop (A10).
+  `crvoice_params_in_range` delegates to `species_params_in_range`, which it had
+  drifted from (A8).
+
+### Fixed
+
+- **Faults reachable through public functions.** Every function that takes a handle
+  now answers a null or error handle without reading it (A6, B9, C1, C2). A void
+  mutator does nothing, and every other function returns the code, or
+  `prani_handle_code`'s category code for null. Through 2.2.0 each of these was a
+  SIGSEGV:
+  - the FFI's three RTPC setters given an error handle;
+  - an error element in a phrase;
+  - every emotion and fatigue function but `emotion_evaluate`;
+  - the voice accessors and `to_json` functions;
+  - `preset_make(0, …)` followed by `preset_to_json`;
+  - a null message to any `prani_log_*`.
+- **The spatial functions pass an incoming error through** rather than rewriting
+  it (C7).
+- **A refused tilt retires the stream** with `stream_last_error` set, as ADR-0003
+  says (B8). Its flag used to be a dead store.
+
+### Added
+
+- **`emotion_evaluate_into`, `fatigue_modifiers_into` and
+  `bridge_perturbation_from_urgency_into`**, which write into a struct the caller
+  owns. They allocate nothing; the allocating forms keep 40, 32 and 16 B per call,
+  for life (C11).
+- **`tests/layers.tcyr`**, a 20th suite. It pins the RMS of 15 renders to a
+  relative 1e-9: every layer past the tract, which no test pinned (D2). It catches
+  each of 14 single-edit mutants of those layers, and on 2.2.0 it fails at exactly
+  the four renders ADR-0009 moves.
+- **`tests/logging.tcyr`**, a 21st suite. It counts each wrapper's delivered
+  events through sakshi's ring, including the two wrappers prani never calls (D16).
+- **A real fuzz harness**, `tests/prani.fcyr` (D17). It feeds 1,500 mutated
+  documents to all four decoders: byte overwrites, truncations, spans, structural
+  characters and JSON escapes. Each answer must be a handle or a prani code. An
+  accepted document must re-encode, decode again and encode to the same bytes, and
+  a voice or tract it accepts must render. On 2.2.0 it finds A3 at round 786.
+- **`scripts/bench-check.sh --write`** records `benches/baseline.csv` as each
+  benchmark's fastest of three runs, with the host, the toolchain and the tree in its
+  header. A compare warns when the baseline's toolchain is not the one running (D5).
+- [ADR-0009](docs/adr/0009-renders-do-not-depend-on-how-they-are-cut.md) and the
+  [audit report](docs/audit/2026-11-17-audit.md).
+
+### Gates
+
+- **`check-alloc.sh` catches what it claims** (D4). Through 2.2.0 it matched only
+  `name(` on one line; `alloc (n)`, a call split across lines, and `&alloc` compiled
+  and passed. It now scans `src/` recursively.
+- **`run-examples.sh` requires the five examples, and checks each with `cyrfmt` and
+  lint** (D11, D15). It used to pass with one.
+- **`bench-check.sh` prints a failing harness's output** and cleans up after itself
+  (D12).
+- **O2 is a real budget** (D3): the marginal block cost must equal one
+  `svara_glottal_new`, not fit under 1,000,000 bytes.
+- **`t_any_nonzero` compares numbers** (D1), so a buffer of −0.0 no longer counts as
+  sound.
+- **`benches/baseline.csv` is re-recorded on cyrius 6.7.18.** The old one was 6.5.36's,
+  so 16 of 18 rows read 0.45–0.82x and would have hidden a 2.4× regression.
+
+### Docs
+
+- `input-ranges.md`: the fatigue rows (D7), two placeholder cells and "f64_to
+  wraps" (D14), the builders' row (A9), and a 2.2.1 note.
+- `port-audit.md`: the allocation funnel in its conventions (D8), and re-measured
+  counts, bundle size, error variants and the sakshi leaf (D9).
+- The examples check every constructor (D10). `streaming.cyr` measures each fill
+  against one `svara_glottal_new` (D6), and `error_handling.cyr` shows the eager
+  tract.
+- Every bare `src` line citation in the tests and docs is now a function name (D13).
+  The comments and headers that no longer matched the code are corrected (A9, B12,
+  C12, D17).
+- Roadmap: completed items removed. Open work is pinned to 2.3.0, 2.3.x and 2.x.x,
+  and the upstream-blocked section is kept, with the A7 pre-sizing added to it.
+
+### Verified
+
+- **The audio changes are where ADR-0009 puts them.** The 716,010-line sweep against
+  2.2.0 moved 141,097 of 709,301 sample values, in 109 of 404 renders. None changed
+  its status or length, and none became non-finite.
+  - At 44.1 kHz: songbird −0.00 to +0.07 dB, raptor −0.15 to +0.00 dB, cricket
+    −1.31 to −1.45 dB, bee in its low bits. The other nine species are bit-identical.
+  - At 8 kHz: the dog −1.5 to +7.4 dB, streams −1.8 to +7.6 dB.
+  - Of the 26 JSON documents, only the tract's changed, by its new `"clock"`.
+  - Of 953 hostile cases, none changed its answer.
+- **Every regression test fails on 2.2.0.** The hardening suite faults on 2.2.0 at
+  its dead-handle group, so the B2/B4/C3 group was run on its own there.
+- **Timing**, over six rounds alternating 2.2.0 and this tree on one machine. The
+  host was carrying an unrelated workload throughout, so the absolute times are not
+  comparable to earlier releases' figures, but each round ran both trees under the
+  same load, so the ratios hold:
+  - every synthesis benchmark is 0.98–1.01× (median of medians 1.004×);
+  - the 1 s stream is **1.024×**, the cost of rendering in its own 20 ms blocks and
+    carrying the tilt state;
+  - `emotion_evaluate` is **1.04×** (182 → 189 ns, median), for the call layer the
+    `_into` form shares. The first draft validated the state twice, once in
+    `emotion_evaluate` and again in the `_into` it called. It measured **1.37×**, so
+    each form now validates once.
+- **Gates.**
+  - `cyrius audit` exits 0, and all 21 suites pass.
+  - `scripts/check-alloc.sh` passes, and so do the five examples, now under `cyrfmt`
+    and lint.
+  - The fuzz harness passes, the suite passes for aarch64 under qemu,
+    `cyrius distlib` is current, and `cyrius deps --verify` passes 50 of 50.
+- **The consumer floor stays cyrius 6.7.2.** A from-scratch consumer builds and runs
+  warning-free on 6.7.2 and 6.7.18, and 6.7.1 still fails inside naad, as at 2.2.0.
+  This check caught the first draft escaping preset names with
+  `str_builder_add_json_cstr`, which 6.7.2 does not have.
+
 ## [2.2.0] - a refused allocation is reported
 
 Minor release, and the first public-surface change since the port. Roadmap 2.2.0's

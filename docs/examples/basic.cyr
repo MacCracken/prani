@@ -90,6 +90,13 @@ fn main() {
     println("1. Build the voice");
     println("   var wolf = crvoice_new(PRANI_SP_WOLF);");
     var wolf = crvoice_new(PRANI_SP_WOLF);
+    # Even a constructor is checked: since 2.2.0 crvoice_new returns
+    # PRANI_ERR_ALLOC when the arena refuses it, and the reads below would
+    # otherwise take that code for a voice.
+    if (prani_is_err(wolf) == 1) {
+        println("   crvoice_new failed -- see section 3 for what the codes mean");
+        return 1;
+    }
 
     ex_line_int("   species tag     : ", crvoice_species(wolf), "  (PRANI_SP_WOLF)");
     # effective_f0 is (f0_default + f0_offset) / size_scale clamped to the
@@ -208,6 +215,10 @@ fn main() {
     println("5. The error channel, on purpose");
     println("   A snake has no vocal folds, so PRANI_SP_SNAKE cannot howl.");
     var snake = crvoice_new(PRANI_SP_SNAKE);
+    if (prani_is_err(snake) == 1) {
+        println("   crvoice_new(PRANI_SP_SNAKE) failed");
+        return 1;
+    }
     var bad = crvoice_vocalize(snake, PRANI_VOC_HOWL, SAMPLE_RATE, DURATION);
     if (prani_is_err(bad) == 0) {
         # If this ever happens the convention has been broken, and an example

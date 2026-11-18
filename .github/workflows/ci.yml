@@ -109,10 +109,12 @@ jobs:
         # disappearing is a real regression, not noise.
         run: sh scripts/bench-check.sh
 
-      - name: Examples — build and run all five
+      - name: Examples — fmt · lint · build · run all five
         # Roadmap 2.0.6's gate. `rust-old/` (the frozen Rust oracle) was removed
         # in 2.0.8, after which a worked example is the only executable
         # statement of how this API is driven — so they must not be left to rot.
         # Each one includes dist/prani.cyr exactly as a consumer would, so this
         # also proves the published bundle is usable from outside the library.
+        # Since 2.2.1 the script fails if any of the five is missing, or if one
+        # drifts from cyrfmt or lint (audit D11, D15).
         run: sh scripts/run-examples.sh

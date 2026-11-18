@@ -138,7 +138,7 @@ fn prani_ffi_voice_destroy(handle) {
 # (0.0 whisper .. 0.5 normal .. 1.0 shout). crvoice_set_vocal_effort clamps a
 # finite value into [0,1]; a non-finite one is rejected (no-op, voice unchanged).
 fn prani_ffi_voice_set_effort(handle, effort) {
-    if (handle == 0) { return 0; }
+    if (handle <= 0) { return 0; }   # null or an error handle: nothing to set (2.2.1)
     if (prani_is_finite(effort) == 0) { return 0; }
     crvoice_set_vocal_effort(handle, effort);
     return 0;
@@ -164,7 +164,7 @@ fn prani_ffi_voice_set_effort(handle, effort) {
 # f0_offset, size_scale and vocal_effort on the way to rejecting the size.
 # Rejecting first makes the call a true no-op.
 fn prani_ffi_voice_set_size(handle, size) {
-    if (handle == 0) { return 0; }
+    if (handle <= 0) { return 0; }   # null or an error handle: nothing to set (2.2.1)
     if (prani_is_finite(size) == 0) { return 0; }
     crvoice_reset_individual(handle);
     # crvoice_with_size is #must_use because it is a chaining builder; here
@@ -182,7 +182,7 @@ fn prani_ffi_voice_set_size(handle, size) {
 # 0.005 clamped to [0, 0.5]), so there is no out-of-range dB value to reject and
 # no threshold to restate here. Only a non-finite reading is rejected.
 fn prani_ffi_voice_apply_lombard(handle, ambient_spl_db) {
-    if (handle == 0) { return 0; }
+    if (handle <= 0) { return 0; }   # null or an error handle: nothing to set (2.2.1)
     if (prani_is_finite(ambient_spl_db) == 0) { return 0; }
     crvoice_apply_lombard_effect(handle, ambient_spl_db);
     return 0;

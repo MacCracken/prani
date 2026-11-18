@@ -107,13 +107,14 @@ ends the process, which is why the count is checked first.
 |---|---|---|---|
 | `fatigue_record_call` | `duration` | [0.0, 1e9] seconds, inclusive at both ends (PR_FAT_MAX_DURATION_S = 0x41cdcd6500000000) | `NONE — record_call has no error channel. Guard fires prani_log_error("prani: fatigue record_call duration out of range, call not recorded") and drops the whole call event with an early `return 0;`; state left bit-identical. No signature change (callers already discard the return).` |
 | `fatigue_rest` | `duration` | [0.0, 1e9] seconds, inclusive at both ends (same PR_FAT_MAX_DURATION_S) | `NONE — rest has no error channel. Guard fires prani_log_error("prani: fatigue rest duration out of range, rest not recorded") and drops the rest event with an early `return 0;`. No signature change.` |
-| `fatigue_modifiers_make` | `pitch_offset, breathiness_delta, amplitude_scale, jitter_scale (all four)` | finite (prani_finite2 twice) — REPORTED ONLY, not enforced | `NONE, and none possible without a contract change. modifiers_make returns a POINTER with no error channel; giving it one is roadmap 2.2.0's constructor-contract work, so per decision 2 it is left alone. It fires prani_log_error("prani: fatigue modifiers built from a non-finite value") and returns the values it was given, UNALTERED.` |
+| `fatigue_modifiers_make` | `pitch_offset, breathiness_delta, amplitude_scale, jitter_scale (all four)` | finite (prani_finite2 twice) | `PRANI_ERR_INVALID_VOCALIZATION` (since 2.2.0, when constructors gained an error channel; through 2.1.2 it only logged and returned the values unaltered) |
+| `fatigue_modifiers` / `fatigue_modifiers_into` | `the state's fatigue and alarm_habituation` | each in [0.0, 1.0], the range record_call and rest maintain | `PRANI_ERR_INVALID_VOCALIZATION` (2.2.1, audit C6: a state poisoned through the raw setters returned NaN modifiers) |
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
 - **`fatigue_record_call` / `duration`** — YES. `2.0.3:rust-old/src/fatigue.rs`'s record_call(duration: f32, ...) accepted every one of NaN, ±inf, negative and 1e300 and poisoned itself identically — f32 could represent all of them. Rejecting them is deliberate. Dropping the event rather than substituting a value is not ADR-0001 fabrication: no value is invented, and the log line reports the failure through the channel prani already has (precedent: tract.cyr:117, tract.cyr:136).
 - **`fatigue_rest` / `duration`** — YES. The f32 oracle's rest(duration: f32) accepted NaN, ±inf and negatives with the same consequences. Rejecting them is deliberate.
-- **`fatigue_modifiers_make` / `pitch_offset, breathiness_delta, amplitude_scale, jitter_scale (all four)`** — No behavioural divergence — the returned struct is bit-identical to the oracle's in every case. Only a log line is added.
+- **`fatigue_modifiers_make` / `pitch_offset, breathiness_delta, amplitude_scale, jitter_scale (all four)`** — YES, since 2.2.0. The oracle built the struct from whatever it was given; the port refuses a non-finite field with `PRANI_ERR_INVALID_VOCALIZATION` (ADR-0008 gave constructors the error channel this needed). A finite input still gives a struct bit-identical to the oracle's.
 
 </details>
 
@@ -130,8 +131,8 @@ ends the process, which is why the count is checked first.
 
 <details><summary>Deliberate divergences from the Rust oracle in this module</summary>
 
-- **`prani_ffi_stream_start` / `sample_rate`** — Rust's `as usize` cast saturates, so the oracle folded a negative or NaN rate into total_samples = 0 and returned a stream that produced an empty buffer. The port now returns null instead. Deliberate: the oracle could not represent the state (usize), i64 can, and f64_to wraps rather than saturates.
-- **`prani_ffi_stream_start` / `duration`** — DELIBERATE: the oracle accepted a negative duration (usize saturation folded it into 0 and handed back a stream). The port rejects it with null. Justification: i64 can represent the state the oracle could not, and f64_to wraps rather than saturates, so the port would otherwise build a stream whose total_samples is large and negative and whose finished-ness is an accident of a signed compare rather than a real zero. A host that asks for -1 seconds has a bug (ADR-0001).
+- **`prani_ffi_stream_start` / `sample_rate`** — Rust's `as usize` cast saturates, so the oracle folded a negative or NaN rate into total_samples = 0 and returned a stream that produced an empty buffer. The port now returns null instead. Deliberate: the oracle could not represent the state (usize), i64 can, and the port refuses it rather than folding it to 0. (f64_to saturates as Rust's cast does -- measured on cyrius 6.7.18, see the table at the top -- so the difference is the refusal, not the cast.)
+- **`prani_ffi_stream_start` / `duration`** — DELIBERATE: the oracle accepted a negative duration (usize saturation folded it into 0 and handed back a stream). The port rejects it with null. Justification: i64 can represent the state the oracle could not, so the port would otherwise build a stream whose total_samples is negative and whose finished-ness is an accident of a signed compare rather than a real zero. A host that asks for -1 seconds has a bug (ADR-0001).
 
 </details>
 
@@ -139,7 +140,7 @@ ends the process, which is why the count is checked first.
 
 | Function | Parameter | Accepted range | Rejects with |
 |---|---|---|---|
-| `preset_from_json_str` | `name` | must be a JSON string node (present + string-typed) | `PRANI_ERR_INVALID_TRACT_PLACEHOLDER_NOT_USED -> PRANI_ERR_INVALID_SPECIES` |
+| `preset_from_json_str` | `name` | must be a JSON string node (present + string-typed) | `PRANI_ERR_INVALID_SPECIES` |
 | `preset_from_json_str` | `species` | integer node, [0, PRANI_SP_COUNT) i.e. 0..12 | `PRANI_ERR_INVALID_SPECIES` |
 | `preset_from_json_str` | `size` | integer node, f64 in [0.1, 10.0] | `PRANI_ERR_INVALID_SPECIES` |
 | `preset_from_json_str` | `f0_offset` | integer node, f64 in +/-(f0_max - f0_min) FOR THE DECLARED SPECIES (Wolf +/-1050, Cricket +/-5000, Lion +/-160, ...) | `PRANI_ERR_INVALID_SPECIES` |
@@ -245,10 +246,10 @@ ends the process, which is why the count is checked first.
 - **`species_params_in_range` / `f0_min`** — The 20000 Hz ceiling is a DELIBERATE NARROWING - Rust f32 held any value and nothing rejected it. Non-finite and negative are not a divergence in spirit: the oracle's f32::clamp panics on a NaN bound.
 - **`species_params_in_range` / `f0_max`** — Ceiling is a deliberate narrowing; see f0_min.
 - **`species_params_in_range` / `f0_default`** — Ceiling is a deliberate narrowing; see f0_min.
-- **`species_params_in_range` / `tract_scale`** — DELIBERATE DIVERGENCE. Rust f32 could hold 0.0 and negatives and nothing in the oracle rejected them - but the oracle also never constructed one, and 0.0 is the fabricated-zero case ADR-0002 named. NOTE: the task brief's premise that tract_scale is a divisor is INCORRECT and I did not rest the guard on it - I checked every f64_div in src/ and tract_scale is never a denominator; its only prani consumer multiplies it (voice.cyr:250).
+- **`species_params_in_range` / `tract_scale`** — DELIBERATE DIVERGENCE. Rust f32 could hold 0.0 and negatives and nothing in the oracle rejected them - but the oracle also never constructed one, and 0.0 is the fabricated-zero case ADR-0002 named. NOTE: the task brief's premise that tract_scale is a divisor is INCORRECT and I did not rest the guard on it - I checked every f64_div in src/ and tract_scale is never a denominator; its only prani consumer multiplies it (`crvoice_effective_tract_scale`).
 - **`species_params_in_range` / `formant0, formant1, formant2`** — Both bounds are a deliberate narrowing - Rust's `formants: [f32; 3]` was unconstrained.
 - **`species_params_in_range` / `bandwidth0, bandwidth1, bandwidth2`** — Deliberate narrowing; Rust's `bandwidths: [f32; 3]` was unconstrained.
-- **`species_params_from_node` / `the whole parsed node (return contract)`** — Contract change in the ADR-0002 direction: Rust's serde_json returned Result here too, so 'pointer or negative code' RESTORES the oracle's fallibility rather than diverging. Both call sites already check - verified in the tree: src/tract.cyr:302-305 propagates prani_is_err(params) before crtract_new, and src/voice.cyr:251-252 routes through crvoice_params_in_range, which rejects p == 0 and prani_is_err(p) before any dereference.
+- **`species_params_from_node` / `the whole parsed node (return contract)`** — Contract change in the ADR-0002 direction: Rust's serde_json returned Result here too, so 'pointer or negative code' RESTORES the oracle's fallibility rather than diverging. Both call sites already check - verified in the tree: `crtract_from_json_str` propagates prani_is_err(params) before crtract_new, and `crvoice_from_json_str` routes through crvoice_params_in_range, which rejects p == 0 and prani_is_err(p) before any dereference.
 
 </details>
 
@@ -256,7 +257,7 @@ ends the process, which is why the count is checked first.
 
 | Function | Parameter | Accepted range | Rejects with |
 |---|---|---|---|
-| `stream_new` | `voice` | > 0 (a live heap handle) | `PRANI_ERR_INVALID_TRACT_NOT_USED__PRANI_ERR_INVALID_SPECIES` |
+| `stream_new` | `voice` | > 0 (a live heap handle); an error code passes through unchanged (2.2.0) | `PRANI_ERR_INVALID_SPECIES` |
 | `stream_new` | `the voice's species tag (ADDED 2.0.6)` | integer in [0, PRANI_SP_COUNT) | `PRANI_ERR_INVALID_SPECIES` |
 | `stream_new` | `sample_rate` | finite and > 0; NO upper bound and no lower bound of prani's own | `PRANI_ERR_INVALID_TRACT` |
 | `stream_new` | `duration` | finite and >= 0 seconds (ZERO IS VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
@@ -378,6 +379,13 @@ records), plus the two species point-of-use guards 2.0.6 added to `voice.cyr` an
 >   stream counters pass an error on.
 > - **Unchanged.** The mutators (`set_vocal_effort`, `apply_lombard_effect`,
 >   `emotion_set`, `emotion_update`, `fatigue_record_call`) still return nothing.
+>   Since 2.2.1 each answers a null or error handle without reading it, and
+>   `set_vocal_effort` and `apply_lombard_effect` ignore a NaN (audits A6, C1).
+> - **2.2.1** (the [2026-11-17 sweep](../audit/2026-11-17-audit.md)) added the voice's own
+>   `vocal_effort` and `size_scale` to the point-of-use guards (A1, A5), and field
+>   presence to the four hand-written decoders (A2, B5, C4, C5). `crvoice_from_json_str`
+>   also refuses a `params.apparatus` that is not its species' (the vocalization gate
+>   reads the species, the tract renders the params).
 >
 > The point-of-use guards all stay, for a NaN that arrives through a raw setter or a
 > document. The rows below are left as the 2.0.5 record.
@@ -393,7 +401,7 @@ function that consumes it checks the voice's own derived values.
 
 - dcblocker_process(b, x) — x: any f64 INCLUDING non-finite. NOT guarded, for two reasons. COST: this is the module's hot path at 19 ns/sample (docs/benchmarks.md); prani_is_finite is an f64_abs + f64_lt, so a per-sample guard would be a large fraction of the work it protects, on every sample of every synthesis — the brief rules this out and I agree. PLACE: x is never host data. It is prani's own tract output, so a non-finite x means a host number (sample_rate, f0, velocity) already got through an entry point upstream — that is where the range guard belongs. It also has no error channel to report through: every f64 bit pattern is a legal sample, so a negative return is not representable.
 - dcblocker_process_buffer(b, samples) — no error return added. THE GUARD BELONGS AT THE CALLERS (crtract_synthesize* in tract.cyr, which take the host's sample_rate and f0 and already return value-or-negative-code). This function has never had an error channel, and inventing one would be the signature change 2.0.5 forbids — and it would be inert anyway, since I cannot touch tract.cyr to make anyone read it. A latch DETECTOR was added instead (see notes).
-- prani_vec_extend(dst, src) — there is no range here to check. It copies opaque f64 bit patterns and never interprets one as a number. An O(n) non-finite scan would add a pass over the audio to the block-accumulation path (voice.cyr:905) to reject a value the entry point should have refused before any of it was synthesized: wrong layer, at a cost proportional to the buffer. Pinned with a test asserting a NaN element is copied VERBATIM, so the decision is visible rather than an omission.
+- prani_vec_extend(dst, src) — there is no range here to check. It copies opaque f64 bit patterns and never interprets one as a number. An O(n) non-finite scan would add a pass over the audio to the block-accumulation path (`crvoice_vocalize_with_intent`'s block loop) to reject a value the entry point should have refused before any of it was synthesized: wrong layer, at a cost proportional to the buffer. Pinned with a test asserting a NaN element is copied VERBATIM, so the decision is visible rather than an omission.
 - prani_vec_extend's OTHER hazard (src being a negative error code rather than a vec, which would deref a small negative address) — deliberately out of scope: that is F1's class, not an input range, and all three call sites check prani_is_err before extending.
 - prani_vec_push_zeros — no upper bound on n. A cap would be an arbitrary magic number the oracle never had (Vec/usize), and F10's overflow is an arithmetic bug at its own site in sequence.cyr, not a range violation here. The negative-n guard already catches F10's observable symptom, because the overflow wraps negative.
 - prani_map_naad_error(naad_code) — naad_code is a foreign error code, not a numeric range. Unchanged.
@@ -473,13 +481,13 @@ function that consumes it checks the voice's own derived values.
 - crtract_apply_spectral_tilt's sample_rate -- the function never reads it (the coefficient comes from tilt_db alone; the parameter exists for oracle signature parity). Rejecting a value a function does not read reports a failure that cannot happen. Pinned: a NaN sample_rate is accepted and changes nothing (y[0] is still 0.5 for a -6 dB/oct tilt).
 - options on the stridulatory path -- never read there (the oracle writes `let _ = options;`), so there is nothing with a range. Pinned: NaN options with a cricket still succeed.
 - f0 on the noise path -- crtract_synthesize_noise takes no f0, so a snake's synthesis never looks at it. This is why the guards live in the five apparatus paths rather than in the crtract_synthesize dispatcher: a dispatcher-level guard would reject a NaN f0 for a snake, a failure that cannot happen. Pinned, so moving the guard up fails the suite and says why.
-- from_json_str rng_state / rng_inc -- every 64-bit pattern is a reachable PCG32 state; neither is a number with a range. An EVEN `inc` is the one arguable case (PCG32 wants it odd, and prani_rng_new always emits odd), but that is generator quality, not a numeric range, and it produces no NaN, no empty buffer and no crash.
+- from_json_str rng_state -- every 64-bit pattern is a reachable PCG32 state; it is not a number with a range. ~~rng_inc likewise~~ **Reversed in 2.2.1 (audit B5):** prani_rng_new always makes `inc` odd, and state 0 with inc 0 is a fixed point, so a document spelling both as 0 (or omitting them) gave a tract whose noise path rendered exact silence as success. An even `inc` is now refused with `PRANI_ERR_INVALID_TRACT`.
 - Null/short-vec checks on apply_spectral_tilt's `samples` and set_formant_blend's 3-slot vecs -- pointer and length validity, not numeric range. Out of this milestone's scope; flagged rather than silently skipped.
-- Missing-field detection in from_json_str -- bayan returns 0 for an absent key, so a document omitting `phase` or `dcb_r` reads as 0.0 and passes the ranges. That is field PRESENCE, which ADR-0002 scoped to parse-level and 2.0.5 scopes to ranges; it belongs with the constructor-contract work, not here.
+- ~~Missing-field detection in from_json_str~~ **Done in 2.2.1 (audits A2, B5, C4, C5).** bayan reads an absent key as 0, so a document omitting `phase` or `dcb_r` read as 0.0 and passed the ranges. Every hand-written decoder (`crvoice_from_json_str`, its nested params via `species_params_node_ok`, `crtract_from_json_str`, `sequence_call_phrase_from_json_str`) now requires each field to be present and integer-typed, as `preset_from_json_str` has since 2.0.5. `spectral_tilt` alone stays optional, as the oracle's `#[serde(default)]` made it.
 
 **`src/voice.cyr`**
 
-- crvoice_new, crvoice_with_f0_offset, crvoice_with_size, crvoice_with_breathiness, crvoice_with_jitter, crvoice_with_shimmer, crvoice_with_vocal_effort, crvoice_set_vocal_effort, crvoice_apply_lombard_effect, crvoice_reset_individual -- they return self or nothing, so there is no error channel to report into. Guarding them means changing signatures, which is roadmap 2.2.0's constructor-contract work. Every value they can smuggle in is instead reported at the point of use (params_in_range plus the two derived values at the top of vocalize_with_intent, and size_scale in synthesize_cat_purr), which covers every path to svara with zero API change.
+- crvoice_new and the crvoice_with_* builders -- **superseded in 2.2.0**: they return a negative code (ADR-0008), and each builder refuses a NaN argument with `PRANI_ERR_INVALID_SPECIES`; a finite one is clamped as in the oracle. crvoice_set_vocal_effort and crvoice_apply_lombard_effect return nothing, so they ignore a NaN instead (2.2.1, audit A6). What a raw `CreatureVoice_set_*` setter can still smuggle in is refused at the point of use: `species_params_in_range` plus the two derived values at the top of vocalize_with_intent, and since 2.2.1 the voice's own `vocal_effort` in [0, 1] and `size_scale` > 0 there and in synthesize_cat_purr (audits A1, A5). Through 2.2.0 a raw-set effort of 2.0 or a NaN size rendered as success.
 - crvoice_effective_f0, crvoice_effective_tract_scale -- return an f64 audio quantity; a negative return is a legal value, not a code. They are the things GUARDED, at their consumer.
 - crvoice_pitch_contour, crvoice_pitch_contour_f0_at, crvoice_formant_transition_contour, crvoice_formant_transition_at, crvoice_make_cat_meow_howl, crvoice_make_wolf_howl, crvoice_nasal_phase_fraction, crvoice_vocalization_spectral_offset, crvoice_lerp_kf, crvoice_contour_push, crvoice_keyframe_push, crvoice_clone_params, crvoice_species_has_subharmonics, crvoice_species_is_canid, crvoice_voc_is_howl_or_whine -- pure table lookups and interpolation returning a pointer or an f64, with no error channel. Their only inputs are a tag and a normalized t that f64_clamp already bounds; the tag is validated by the caller.
 - crvoice_apply_vocalization_envelope -- its sample_rate parameter is UNUSED (kept for signature parity with the oracle), and attack_len/release_len are already min-clamped against len by the existing a_lim/r_lim logic, so it has neither a divisor nor an unbounded index. Nothing to guard.

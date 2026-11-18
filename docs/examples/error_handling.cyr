@@ -37,11 +37,12 @@ include "dist/prani.cyr"
 # Cyrius has no non-integer float literals: an integer is f64_from(n), anything
 # else is its IEEE-754 bit pattern, with the decimal value in the comment.
 #     python3 -c "import struct;print(hex(struct.unpack('<Q',struct.pack('<d',V))[0]))"
-var EX_SR_44100 = 0x40e5888000000000;   # 44100.0 Hz  the rate to use unless the
-                                        #             example is about rates
-var EX_SR_1200  = 0x4092c00000000000;   # 1200.0 Hz   svara's floor, exactly
-var EX_DUR_005  = 0x3fa999999999999a;   # 0.05 s      long enough to be real audio,
-                                        #             short enough to stay instant
+#   EX_SR_44100  44100.0 Hz  the rate to use unless the example is about rates
+#   EX_SR_1200    1200.0 Hz  svara's floor, exactly
+#   EX_DUR_005      0.05 s   long enough to be real audio, short enough to stay instant
+var EX_SR_44100 = 0x40e5888000000000;
+var EX_SR_1200  = 0x4092c00000000000;
+var EX_DUR_005  = 0x3fa999999999999a;
 
 # The two ways to build a non-finite f64 in Cyrius, since there is no NaN
 # literal either. Both are refused by section 4 -- that is the point of having
@@ -55,8 +56,8 @@ fn ex_pos_inf() { return f64_div(f64_from(1), 0); }     # 1/0
 # JSON at all and has to be range-checked on the way back in (section 4).
 #   4608983858650965606 == 0x3ff6666666666666 ==  1.4   (inside with_size's domain)
 #   4626322717216342016 == 0x4034000000000000 == 20.0   (outside it)
-var EX_PRESET_OK  = "{\"name\":\"Alpha Wolf\",\"species\":0,\"size\":4608983858650965606,\"f0_offset\":0,\"breathiness\":0}";
-var EX_PRESET_BIG = "{\"name\":\"Alpha Wolf\",\"species\":0,\"size\":4626322717216342016,\"f0_offset\":0,\"breathiness\":0}";
+var EX_PRESET_OK  = "{\"name\":\"Wolf\",\"species\":0,\"size\":4608983858650965606,\"f0_offset\":0,\"breathiness\":0}";
+var EX_PRESET_BIG = "{\"name\":\"Wolf\",\"species\":0,\"size\":4626322717216342016,\"f0_offset\":0,\"breathiness\":0}";
 
 # ---- transcript helpers -----------------------------------------------------
 # Counters, so the closing summary is measured rather than asserted by hand.
@@ -252,6 +253,10 @@ fn main() {
     println("");
 
     var snake = crvoice_new(PRANI_SP_SNAKE);
+    if (prani_is_err(snake) == 1) {
+        println("crvoice_new(PRANI_SP_SNAKE) failed -- nothing below would mean anything");
+        return 1;
+    }
 
     ex_call("species_supports_vocalization(SNAKE, HOWL)");
     ex_field("returned:           ", species_supports_vocalization(PRANI_SP_SNAKE, PRANI_VOC_HOWL));
@@ -296,6 +301,10 @@ fn main() {
     println("");
 
     var wolf = crvoice_new(PRANI_SP_WOLF);
+    if (prani_is_err(wolf) == 1) {
+        println("crvoice_new(PRANI_SP_WOLF) failed -- nothing below would mean anything");
+        return 1;
+    }
 
     ex_call("crvoice_vocalize(wolf, HOWL, 1200.0, 0.05)   <- svara's floor");
     ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_1200, EX_DUR_005),
@@ -352,6 +361,10 @@ fn main() {
     println("");
 
     var lion = crvoice_with_size(crvoice_new(PRANI_SP_LION), f64_from(3));
+    if (prani_is_err(lion) == 1) {
+        println("building the lion failed -- nothing below would mean anything");
+        return 1;
+    }
     var sb = str_builder_new();
     crvoice_to_json(lion, sb);
     var json = str_data(str_builder_build(sb));
@@ -451,19 +464,20 @@ fn main() {
     println("");
     println("ADR-0003: a failed fill writes nothing, returns 0, AND retires the");
     println("stream by marking it finished. The retirement is the load-bearing");
-    println("half. Both failure causes are fixed at stream_new time, so the");
-    println("failure repeats identically on every call, and the documented drain");
-    println("loop");
+    println("half: a cause still there on the next call fails the next fill the");
+    println("same way, and the documented drain loop");
     println("");
     println("    while (stream_is_finished(s) == 0) { stream_fill_buffer(s, buf); }");
     println("");
-    println("would otherwise never terminate. Retiring is what lets it exit.");
+    println("would otherwise never terminate. Retiring is what lets it exit, and");
+    println("stream_last_error(s) names the cause.");
     println("");
-    println("stream_new does not build the tract -- that is a lazily-filled slot,");
-    println("so section 2's rejection cannot happen until the first fill. A rate");
-    println("svara will refuse therefore CONSTRUCTS a stream successfully and");
-    println("fails later, which is exactly why fill needs an error channel of");
-    println("its own.");
+    println("Since 2.2.1 stream_new builds the tract itself, so a rate svara");
+    println("refuses is refused at CONSTRUCTION, with section 2's code. Through");
+    println("2.2.0 the first fill built it: the stream constructed successfully");
+    println("and failed later. What a fill can still meet is a refusal stream_new");
+    println("could not see coming -- the arena running out mid-session (ADR-0008)");
+    println("-- which is why the fill keeps an error channel of its own.");
     println("");
 
     var buf = vec_new();
@@ -471,13 +485,15 @@ fn main() {
 
     ex_call("stream_new(wolf, HOWL, IDLE, 1200.0, 0.05)   <- the refused rate");
     var bad = stream_new(wolf, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, EX_SR_1200, EX_DUR_005);
-    ex_accepted(bad, "a SynthStream (the tract is not built yet)");
-    ex_field("total_samples:      ", stream_total_samples(bad));
-    ex_call("drain it with a 64-sample buffer:");
-    # One iteration: the first fill builds the tract, svara refuses, 0 comes back
-    # and the stream is retired, so the loop's condition is false on re-entry.
-    ex_drain(bad, buf, 1, 0);
-
+    ex_rejected(bad, PRANI_ERR_SVARA);
+    # A host that drains without checking still terminates: stream_is_finished
+    # answers 1 for an error handle (2.2.0), so the loop above never enters.
+    ex_call("stream_is_finished(that code)   <- the drain loop's condition");
+    ex_field("returned:           ", stream_is_finished(bad));
+    if (stream_is_finished(bad) != 1) {
+        println("      *** UNEXPECTED: a failed construction does not read as finished");
+        EX_UNEXPECTED = EX_UNEXPECTED + 1;
+    }
     println("");
     println("The identical loop at a rate svara accepts, for contrast. Same");
     println("code, same buffer, same exit condition -- only the tail block is");

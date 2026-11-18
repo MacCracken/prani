@@ -10,17 +10,21 @@
 # which are exactly the ones made through the helpers. So this gate fails on any
 # other allocating call in src/.
 #
-# Banned outside src/error.cyr: alloc( vec_new( vec_push( and the allocator-taking
-# forms the helpers wrap: alloc_via( vec_new_a( vec_push_a(. Comment text is
-# ignored. In src/error.cyr three may each appear once, in their helper:
-# prani_alloc_raw's alloc(size), prani_vec_new's vec_new_a and prani_vec_push's
-# vec_push_a.
+# Banned outside src/error.cyr: alloc vec_new vec_push and the allocator-taking
+# forms the helpers wrap, alloc_via vec_new_a vec_push_a, called by any spelling
+# the compiler accepts: `name(`, `name (`, the name at the end of one line with its
+# `(` opening the next, and `&name` (a pointer to it, for fncall). Through 2.2.0 the
+# gate matched only `name(` on one line, and the other three compiled and ran
+# clean past it (audit D4, 2026-11-17). Comment text is ignored. In src/error.cyr
+# three may each appear once, in their helper: prani_alloc_raw's alloc(size),
+# prani_vec_new's vec_new_a and prani_vec_push's vec_push_a.
 #
 # Usage: sh scripts/check-alloc.sh   (from anywhere; exit 0 clean, 1 with a list)
 set -eu
 cd "$(dirname "$0")/.."
 
-BAN='(^|[^A-Za-z0-9_])(alloc|vec_new|vec_push|alloc_via|vec_new_a|vec_push_a)\('
+NAMES='(alloc|vec_new|vec_push|alloc_via|vec_new_a|vec_push_a)'
+BAN="(^|[^A-Za-z0-9_])$NAMES[[:space:]]*\\("
 
 # Code only: drop whole-line comments and trailing `# ...` comments. prani's
 # sources hold no `#` inside a string literal on an allocating line; if one ever
@@ -29,10 +33,34 @@ code() {
     sed -e 's/^[[:space:]]*#.*$//' -e 's/[[:space:]]#.*$//' "$1"
 }
 
+# hits FILE -- "line: text" for every banned call in FILE's code: on one line,
+# split across lines (a blank or comment-only line between is skipped), or taken
+# by address.
+hits() {
+    code "$1" | awk -v names="$NAMES" '
+        { line[NR] = $0 }
+        END {
+            call = "(^|[^A-Za-z0-9_])" names "[[:space:]]*[(]"
+            tail = "(^|[^A-Za-z0-9_])" names "[[:space:]]*$"
+            addr = "&" names "([^A-Za-z0-9_]|$)"
+            for (i = 1; i <= NR; i++) {
+                s = line[i]
+                if (s ~ call || s ~ addr) { print i ": " s; continue }
+                if (s ~ tail) {
+                    j = i + 1
+                    while (j <= NR && line[j] ~ /^[[:space:]]*$/) j++
+                    if (j <= NR && line[j] ~ /^[[:space:]]*[(]/) print i ": " s
+                }
+            }
+        }'
+}
+
 fail=0
-for f in src/*.cyr; do
+# Every .cyr under src/, at any depth: src/ is flat today, and a module moved into
+# a subdirectory must not leave the gate by moving (audit 2026-11-17).
+for f in $(find src -name '*.cyr' | sort); do
     [ "$f" = "src/error.cyr" ] && continue
-    hits=$(code "$f" | grep -n -E "$BAN" || true)
+    hits=$(hits "$f")
     if [ -n "$hits" ]; then
         echo "$hits" | sed "s|^|$f:|"
         fail=1
@@ -48,14 +76,14 @@ for pat in 'alloc\(size\)' \
         fail=1
     fi
 done
-others=$(code src/error.cyr | grep -n -E "$BAN" | grep -v -E 'alloc\(size\)|vec_new_a\(prani_allocator|vec_push_a\(prani_allocator' || true)
+others=$(hits src/error.cyr | grep -v -E 'alloc\(size\)|vec_new_a\(prani_allocator|vec_push_a\(prani_allocator' || true)
 if [ -n "$others" ]; then
     echo "$others" | sed 's|^|src/error.cyr:|'
     fail=1
 fi
 
 # The comment stripping above must not be hiding a call behind a `#` in a string.
-strs=$(grep -n -E '"[^"]*#[^"]*"' src/*.cyr | grep -E "$BAN" || true)
+strs=$(find src -name '*.cyr' -exec grep -n -E '"[^"]*#[^"]*"' {} + | grep -E "$BAN" || true)
 if [ -n "$strs" ]; then
     echo "a '#' inside a string on an allocating line; check-alloc.sh cannot read it:"
     echo "$strs"

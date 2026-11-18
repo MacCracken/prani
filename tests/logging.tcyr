@@ -1,0 +1,50 @@
+# logging.tcyr -- tests for src/logging.cyr (2.2.1).
+#
+# The five wrappers forward a C string to sakshi. Through 2.2.0 no suite called
+# prani_log_info or prani_log_fatal (prani itself never does), and all five
+# forwarded a null message to strlen, which faulted (audit D16). sakshi's ring
+# output is what makes these assertions observe something: each call that logs is
+# one ring event, so "returned 0" is backed by "and was delivered".
+
+include "src/logging.cyr"
+
+alloc_init();
+
+sakshi_output_buffer();
+sakshi_set_level(SK_DEBUG);
+
+# lg_one(which, msg) -- the ring events one call of wrapper `which` (0 fatal .. 4 debug)
+# adds, or -1 if it returned anything but 0.
+fn lg_one(which, msg) {
+    var before = sakshi_ring_event_count();
+    var rc = 0;
+    if (which == 0) { rc = prani_log_fatal(msg); }
+    if (which == 1) { rc = prani_log_error(msg); }
+    if (which == 2) { rc = prani_log_warn(msg); }
+    if (which == 3) { rc = prani_log_info(msg); }
+    if (which == 4) { rc = prani_log_debug(msg); }
+    if (rc != 0) { return 0 - 1; }
+    return sakshi_ring_event_count() - before;
+}
+
+test_group("each level delivers one event, including the two prani never calls");
+assert_eq(lg_one(0, "prani: logging.tcyr fatal"), 1, "prani_log_fatal: one event");
+assert_eq(lg_one(1, "prani: logging.tcyr error"), 1, "prani_log_error: one event");
+assert_eq(lg_one(2, "prani: logging.tcyr warn"), 1, "prani_log_warn: one event");
+assert_eq(lg_one(3, "prani: logging.tcyr info"), 1, "prani_log_info: one event");
+assert_eq(lg_one(4, "prani: logging.tcyr debug"), 1, "prani_log_debug: one event");
+
+test_group("2.2.1 -- a null message logs nothing and does not fault");
+var lg_w = 0;
+while (lg_w < 5) {
+    assert_eq(lg_one(lg_w, 0), 0, "a null message: no event, return 0");
+    lg_w = lg_w + 1;
+}
+
+test_group("the level is sakshi's: a suppressed level delivers nothing");
+sakshi_set_level(SK_ERROR);
+assert_eq(lg_one(2, "prani: logging.tcyr warn, suppressed"), 0, "warn above the level: no event");
+assert_eq(lg_one(1, "prani: logging.tcyr error, at the level"), 1, "control: error at the level still logs");
+
+var rc = assert_summary();
+syscall(60, rc);

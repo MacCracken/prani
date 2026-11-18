@@ -47,13 +47,16 @@ fn t_all_finite(v) {
     return 1;
 }
 
-# t_any_nonzero(v, lo, hi) -- 1 iff some sample in [lo, hi) is not +0.0. Used as
-# a silence control: an all-zero buffer passes every length/finiteness assert.
+# t_any_nonzero(v, lo, hi) -- 1 iff some sample in [lo, hi) is numerically
+# non-zero. Used as a silence control: an all-zero buffer passes every
+# length/finiteness assert. 2.2.1 (audit D1): this compared BIT PATTERNS, so -0.0,
+# which prani's envelopes emit, counted as sound, and a chorus scaled to all -0.0
+# passed "is not silence".
 #must_use
 fn t_any_nonzero(v, lo, hi) {
     var k = lo;
     while (k < hi) {
-        if (vec_get(v, k) != 0) { return 1; }
+        if (f64_gt(f64_abs(vec_get(v, k)), 0) == 1) { return 1; }
         k = k + 1;
     }
     return 0;
@@ -213,7 +216,7 @@ assert_eq(vec_len(empty_chorus), 0, "empty voices -> empty chorus");
 # 0.2 s, at 44100 Hz. The 2-voice chorus above mixes two bit-identical default
 # wolves (effectively 2x one signal); this one is the only heterogeneous mix, and
 # the only one to reach the voice_count*7919 = 4*7919 seed and the 1/sqrt(4)
-# normalization (src/sequence.cyr:214,241).
+# normalization (both in sequence_synthesize_chorus).
 #   base = f64_to(1.0*44100) = 44100; max_offset = f64_to(0.2*44100) = 8820;
 #   total_len = 44100 + 2*8820 = 61740.
 test_group("synthesize_chorus -- oracle 4 size-varied wolves @ 44100");
@@ -304,7 +307,7 @@ assert_eq(memeq(pjson, pjson_2, strlen(pjson)), 1, "phrase json idempotent");
 # species' own bout_template must render at 44100 Hz, non-empty and all finite.
 # Non-error also carries the oracle's supports_vocalization invariant for free:
 # crvoice_vocalize_with_intent returns PRANI_ERR_INVALID_VOCALIZATION for a pair
-# the species cannot produce (src/voice.cyr:780-782), so a template naming a
+# the species cannot produce (its species_supports_vocalization check), so a template naming a
 # vocalization its own species does not support fails the first assert below.
 # The template FIELD VALUES are asserted in tests/species.tcyr, not here.
 # Failures accumulate into a bitmask of species indices, so a failure names the

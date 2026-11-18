@@ -89,7 +89,7 @@ assert_eq(emotion_arousal(eu2), 0x3f947ae147ae147c, "update arousal clamped tgt 
 # (`git show 2.0.3:rust-old/tests/integration.rs`, lines 746-753) builds
 # with_values(0.0, 0.5).with_smoothing(0.5), updates toward (1.0, 1.0) and
 # asserts the result lands in (0.4, 0.6) x (0.7, 0.8). update() reads the
-# per-state smoothing (src/emotion.cyr:117), so the halfway point is exact in
+# per-state smoothing (emotion_update), so the halfway point is exact in
 # binary and is pinned here as a bit pattern instead of a window.
 test_group("update -- non-default smoothing (s=0.5)");
 var eu3 = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), T_0_5);

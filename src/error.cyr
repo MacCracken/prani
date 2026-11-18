@@ -199,6 +199,32 @@ fn prani_is_finite(x) {
 # "a vocal tract parameter is out of valid range").
 # ================================================================
 
+# prani_handle_code(h, code) -- what a function returns for a handle h that is not
+# a live object (h <= 0): h itself when it is already an error, so a refusal
+# upstream keeps its meaning (PRANI_ERR_ALLOC stays PRANI_ERR_ALLOC), else `code`
+# for a null handle. Every public function that takes a handle tests `h <= 0`
+# first and returns this (2.2.1, completing ADR-0008's first rule); a function
+# that returns nothing returns 0 instead, and does nothing.
+#must_use
+fn prani_handle_code(h, code) {
+    if (h < 0) { return h; }
+    return code;
+}
+
+# prani_json_int_ok(node, key) -- 1 iff `node` is an object holding `key` as a JSON
+# integer, 0 for an absent key, a non-integer (a float, a string, true), a node that
+# is not an object, or a null node. bayan's accessors are null-safe and read every
+# one of those as 0, so a decoder that read without asking fabricated a 0: a Wolf,
+# an effort of 0.0, an empty phrase (audit A2/C4/C5, 2.2.1). prani writes every f64
+# as an integer bit pattern, so its own documents always pass.
+#must_use
+fn prani_json_int_ok(node, key) {
+    if (node == 0) { return 0; }
+    if (bayan_json_v_is_obj(node) == 0) { return 0; }
+    if (bayan_json_v_is_int(bayan_json_v_obj_get_by_cstr(node, key)) == 0) { return 0; }
+    return 1;
+}
+
 # 1 iff x is NaN: the one value that fails x <= x. The hazard at a CLAMP site
 # (2.2.0's builders): f64_clamp bounds an infinity to a legal endpoint, which
 # 2.0.5 decided to accept, but passes NaN through every clamp unchanged.

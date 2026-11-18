@@ -4,12 +4,17 @@
 # bit-exact) with a handful of transcendental / pow paths (asserted within TOL).
 # Every threshold function is probed at each cut and each clamp at its limits.
 #
-# Include order: error, vocalization (PRANI_INTENT_*), species (PRANI_SP_*), bridge.
-# species.cyr pulls sequence.cyr for its bout_template only; those synthesize
-# methods forward-reference crvoice_* (voice.cyr, not here) and are UNREACHABLE in
-# this unit, so undefined-fn WARNINGS for crvoice_* are EXPECTED and fine.
+# Include order: error, logging, rng, dsp, vocalization (PRANI_INTENT_*), sequence,
+# species (PRANI_SP_*), bridge. species.cyr pulls sequence.cyr for its bout_template
+# only; sequence's synthesize methods call into logging, rng and dsp, included here
+# so they resolve, and forward-reference crvoice_vocalize_with_intent (voice.cyr,
+# not here), which is UNREACHABLE in this unit. That one undefined-fn WARNING is
+# EXPECTED and fine.
 
 include "src/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
 include "src/species.cyr"

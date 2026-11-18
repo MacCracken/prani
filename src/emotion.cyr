@@ -98,7 +98,7 @@ fn emotion_with_values(valence, arousal) {
 # returns the same handle.
 #must_use
 fn emotion_with_smoothing(self, smoothing) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_nan(smoothing) == 1) { return PRANI_ERR_INVALID_VOCALIZATION; }   # NaN passes the clamp (2.2.0)
     PrEmotion_set_smoothing(self, f64_clamp(smoothing, PRE_0_0, PRE_0_95));
     return self;
@@ -107,12 +107,14 @@ fn emotion_with_smoothing(self, smoothing) {
 # valence(self) -- current valence.
 #must_use
 fn emotion_valence(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     return PrEmotion_valence(self);
 }
 
 # arousal(self) -- current arousal.
 #must_use
 fn emotion_arousal(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     return PrEmotion_arousal(self);
 }
 
@@ -120,6 +122,7 @@ fn emotion_arousal(self) {
 # clamped target at rate `smoothing`. Call once per frame/tick.
 #   valence = valence*s + tv*(1-s);  arousal = arousal*s + ta*(1-s)
 fn emotion_update(self, target_valence, target_arousal) {
+    if (self <= 0) { return 0; }   # ADR-0008
     var tv = f64_clamp(target_valence, PRE_NEG_1_0, PRE_1_0);
     var ta = f64_clamp(target_arousal, PRE_0_0, PRE_1_0);
     var s = PrEmotion_smoothing(self);
@@ -130,6 +133,7 @@ fn emotion_update(self, target_valence, target_arousal) {
 
 # set(self, valence, arousal) -- direct (no smoothing), clamped.
 fn emotion_set(self, valence, arousal) {
+    if (self <= 0) { return 0; }   # ADR-0008
     PrEmotion_set_valence(self, f64_clamp(valence, PRE_NEG_1_0, PRE_1_0));
     PrEmotion_set_arousal(self, f64_clamp(arousal, PRE_0_0, PRE_1_0));
 }
@@ -200,11 +204,12 @@ fn emotion_set(self, valence, arousal) {
 # That is the same shape 2.0.3 used for species_params / species_params_into:
 # one copy of the logic, an allocating/validating wrapper over it.
 #
-# The invariant that keeps this honest: an `_unchecked` function must never be
-# reachable from outside this module, and every internal call to one must sit
-# below a validation of the fields it reads. There are exactly three such call
-# sites, all in this file -- evaluate -> the two unchecked selectors, and each
-# unchecked selector -> the two unchecked classifiers.
+# The invariant that keeps this honest: every call to an `_unchecked` function
+# must sit below a validation of the fields it reads. Every such call is in this
+# file -- evaluate_into -> the two unchecked selectors, each checked function ->
+# its unchecked core, and each unchecked selector -> the unchecked classifiers.
+# They are exported by the bundle (Cyrius has no private functions), so a caller
+# outside can reach them; their names say what they do not check.
 # ================================================================
 
 # emotion_state_in_range(self) -- 1 iff valence AND arousal are both inside
@@ -215,6 +220,7 @@ fn emotion_set(self, valence, arousal) {
 # stated reason (see below).
 #must_use
 fn emotion_state_in_range(self) {
+    if (self <= 0) { return 0; }   # ADR-0008
     if (prani_in_range(PrEmotion_valence(self), PRE_NEG_1_0, PRE_1_0) == 0) { return 0; }
     return prani_in_range(PrEmotion_arousal(self), PRE_0_0, PRE_1_0);
 }
@@ -238,6 +244,7 @@ fn emotion_valence_zone_unchecked(self) {
 # Public checked wrapper over emotion_valence_zone_unchecked.
 #must_use
 fn emotion_valence_zone(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_in_range(PrEmotion_valence(self), PRE_NEG_1_0, PRE_1_0) == 0) {
         return PRANI_ERR_INVALID_VOCALIZATION;
     }
@@ -260,6 +267,7 @@ fn emotion_arousal_zone_unchecked(self) {
 # Public checked wrapper over emotion_arousal_zone_unchecked.
 #must_use
 fn emotion_arousal_zone(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_in_range(PrEmotion_arousal(self), PRE_0_0, PRE_1_0) == 0) {
         return PRANI_ERR_INVALID_VOCALIZATION;
     }
@@ -309,6 +317,7 @@ fn emotion_select_vocalization_unchecked(self) {
 # inputs rejected, same code, one range check per field instead of one per read.
 #must_use
 fn emotion_select_vocalization(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (emotion_state_in_range(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     return emotion_select_vocalization_unchecked(self);
 }
@@ -346,6 +355,7 @@ fn emotion_select_intent_unchecked(self) {
 # checked wrapper, same shape as select_vocalization above.
 #must_use
 fn emotion_select_intent(self) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (emotion_state_in_range(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     return emotion_select_intent_unchecked(self);
 }
@@ -359,9 +369,9 @@ fn emotion_select_intent(self) {
 #   breathiness_delta : additive breathiness, from arousal extremes
 # Distinct struct name (PrEmotionOut) to avoid accessor collisions.
 # ================================================================
-# Fields TYPED for #derive(Serialize): vocalization/intent are enum-const codes
-# (i64), the three modulation params are f64. Untyped fields would serialize as
-# raw bit patterns and fail to roundtrip. Auto-generates PrEmotionOut_to_json /
+# Fields TYPED i64 for #derive(Serialize): vocalization/intent are enum-const
+# codes, and the three modulation params are f64 values stored as their i64 bit
+# patterns, so they serialize as those bits and roundtrip exactly. Auto-generates PrEmotionOut_to_json /
 # PrEmotionOut_from_json_str, restoring the Rust `#[derive(Serialize,
 # Deserialize)]` on EmotionOutput.
 #derive(accessors)
@@ -398,16 +408,40 @@ struct PrEmotionOut {
 # nothing to propagate and no prani_is_err test on their results.
 #must_use
 fn emotion_evaluate(self) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
-    if (prani_in_range(PrEmotion_smoothing(self), PRE_0_0, PRE_0_95) == 0) {
-        return PRANI_ERR_INVALID_VOCALIZATION;
-    }
-    if (emotion_state_in_range(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
-    var voc = emotion_select_vocalization_unchecked(self);
-    var intent = emotion_select_intent_unchecked(self);
-
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (emotion_evaluate_ok(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var out = prani_alloc(sizeof(PrEmotionOut));
     if (out < 0) { return out; }   # PRANI_ERR_ALLOC (2.2.0)
+    return emotion_evaluate_write(self, out);
+}
+
+# evaluate_into(self, out) -- emotion_evaluate, written into a caller-owned
+# PrEmotionOut and returning it, or a negative PRANI_ERR_*. Allocates nothing:
+# emotion_evaluate is a per-frame call, and each one kept a 40-byte result for the
+# life of the process, 240 KB/s at 60 fps across 100 creatures (audit C11, 2.2.1).
+#must_use
+fn emotion_evaluate_into(self, out) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (emotion_evaluate_ok(self) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    return emotion_evaluate_write(self, out);
+}
+
+# evaluate_ok(self) -- 1 iff the state is one evaluate can answer: smoothing in
+# [0, 0.95] and valence/arousal in range. Each evaluate form calls it ONCE. The first
+# 2.2.1 draft validated in emotion_evaluate and again in the _into it called, and
+# measured 1.37x 2.2.0 over six alternating rounds, the same class of regression
+# 2.0.10 repaired.
+fn emotion_evaluate_ok(self) {
+    if (prani_in_range(PrEmotion_smoothing(self), PRE_0_0, PRE_0_95) == 0) { return 0; }
+    return emotion_state_in_range(self);
+}
+
+# evaluate_write(self, out) -- the arithmetic both evaluate forms share, on a live
+# `self` and `out` whose state emotion_evaluate_ok has accepted. Returns `out`.
+fn emotion_evaluate_write(self, out) {
+    var voc = emotion_select_vocalization_unchecked(self);
+    var intent = emotion_select_intent_unchecked(self);
     PrEmotionOut_set_vocalization(out, voc);
     PrEmotionOut_set_intent(out, intent);
 

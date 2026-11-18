@@ -19,9 +19,11 @@
 # widening is forced). Integer literals via f64_from(n); non-integers via the
 # module-top IEEE-754 hex constants below (decimals in comments).
 #
-# PARITY NOTE (naad-backend default): NoiseOnly always pre-builds a naad bandpass
-# filter (default features), so synthesize_noise takes the naad path and the
-# svara FormantFilter fallback is dropped (documented deviation). Exact svara-
+# PARITY NOTE (naad-backend default): NoiseOnly pre-builds a naad bandpass filter
+# (default features), and synthesize_noise uses it; the svara FormantFilter
+# fallback is dropped (documented deviation). The bandpass can be absent: naad
+# refuses its centre at or past Nyquist (snake F1 2500 Hz at 5000 Hz or below),
+# and synthesize_noise then reports PRANI_ERR_SYNTHESIS_FAILED. Exact svara-
 # internal bit parity vs the f32 oracle is not attainable (f32->f64 diverges
 # through svara's own DSP); tests assert structural parity + finiteness +
 # determinism instead. See tests/tract.tcyr parity_notes.
@@ -111,8 +113,9 @@ var PR_TR_12_0  = 0x4028000000000000;   # 12.0  dB/octave -> coefficient divisor
 #     failure that cannot happen.
 #   * options on the stridulatory path -- never read there either (the oracle
 #     writes `let _ = options`). Same rule.
-#   * from_json_str "rng_state" / "rng_inc" -- every 64-bit pattern is a
-#     reachable PCG32 state; neither is a number with a range.
+#   * from_json_str "rng_state" -- every 64-bit pattern is a reachable PCG32 state.
+#     "rng_inc" is not free: it is odd by construction, and since 2.2.1 an even one
+#     is refused (audit B5).
 # ================================================================
 
 # ================================================================
@@ -159,6 +162,22 @@ fn crtract_options_new(subharmonic_amp, perturbation_scale) {
 #derive(accessors)
 struct CreatureTract {
     tract; params; rng; sample_rate; phase; dc_blocker; noise_filter;
+    clock;
+}
+
+# crtract_in_band(est, below, nyquist) -- one of the two formants prani estimates
+# above the species' three (1.3x and 1.5x F3), kept inside the band. svara refuses a
+# five-formant target if any formant is not below Nyquist, and it used to refuse
+# the species' REAL F1-F3 with it: a dog, cat, crow or raptor at 8 kHz, a songbird or
+# raptor at 22.05 kHz, rendered through svara's default vowel (audit B2, 2.2.1,
+# ADR-0009). An estimate at or past Nyquist is placed halfway between the formant
+# below it and Nyquist, so F3 < F4 < F5 < Nyquist holds and nothing is invented but
+# the midpoint. An estimate already in band is returned as it is, so every render
+# whose estimates were in band (every species at 44.1 kHz) is unchanged.
+#must_use
+fn crtract_in_band(est, below, nyquist) {
+    if (f64_lt(est, nyquist) == 1) { return est; }
+    return f64_mul(f64_add(below, nyquist), F64_HALF);
 }
 
 # new(params, sample_rate) -- CreatureTract::new. Configures the svara tract
@@ -186,8 +205,9 @@ struct CreatureTract {
 #must_use
 fn crtract_new(params, sample_rate) {
     # 2.2.0: `params` usually comes from species_params, which can now report a
-    # refused allocation; an error passes through rather than being read.
-    if (prani_is_err(params) == 1) { return params; }
+    # refused allocation; an error passes through rather than being read, and a
+    # null is refused (2.2.1).
+    if (params <= 0) { return prani_handle_code(params, PRANI_ERR_INVALID_SPECIES); }
     var tract = svara_tract_new(sample_rate);
     if (svara_is_err(tract) == 1) {
         prani_log_error("prani: svara vocal tract rejected the sample rate");
@@ -205,8 +225,10 @@ fn crtract_new(params, sample_rate) {
     # on the stack (80 bytes, see crtract_set_formant_blend), not one
     # svara allocates and never checks: the setter copies its values out.
     var vt[80];
+    var ny = f64_mul(sample_rate, F64_HALF);
+    var f3e = crtract_in_band(f64_mul(f2, PR_TR_1_3), f2, ny);   # audit B2 (ADR-0009)
     var target = svara_vowel_target_set(&vt,
-      f0, f1, f2, f64_mul(f2, PR_TR_1_3), f64_mul(f2, PR_TR_1_5),
+      f0, f1, f2, f3e, crtract_in_band(f64_mul(f2, PR_TR_1_5), f3e, ny),
       b0, b1, b2, f64_mul(b2, PR_TR_1_2), f64_mul(b2, PR_TR_1_4));
     # Rust: `if let Err(e) = ... { warn!(...) }` then continue. Ports the
     # tracing::warn! to sakshi (prani_log_warn), preserving warn-then-continue.
@@ -240,6 +262,7 @@ fn crtract_new(params, sample_rate) {
     CreatureTract_set_phase(self, 0);
     CreatureTract_set_dc_blocker(self, dcb);
     CreatureTract_set_noise_filter(self, noise_filter);
+    CreatureTract_set_clock(self, 0);
     return self;
 }
 
@@ -258,6 +281,8 @@ fn crtract_new(params, sample_rate) {
 # rebuild; only in-flight filter memory (which decays within a few samples) is
 # reset. Same tradeoff garjan makes rebuilding naad from config.
 fn crtract_to_json(self, sb) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (sb <= 0) { return prani_handle_code(sb, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
     var rng = CreatureTract_rng(self);
     var dc = CreatureTract_dc_blocker(self);
     str_builder_add_cstr(sb, "{\"sample_rate\":");
@@ -274,6 +299,10 @@ fn crtract_to_json(self, sb) {
     str_builder_add_int(sb, DcBlocker_y_prev(dc));
     str_builder_add_cstr(sb, ",\"dcb_r\":");
     str_builder_add_int(sb, DcBlocker_r(dc));
+    # 2.2.1 (ADR-0009): the clock is prani state, so it roundtrips (ADR-0005). It is
+    # a sample count, written as a plain integer, not as f64 bits.
+    str_builder_add_cstr(sb, ",\"clock\":");
+    str_builder_add_int(sb, CreatureTract_clock(self));
     str_builder_add_cstr(sb, ",\"params\":");
     SpeciesParams_to_json(CreatureTract_params(self), sb);
     str_builder_add_cstr(sb, "}");
@@ -299,13 +328,16 @@ fn crtract_to_json(self, sb) {
 #                        0.4 and wrapped at 1.0. A NaN phase makes both compares
 #                        false forever (permanent closed phase, never wraps);
 #                        an out-of-band phase counts down at 1.0 per sample.
-#                        KNOWN EDGE, stated rather than hidden: the wrap
-#                        subtracts 1.0 at most once per sample, so a purr driven
-#                        at purr_f0 > sample_rate (phase_inc > 1) can leave phase
-#                        above 1, and such a tract's own json is rejected on
-#                        read. purr_f0 is a 25-30 Hz muscle-cycling rate --
-#                        voice.cyr clamps it to [20, 35] and stream.cyr passes
-#                        the constant 27 -- so no in-tree path reaches it.
+#                        The wrap subtracts 1.0 at most once per sample, so a
+#                        purr driven at purr_f0 >= sample_rate could leave phase
+#                        above 1 and its own json would be refused on read.
+#                        Since 2.2.1 crtract_synthesize_purr refuses such a
+#                        purr_f0 (audit B6), so no tract can reach that state.
+#   clock       >= 0     the tract's sample clock (2.2.1, ADR-0009), a plain
+#                        integer. OPTIONAL: a document written before 2.2.1 has
+#                        none, and 0 is exactly the time base such a tract had,
+#                        since it restarted at every call. Present, it must be
+#                        an integer and not negative.
 #   dcb_x_prev  finite   filter memory. Any finite sample is legal -- these are
 #   dcb_y_prev  finite   post-amplitude audio values, so no magnitude band
 #                        belongs here -- but a non-finite one poisons every
@@ -319,18 +351,39 @@ fn crtract_to_json(self, sb) {
 # The checks run BEFORE crtract_new, so a rejected document costs no tract.
 # sample_rate is deliberately NOT checked here: svara owns that threshold and
 # crtract_new reports its rejection (ADR-0001 -- restating a dependency's
-# constant is how it goes stale). rng_state / rng_inc are not checked either:
-# every 64-bit pattern is a reachable PCG32 state.
+# constant is how it goes stale). rng_state is not checked: every 64-bit pattern is
+# a reachable PCG32 state. rng_inc must be odd (2.2.1, audit B5), and every field
+# must be present and an integer.
 fn crtract_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_TRACT; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_TRACT; }
+    # 2.2.1 (audit B5): every field present and an integer. An absent rng pair read
+    # as state 0 / inc 0, a fixed point of PCG32, so the noise paths rendered exact
+    # silence as success.
+    if (prani_json_int_ok(root, "sample_rate") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_json_int_ok(root, "phase") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_json_int_ok(root, "rng_state") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_json_int_ok(root, "rng_inc") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_json_int_ok(root, "dcb_x_prev") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_json_int_ok(root, "dcb_y_prev") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    if (prani_json_int_ok(root, "dcb_r") == 0) { return PRANI_ERR_INVALID_TRACT; }
+    # PCG32's increment is odd by construction (prani_rng_new sets the low bit); an
+    # even one is not a state prani_rng_new can make, and 0 with state 0 never moves.
+    if ((bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "rng_inc")) & 1) == 0) { return PRANI_ERR_INVALID_TRACT; }
 
     var phase = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "phase"));
     var dcb_x = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_x_prev"));
     var dcb_y = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_y_prev"));
     var dcb_r = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "dcb_r"));
     if (prani_in_range(phase, 0, F64_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    var clock = 0;
+    var n_clock = bayan_json_v_obj_get_by_cstr(root, "clock");
+    if (n_clock != 0) {
+        if (bayan_json_v_is_int(n_clock) == 0) { return PRANI_ERR_INVALID_TRACT; }
+        clock = bayan_json_v_int(n_clock);
+        if (clock < 0) { return PRANI_ERR_INVALID_TRACT; }
+    }
     if (prani_finite2(dcb_x, dcb_y) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_is_non_negative(dcb_r) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (f64_lt(dcb_r, F64_ONE) == 0) { return PRANI_ERR_INVALID_TRACT; }
@@ -343,8 +396,9 @@ fn crtract_from_json_str(json) {
     # rebuild the svara tract + naad filter + fresh rng/dc_blocker from params
     var self = crtract_new(params, sample_rate);
     if (prani_is_err(self) == 1) { return self; }
-    # then restore the serialized rng / phase / dc_blocker state over the rebuild
+    # then restore the serialized rng / phase / clock / dc_blocker state over the rebuild
     CreatureTract_set_phase(self, phase);
+    CreatureTract_set_clock(self, clock);
     var rng = CreatureTract_rng(self);
     PrRng_set_state(rng, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "rng_state")));
     PrRng_set_inc(rng, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "rng_inc")));
@@ -461,7 +515,9 @@ fn crtract_glottal_new(clamped_f0, sr, params, pert) {
 # and makes the contract the same on all five apparatus paths, four of which had
 # no such backstop.
 fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (options <= 0) { return prani_handle_code(options, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sub_amp = SynthesisOptions_subharmonic_amp(options);
@@ -475,6 +531,10 @@ fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
     # clamp f0 to [max(f0_min,20), min(f0_max,2000)]
     var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
     var hi = f64_min(SpeciesParams_f0_max(params), f64_from(2000));
+    # 2.2.1 (audit B11): a species whose f0_max is below the 20 Hz floor has no f0
+    # to clamp to. f64_clamp(f0, lo, hi) answered lo, a pitch outside the species'
+    # own range; the oracle's f32::clamp panicked.
+    if (f64_gt(lo, hi) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     var clamped_f0 = f64_clamp(f0, lo, hi);
 
     # non-stationary perturbation: jitter/shimmer scaled by block intensity, and
@@ -526,7 +586,9 @@ fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
 # `NaN <= 2000` is false, so it fell through to the raw-oscillator arm and
 # returned an all-NaN buffer as SUCCESS (measured).
 fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (options <= 0) { return prani_handle_code(options, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sub_amp = SynthesisOptions_subharmonic_amp(options);
@@ -539,6 +601,7 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
 
     # clamp f0 to [max(f0_min,20), f0_max]
     var lo = f64_max(SpeciesParams_f0_min(params), f64_from(20));
+    if (f64_gt(lo, SpeciesParams_f0_max(params)) == 1) { return PRANI_ERR_INVALID_SPECIES; }   # audit B11
     var clamped_f0 = f64_clamp(f0, lo, SpeciesParams_f0_max(params));
 
     var output = out;
@@ -560,9 +623,10 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
         var f0_2 = f64_mul(clamped_f0, PR_TR_1_498);   # ~perfect fifth above
         var breathiness = SpeciesParams_breathiness(params);
         var rng = CreatureTract_rng(self);
+        var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009): continuous across calls
         var i = 0;
         while (i < num_samples) {
-            var t = f64_div(f64_from(i), sr);
+            var t = f64_div(f64_from(t0 + i), sr);
             var tone1 = f64_sin(f64_mul(f64_mul(F64_TAU, clamped_f0), t));
             var tone2 = f64_mul(f64_sin(f64_mul(f64_mul(F64_TAU, f0_2), t)), PR_TR_0_6);
             var noise = f64_mul(prani_rng_next_f32(rng), breathiness);
@@ -574,6 +638,7 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
             i = i + 1;
         }
     }
+    CreatureTract_set_clock(self, CreatureTract_clock(self) + num_samples);
     dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
     return output;
 }
@@ -589,7 +654,8 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
 # filter_biquad_process_sample is a null dereference, so the invariant the
 # comment asserted is checked instead of assumed.
 fn crtract_synthesize_noise_into(self, num_samples, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     # 2.0.5: num_samples in range. No f0 and no options reach this path, so there is
     # nothing else here with a range. The input check comes BEFORE the filter
     # check so a caller learns about its own bad argument first.
@@ -612,11 +678,24 @@ fn crtract_synthesize_noise_into(self, num_samples, out) {
     return output;
 }
 
+# crtract_osc_ok(f0, end_clock, sr) -- 1 iff the raw oscillators' largest phase,
+# TAU * 2 * f0 * (end_clock / sr), is finite. 2.0.5 ranged f0 as "finite", which
+# is not enough here: past about 1.4e307 the product overflows to inf, and inf * 0
+# at t = 0 is NaN, so a bee rendered 256 NaN samples as success (audit B7, 2.2.1).
+#must_use
+fn crtract_osc_ok(f0, end_clock, sr) {
+    var w = f64_mul(F64_TAU, f64_mul(f64_abs(f0), F64_TWO));
+    if (prani_is_finite(w) == 0) { return 0; }
+    return prani_is_finite(f64_mul(w, f64_div(f64_from(end_clock), sr)));
+}
+
 # synthesize_stridulatory -- amplitude-modulated tone for insects.
 # High-carrier (cricket, f0 > 1000): discrete pulse-train chirps.
 # Low-carrier (bee, f0 <= 1000): continuous wing-beat modulation.
 fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (options <= 0) { return prani_handle_code(options, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     # 2.0.5: f0 finite, num_samples in range. `options` is NOT checked -- this path
     # never reads it (the oracle writes `let _ = options;`), and a function must
     # not reject a value it does not use. f0 here is raw: it multiplies TAU*t
@@ -625,6 +704,12 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
+    # 2.2.1 (ADR-0009): time runs on the tract's clock, so a render in blocks is the
+    # same as one in a single call. It used to restart at 0 every call, and every
+    # caller renders in blocks (20 ms in vocalize, the host's buffer in a stream)
+    # shorter than one chirp, so a cricket never reached its inter-chirp silence.
+    var t0 = CreatureTract_clock(self);
+    if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
     var output = out;
     vec_truncate(output, 0);
 
@@ -639,9 +724,9 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
 
         var i = 0;
         while (i < num_samples) {
-            var t = f64_div(f64_from(i), sr);
-            # pos_in_chirp = (i as f32) % chirp_period
-            var pos_in_chirp = crtract_fmod(f64_from(i), chirp_period);
+            var t = f64_div(f64_from(t0 + i), sr);
+            # pos_in_chirp = (clock as f32) % chirp_period
+            var pos_in_chirp = crtract_fmod(f64_from(t0 + i), chirp_period);
 
             var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
             var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
@@ -673,7 +758,7 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
         var mod_rate = f64_mul(f0, PR_TR_0_5);
         var i = 0;
         while (i < num_samples) {
-            var t = f64_div(f64_from(i), sr);
+            var t = f64_div(f64_from(t0 + i), sr);
             var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
             var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
             # modulator = 0.5 + 0.5*sin(TAU*mod_rate*t)
@@ -684,6 +769,7 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
             i = i + 1;
         }
     }
+    CreatureTract_set_clock(self, t0 + num_samples);
     dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
     return output;
 }
@@ -692,18 +778,21 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
 # Thoracic flight-muscle vibration through wings; steady buzz, AM at half the
 # wing frequency.
 fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     # 2.0.5: f0 finite, num_samples in range. Same raw-oscillator hazard as the
     # stridulatory path.
     if (prani_is_finite(f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
+    var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009), as in stridulatory
+    if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
     var mod_rate = f64_mul(f0, PR_TR_0_5);
     var output = out;
     vec_truncate(output, 0);
     var i = 0;
     while (i < num_samples) {
-        var t = f64_div(f64_from(i), sr);
+        var t = f64_div(f64_from(t0 + i), sr);
         var carrier = f64_sin(f64_mul(f64_mul(F64_TAU, f0), t));
         var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(F64_TAU, f0), F64_TWO), t)), PR_TR_0_3);
         var modulator = f64_add(PR_TR_0_5,
@@ -712,6 +801,7 @@ fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
         if (prani_vec_push(output, y) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
     }
+    CreatureTract_set_clock(self, t0 + num_samples);
     dcblocker_process_buffer(CreatureTract_dc_blocker(self), output);
     return output;
 }
@@ -737,7 +827,9 @@ fn crtract_fmod(a, b) {
 # Every path guards `num_samples`, so this entry point rejects a count that
 # cannot be one vec for every apparatus.
 fn crtract_synthesize_into(self, f0, num_samples, options, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (options <= 0) { return prani_handle_code(options, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var apparatus = SpeciesParams_apparatus(CreatureTract_params(self));
     if (apparatus == PRANI_APP_LARYNGEAL) {
         return crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out);
@@ -842,10 +934,17 @@ fn crtract_synthesize_purr(self, num_samples, purr_f0) {
 # code, and it cannot be caught anywhere but here.
 #must_use
 fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (out <= 0) { return prani_handle_code(out, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_finite(purr_f0) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (prani_buffer_len_ok(num_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var sr = CreatureTract_sample_rate(self);
+    # 2.2.1 (audit B6): the phase wraps once per sample, so the increment must sit
+    # in [0, 1). A negative purr_f0 drove the phase down without bound, and one at
+    # or past the sample rate up past 1, where it latched; either way the tract's
+    # own JSON was then refused. The cat purr asks for 20-35 Hz.
+    if (f64_lt(purr_f0, 0) == 1) { return PRANI_ERR_INVALID_TRACT; }
+    if (f64_ge(purr_f0, sr) == 1) { return PRANI_ERR_INVALID_TRACT; }
     var tract = CreatureTract_tract(self);
     var rng = CreatureTract_rng(self);
     var phase_inc = f64_div(purr_f0, sr);
@@ -881,7 +980,9 @@ fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
 # species defaults, at blend=1 uses `target`. Returns PRANI_ERR_NONE or a
 # negative svara error mapped through prani.
 fn crtract_set_formant_blend(self, target, target_bw, blend) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
+    if (target <= 0) { return prani_handle_code(target, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (target_bw <= 0) { return prani_handle_code(target_bw, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var params = CreatureTract_params(self);
     var bl = f64_clamp(blend, 0, F64_ONE);
 
@@ -909,8 +1010,10 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
     # so nothing holds the pointer past this call, and the two forms share one
     # implementation in svara, so the formants are the same bits.
     var vt[80];
+    var ny = f64_mul(CreatureTract_sample_rate(self), F64_HALF);
+    var bf3e = crtract_in_band(f64_mul(bf2, PR_TR_1_3), bf2, ny);   # audit B2 (ADR-0009)
     var vowel = svara_vowel_target_set(&vt,
-      bf0, bf1, bf2, f64_mul(bf2, PR_TR_1_3), f64_mul(bf2, PR_TR_1_5),
+      bf0, bf1, bf2, bf3e, crtract_in_band(f64_mul(bf2, PR_TR_1_5), bf3e, ny),
       bb0, bb1, bb2, f64_mul(bb2, PR_TR_1_2), f64_mul(bb2, PR_TR_1_4));
     # Rust used `.map_err(Into::into)` -- propagate svara error through prani.
     return prani_from_svara(svara_tract_set_formants_from_target(CreatureTract_tract(self), vowel));
@@ -929,13 +1032,25 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
 # lowpass this filter can apply -- a real, plausible-sounding filter fabricated
 # out of a caller's arithmetic accident. All three now report.
 fn crtract_apply_spectral_tilt(samples, tilt_db, sample_rate) {
+    var cell[8];
+    store64(&cell, 0);
+    return crtract_apply_spectral_tilt_from(samples, tilt_db, sample_rate, &cell);
+}
+
+# apply_spectral_tilt_from(samples, tilt_db, sample_rate, state) -- the same
+# lowpass, starting from and leaving its last output in the 8-byte cell `state`, so
+# a signal filtered in pieces is filtered as one. 2.2.1 (ADR-0009, audit B3): the
+# stream filters one block at a time, and restarting from 0 each block dipped the
+# start of every block of a tilted species. A cell holding 0 is the one-shot filter.
+fn crtract_apply_spectral_tilt_from(samples, tilt_db, sample_rate, state) {
+    if (samples <= 0) { return prani_handle_code(samples, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     if (prani_is_finite(tilt_db) == 0) { return PRANI_ERR_INVALID_TRACT; }
     if (f64_lt(f64_abs(tilt_db), PR_TR_0_1) == 1) { return 0; }
     # dB/octave -> coefficient: a = clamp(-tilt_db/12, 0, 0.85)
     var a = f64_clamp(f64_div(f64_neg(tilt_db), PR_TR_12_0), 0, PR_TR_0_85);
     if (f64_lt(a, PR_TR_0_01) == 1) { return 0; }
     var one_minus_a = f64_sub(F64_ONE, a);
-    var prev = 0;
+    var prev = load64(state);
     var n = vec_len(samples);
     var i = 0;
     while (i < n) {
@@ -945,13 +1060,16 @@ fn crtract_apply_spectral_tilt(samples, tilt_db, sample_rate) {
         prev = y;
         i = i + 1;
     }
+    store64(state, prev);
     return 0;
 }
 
 # reset -- CreatureTract::reset. Clears the svara tract state, phase, and the
 # DC blocker memory.
 fn crtract_reset(self) {
+    if (self <= 0) { return 0; }   # ADR-0008
     svara_tract_reset(CreatureTract_tract(self));
     CreatureTract_set_phase(self, 0);
+    CreatureTract_set_clock(self, 0);
     dcblocker_reset(CreatureTract_dc_blocker(self));
 }

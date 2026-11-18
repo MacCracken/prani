@@ -257,8 +257,12 @@ var sr48 = f64_from(48000);
 # from a fallible call, reaches vec_len as load64(v+8) -> SIGSEGV.
 assert_eq(spatial_apply_distance_attenuation(0, F64_ONE, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION,
   "null samples handle rejected");
-assert_eq(spatial_apply_distance_attenuation(PRANI_ERR_SVARA, F64_ONE, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION,
-  "a chained-in error code is rejected, not dereferenced");
+# 2.2.1 (audit C7): a chained-in error keeps its code, so a refused allocation or a
+# svara rejection upstream is not reported as a bad sample buffer. 2.2.0 said -2.
+assert_eq(spatial_apply_distance_attenuation(PRANI_ERR_SVARA, F64_ONE, F64_ONE, sr48), PRANI_ERR_SVARA,
+  "a chained-in error code is passed on, not dereferenced or rewritten");
+assert_eq(spatial_apply_distance_attenuation(PRANI_ERR_ALLOC, F64_ONE, F64_ONE, sr48), PRANI_ERR_ALLOC,
+  "a chained-in refusal stays PRANI_ERR_ALLOC");
 # -- distance: finite, >= 0.
 assert_eq(spatial_apply_distance_attenuation(one, SP_NAN, F64_ONE, sr48), PRANI_ERR_INVALID_VOCALIZATION,
   "NaN distance rejected");
@@ -318,8 +322,8 @@ var sp_i = 0;
 while (sp_i < 100) { vec_push(s100, F64_ONE); sp_i = sp_i + 1; }
 # -- samples handle.
 assert_eq(spatial_apply_doppler_shift(0, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION, "null samples handle rejected");
-assert_eq(spatial_apply_doppler_shift(PRANI_ERR_SVARA, 0, sr48), PRANI_ERR_INVALID_VOCALIZATION,
-  "a chained-in error code is rejected, not dereferenced");
+assert_eq(spatial_apply_doppler_shift(PRANI_ERR_SVARA, 0, sr48), PRANI_ERR_SVARA,
+  "a chained-in error code is passed on, not dereferenced or rewritten (2.2.1)");
 # -- velocity: any FINITE value. NaN was the live defect (out_len = 0
 # -> empty buffer); +/-inf are clamped to +/-308.7, a fabricated answer.
 assert_eq(spatial_apply_doppler_shift(s100, SP_NAN, sr48), PRANI_ERR_INVALID_VOCALIZATION,

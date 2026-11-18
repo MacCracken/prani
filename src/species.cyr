@@ -524,6 +524,34 @@ fn species_params_validate(p) {
     return PRANI_ERR_NONE;
 }
 
+# species_params_node_ok(node) -- 1 iff `node` is an object holding the SpeciesParams
+# fields species_params_from_node reads, each as a JSON integer. spectral_tilt is
+# optional (absent reads as 0, the oracle's #[serde(default)]); every other field
+# is required. 2.2.1, audit A2/C5.
+#must_use
+fn species_params_node_ok(node) {
+    if (prani_json_int_ok(node, "apparatus") == 0) { return 0; }
+    if (prani_json_int_ok(node, "f0_min") == 0) { return 0; }
+    if (prani_json_int_ok(node, "f0_max") == 0) { return 0; }
+    if (prani_json_int_ok(node, "f0_default") == 0) { return 0; }
+    if (prani_json_int_ok(node, "tract_scale") == 0) { return 0; }
+    if (prani_json_int_ok(node, "formant0") == 0) { return 0; }
+    if (prani_json_int_ok(node, "formant1") == 0) { return 0; }
+    if (prani_json_int_ok(node, "formant2") == 0) { return 0; }
+    if (prani_json_int_ok(node, "bandwidth0") == 0) { return 0; }
+    if (prani_json_int_ok(node, "bandwidth1") == 0) { return 0; }
+    if (prani_json_int_ok(node, "bandwidth2") == 0) { return 0; }
+    if (prani_json_int_ok(node, "breathiness") == 0) { return 0; }
+    if (prani_json_int_ok(node, "jitter") == 0) { return 0; }
+    if (prani_json_int_ok(node, "shimmer") == 0) { return 0; }
+    if (prani_json_int_ok(node, "resonance_seed") == 0) { return 0; }
+    var tilt = bayan_json_v_obj_get_by_cstr(node, "spectral_tilt");
+    if (tilt != 0) {
+        if (bayan_json_v_is_int(tilt) == 0) { return 0; }
+    }
+    return 1;
+}
+
 # species_params_from_node -- rebuild a SpeciesParams from a parsed bayan JSON
 # object node (all 16 fields are i64: enum consts / f64 bit patterns). Shared by
 # the nested-serde reconstruction in voice.cyr (CreatureVoice) and tract.cyr
@@ -544,6 +572,12 @@ fn species_params_validate(p) {
 # so validating the result again is also safe.
 #must_use
 fn species_params_from_node(node) {
+    # 2.2.1 (audit A2/C5): every field present and an integer, before any is read.
+    # A float literal ("formant0":800.0) was truncated by bayan into an integer bit
+    # pattern, a subnormal f64 that passed "finite and > 0", and rendered as success.
+    # spectral_tilt may be absent and reads as 0, as the oracle's #[serde(default)]
+    # had it; if present it must be an integer too.
+    if (species_params_node_ok(node) == 0) { return PRANI_ERR_INVALID_SPECIES; }
     var p = prani_alloc(sizeof(SpeciesParams));
     if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
     SpeciesParams_set_apparatus(p, bayan_json_v_int(bayan_json_v_obj_get_by_cstr(node, "apparatus")));

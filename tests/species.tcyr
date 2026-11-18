@@ -5,11 +5,15 @@
 # bout_template(). serde/Display tests dropped.
 #
 # sequence.cyr is included ONLY for the CallBout struct + sequence_call_bout_new
-# that species_bout_template uses. sequence's synthesize methods forward-reference
-# crvoice_* (voice.cyr, not included here) -- those are UNREACHABLE in this unit,
-# so undefined-fn WARNINGS for crvoice_* are EXPECTED and fine (not link errors).
+# that species_bout_template uses. sequence's synthesize methods call into logging,
+# rng and dsp, included so they resolve, and forward-reference
+# crvoice_vocalize_with_intent (voice.cyr, not included here), which is UNREACHABLE
+# in this unit. That one undefined-fn WARNING is EXPECTED and fine (not a link error).
 
 include "src/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
 include "src/vocalization.cyr"
 include "src/sequence.cyr"
 include "src/species.cyr"

@@ -21,14 +21,15 @@
 # their side effect, so none is #must_use. Verbosity is a RUNTIME choice
 # (sakshi_set_level); nothing here is compiled out, which is why the message
 # must stay a literal rather than something built per call on a hot path.
-# `msg` must not be 0: these forward to strlen.
+# A null `msg` logs nothing (2.2.1): through 2.2.0 these forwarded it to strlen,
+# which faulted on it.
 # fatal -- an unrecoverable condition; prani itself never calls this.
-fn prani_log_fatal(msg) { sakshi_fatal(msg, strlen(msg)); return 0; }
+fn prani_log_fatal(msg) { if (msg == 0) { return 0; } sakshi_fatal(msg, strlen(msg)); return 0; }
 # error -- a synthesis step failed and an error code is being returned.
-fn prani_log_error(msg) { sakshi_error(msg, strlen(msg)); return 0; }
+fn prani_log_error(msg) { if (msg == 0) { return 0; } sakshi_error(msg, strlen(msg)); return 0; }
 # warn -- degraded but continuing (ports tract.rs's out-of-range formants).
-fn prani_log_warn(msg)  { sakshi_warn(msg, strlen(msg));  return 0; }
+fn prani_log_warn(msg)  { if (msg == 0) { return 0; } sakshi_warn(msg, strlen(msg));  return 0; }
 # info -- lifecycle notes; prani itself never calls this.
-fn prani_log_info(msg)  { sakshi_info(msg, strlen(msg));  return 0; }
+fn prani_log_info(msg)  { if (msg == 0) { return 0; } sakshi_info(msg, strlen(msg));  return 0; }
 # debug -- per-call synthesis trace (ports voice.rs's tracing::trace!).
-fn prani_log_debug(msg) { sakshi_debug(msg, strlen(msg)); return 0; }
+fn prani_log_debug(msg) { if (msg == 0) { return 0; } sakshi_debug(msg, strlen(msg)); return 0; }

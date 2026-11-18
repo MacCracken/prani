@@ -82,7 +82,7 @@ struct IntentModifiers {
     urgency: i64;
 }
 
-# intent_modifiers_make(pitch_scale, urgency, duration_scale, amplitude_scale)
+# intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urgency)
 # -- construct an IntentModifiers. Ports the Rust struct literal in
 # `CallIntent::modifiers`. Values are multiplicative against the base call
 # (urgency additionally drives jitter/shimmer perturbation in the tract), and a
@@ -100,8 +100,9 @@ fn prani_intent_modifiers_make(pitch_scale, amplitude_scale, duration_scale, urg
 }
 
 # prani_intent_modifiers -- CallIntent::modifiers(). Fixed lookup per intent
-# (values verbatim from the Rust match arms). Unknown intent -> neutral (Idle-
-# like 1.0/1.0/1.0/0.0), preserving totality (the Rust enum is #[non_exhaustive]).
+# (values verbatim from the Rust match arms). Unknown intent -> neutral
+# 1.0/1.0/1.0/0.0 (not Idle, whose amplitude is 0.5), preserving totality (the
+# Rust enum is #[non_exhaustive]).
 #must_use
 fn prani_intent_modifiers(intent) {
     if (intent == PRANI_INTENT_ALARM) {

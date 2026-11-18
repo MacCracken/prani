@@ -189,8 +189,8 @@ fn sequence_call_bout_new(vocalization, count, call_duration, interval, intent) 
 # sequence_call_bout_new. `sample_rate` is INVALID_TRACT (a rate is a tract
 # parameter, ADR-0001's category); the rest are INVALID_VOCALIZATION.
 fn sequence_call_bout_synthesize(self, voice, sample_rate) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
-    if (prani_is_err(voice) == 1) { return voice; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (voice <= 0) { return prani_handle_code(voice, PRANI_ERR_INVALID_SPECIES); }   # ADR-0008
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var count = CallBout_count(self);
     if (prani_seq_count_ok(count) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -202,7 +202,12 @@ fn sequence_call_bout_synthesize(self, voice, sample_rate) {
     # seconds of samples. The intent's duration_scale (at most 2.0) is left out
     # deliberately -- it can only double the rendered length, which still leaves
     # the true ceiling 8x below the measured abort.
-    var want = f64_mul(f64_mul(f64_add(call_duration, interval), f64_from(count)), sample_rate);
+    # 2.2.1 (audit C8): a bout renders count calls and count - 1 intervals. Counting
+    # an interval per call refused a valid one-call bout with a long interval.
+    var gaps = count - 1;
+    if (gaps < 0) { gaps = 0; }
+    var want = f64_mul(f64_add(f64_mul(call_duration, f64_from(count)), f64_mul(interval, f64_from(gaps))),
+      sample_rate);
     if (prani_seq_samples_ok(want) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     var gap_samples = f64_to(f64_mul(interval, sample_rate));
@@ -248,6 +253,7 @@ struct CallPhrase { elements; intent; }
 # where the document came from outside prani.
 #must_use
 fn sequence_call_phrase_new(elements, intent) {
+    if (elements <= 0) { return prani_handle_code(elements, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var p = prani_alloc(sizeof(CallPhrase));
     if (p < 0) { return p; }   # PRANI_ERR_ALLOC (2.2.0)
     CallPhrase_set_elements(p, elements);
@@ -262,6 +268,8 @@ fn sequence_call_phrase_new(elements, intent) {
 # bayan's value-tree, rebuilding each element via CallElement_from_json_str
 # (re-serializing the array-element node). Roundtrip is idempotent.
 fn sequence_call_phrase_to_json(self, sb) {
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (sb <= 0) { return prani_handle_code(sb, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     str_builder_add_cstr(sb, "{\"intent\":");
     str_builder_add_int(sb, CallPhrase_intent(self));
     str_builder_add_cstr(sb, ",\"elements\":[");
@@ -294,6 +302,12 @@ fn sequence_call_phrase_from_json_str(json) {
     if (json == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     var root = bayan_json_v_parse_buf(json, strlen(json));
     if (root == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    # 2.2.1 (audit C4): present and typed, or refused. "{}" decoded as an empty
+    # ALARM phrase, and an element of "{}" as a 0 s HOWL.
+    if (prani_json_int_ok(root, "intent") == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+    if (bayan_json_v_is_arr(bayan_json_v_obj_get_by_cstr(root, "elements")) == 0) {
+        return PRANI_ERR_INVALID_VOCALIZATION;
+    }
     var intent = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(root, "intent"));
     if (intent < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
     if (intent >= PRANI_INTENT_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -307,6 +321,9 @@ fn sequence_call_phrase_from_json_str(json) {
         # Read each element's fields DIRECTLY from the parsed array-element node
         # (duration/gap are i64 bit patterns). Avoids re-serializing the node.
         var ev = bayan_json_v_arr_get(elems_val, i);
+        if (prani_json_int_ok(ev, "vocalization") == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+        if (prani_json_int_ok(ev, "duration") == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
+        if (prani_json_int_ok(ev, "gap") == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
         var voc = bayan_json_v_int(bayan_json_v_obj_get_by_cstr(ev, "vocalization"));
         if (voc < 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
         if (voc >= PRANI_VOC_COUNT) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -332,8 +349,8 @@ fn sequence_call_phrase_from_json_str(json) {
 # to completion BEFORE the first synthesis, so a bad element at the end of the
 # phrase is reported instead of being reached after most of the buffer is built.
 fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
-    if (prani_is_err(self) == 1) { return self; }   # an error handle passes through (2.2.0)
-    if (prani_is_err(voice) == 1) { return voice; }   # an error handle passes through (2.2.0)
+    if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
+    if (voice <= 0) { return prani_handle_code(voice, PRANI_ERR_INVALID_SPECIES); }   # ADR-0008
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var elements = CallPhrase_elements(self);
     var n = vec_len(elements);
@@ -342,6 +359,9 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
     var k = 0;
     while (k < n) {
         var el = vec_get(elements, k);
+        # 2.2.1: an element that is an error (an unchecked sequence_call_element_new)
+        # is reported as itself, never read.
+        if (el <= 0) { return prani_handle_code(el, PRANI_ERR_INVALID_VOCALIZATION); }
         if (prani_seq_seconds_ok(CallElement_duration(el)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
         if (prani_seq_seconds_ok(CallElement_gap(el)) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
         want = f64_add(want, f64_add(CallElement_duration(el), CallElement_gap(el)));
@@ -374,7 +394,7 @@ fn sequence_call_phrase_synthesize(self, voice, sample_rate) {
 # negative error (empty vec if `voices` is empty).
 # ================================================================
 fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duration, timing_spread) {
-    if (prani_is_err(voices) == 1) { return voices; }   # an error handle passes through (2.2.0)
+    if (voices <= 0) { return prani_handle_code(voices, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
     var voice_count = vec_len(voices);
     # The empty-voices short circuit stays FIRST: the oracle returns Ok(vec![])
     # before it reads any number, and no number is used on that path.
@@ -393,12 +413,19 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
     # since span >= duration). Bounding THAT rather than only the i64 sum below
     # is what closes F10: at 44100 Hz a spread of 1e6 s demands 705.6 GB, which
     # no overflow check would ever have caught.
-    var span = f64_add(duration, f64_mul(f64_from(2), timing_spread));
+    # 2.2.1 (audit C3, ADR-0009): each voice renders duration x the intent's
+    # duration_scale (vocalize applies it), so the mix is sized from that. It used
+    # to be sized from the bare duration: a MATING chorus (x2) cut every call in
+    # half, an ALARM one (x0.7) ended in 30% silence. The oracle had the same.
+    var scale_mods = prani_intent_modifiers(intent);
+    if (prani_is_err(scale_mods) == 1) { return scale_mods; }
+    var call_seconds = f64_mul(duration, IntentModifiers_duration_scale(scale_mods));
+    var span = f64_add(call_seconds, f64_mul(f64_from(2), timing_spread));
     var want = f64_mul(f64_mul(span, f64_from(voice_count)), sample_rate);
     if (prani_seq_samples_ok(want) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
 
     var max_offset_samples = f64_to(f64_mul(timing_spread, sample_rate));
-    var base_samples = f64_to(f64_mul(duration, sample_rate));
+    var base_samples = f64_to(f64_mul(call_seconds, sample_rate));
     # total length includes the spread for late-starting voices. Both terms are
     # now non-negative and bounded by MAX_SAMPLES, so the sum cannot overflow.
     var total_len = base_samples + max_offset_samples * 2;
@@ -438,10 +465,6 @@ fn sequence_synthesize_chorus(voices, vocalization, intent, sample_rate, duratio
 
     # normalize by 1/sqrt(voice_count) to prevent clipping
     var scale = f64_div(F64_ONE, f64_sqrt(f64_from(voice_count)));
-    var s = 0;
-    while (s < total_len) {
-        vec_set(mix, s, f64_mul(vec_get(mix, s), scale));
-        s = s + 1;
-    }
+    prani_vec_scale(mix, scale);
     return mix;
 }

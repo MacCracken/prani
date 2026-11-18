@@ -18,15 +18,37 @@
 # Turn the gate on only once recorded history shows this runner is quiet enough
 # to justify it. Until then the delta table is for a human to read.
 #
+# RE-RECORDING. A baseline is a claim about one host AND one toolchain. Through
+# 2.2.0 the only way to make one was by hand, and the committed one was cyrius
+# 6.5.36's: on 6.7.18 16 of 18 rows read 0.50-0.84x, so a 2.4x regression in
+# wolf_howl_1s would have read 1.48x and passed a 1.5x gate (audit D5, 2026-11-17).
+#
+#   sh scripts/bench-check.sh --write    # record benches/baseline.csv
+#
+# runs the harness BENCH_RUNS times (default 3) and records each benchmark's
+# minimum, with the host, the toolchain and the tree in the header. A compare
+# warns when the baseline's toolchain is not the one running. Re-record after
+# every toolchain or dependency bump, in a commit of its own.
+#
 # POSIX sh -- CI runs this under dash, where `set -o pipefail` is an error.
 set -eu
 
 BASELINE="${BASELINE:-benches/baseline.csv}"
 BENCH_FILE="${BENCH_FILE:-tests/prani.bcyr}"
 GATE="${BENCH_GATE:-0}"
+MODE=compare
+case "${1:-}" in
+    --write) MODE=write ;;
+    "") ;;
+    *) echo "usage: sh scripts/bench-check.sh [--write]" >&2; exit 2 ;;
+esac
+if [ "$MODE" = write ]; then RUNS="${BENCH_RUNS:-3}"; else RUNS="${BENCH_RUNS:-1}"; fi
 
 command -v cyrius >/dev/null 2>&1 || { echo "error: cyrius not on PATH" >&2; exit 1; }
-[ -f "$BASELINE" ] || { echo "error: no baseline at $BASELINE" >&2; exit 1; }
+if [ "$MODE" = compare ]; then
+    [ -f "$BASELINE" ] || { echo "error: no baseline at $BASELINE (record one with --write)" >&2; exit 1; }
+fi
+TOOLCHAIN=$(cyrius --version 2>/dev/null | head -n 1)
 
 # The harness benchmarks dist/prani.cyr -- the generated bundle, deliberately,
 # since that is what a consumer gets. So a STALE bundle measures the last
@@ -45,22 +67,93 @@ fi
 
 LOCK="${CYRIUS_LOCKFILE:-${TMPDIR:-/tmp}/prani-build.lock}"
 OUT="${TMPDIR:-/tmp}/prani-bench-check.$$"
-if command -v flock >/dev/null 2>&1; then
-    flock "$LOCK" cyrius bench "$BENCH_FILE" > "$OUT" 2>&1
-else
-    cyrius bench "$BENCH_FILE" > "$OUT" 2>&1
+RUN="$OUT.run"
+# Through 2.2.0 a failing harness ended the script under `set -e` before its
+# output was printed or removed: rc=1, no diagnostic, a file left in TMPDIR
+# (audit D12). Now the output is shown and the files go on every exit.
+trap 'rm -f "$OUT" "$RUN"' EXIT INT TERM
+bench_once() {
+    if command -v flock >/dev/null 2>&1; then
+        flock "$LOCK" cyrius bench "$BENCH_FILE"
+    else
+        cyrius bench "$BENCH_FILE"
+    fi
+}
+: > "$OUT"
+i=0
+while [ "$i" -lt "$RUNS" ]; do
+    bench_once > "$RUN" 2>&1 || {
+        echo "error: cyrius bench $BENCH_FILE failed:" >&2
+        cat "$RUN" >&2
+        exit 1
+    }
+    cat "$RUN" >> "$OUT"
+    i=$((i + 1))
+done
+
+# The harness's result lines: "  name: 123.4ns avg ...". Each becomes
+# "name<TAB>nanoseconds", the minimum across the runs, in first-seen order.
+results() {
+    awk '
+    function to_ns(v, u) {
+        if (u == "ns") return v
+        if (u == "us") return v * 1000
+        if (u == "ms") return v * 1000000
+        if (u == "s")  return v * 1000000000
+        return -1
+    }
+    {
+        line = $0
+        if (match(line, /^[ \t]*[^:]+: [0-9.]+(ns|us|ms|s) avg/) == 0) next
+        nm = line; sub(/^[ \t]+/, "", nm); sub(/:.*/, "", nm)
+        val = line; sub(/^[^:]*: /, "", val); sub(/ avg.*/, "", val)
+        unit = val; gsub(/[0-9.]/, "", unit)
+        ns = to_ns(val + 0, unit)
+        if (!(nm in best)) { order[n++] = nm; best[nm] = ns }
+        else if (ns < best[nm]) best[nm] = ns
+    }
+    END { for (i = 0; i < n; i++) printf "%s\t%.1f\n", order[i], best[order[i]] }
+    ' "$OUT"
+}
+
+if [ "$MODE" = write ]; then
+    host="$(uname -s) $(uname -m)"
+    cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo 2>/dev/null | head -n 1)
+    [ -n "$cpu" ] && host="$host, $cpu"
+    tree="prani $(cat VERSION 2>/dev/null || echo '?')"
+    rev=$(git rev-parse --short HEAD 2>/dev/null || true)
+    if [ -n "$rev" ]; then
+        if git diff --quiet HEAD -- 2>/dev/null; then tree="$tree at $rev"; else tree="$tree at $rev + uncommitted changes"; fi
+    fi
+    n=$(results | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] || { echo "error: the harness printed no results" >&2; cat "$OUT" >&2; exit 1; }
+    {
+        if [ "$RUNS" -eq 1 ]; then runs_said="from one run"; else runs_said="each the fastest of $RUNS runs"; fi
+        echo "# prani benchmark baseline -- nanoseconds, $runs_said."
+        echo "# Re-record with \`sh scripts/bench-check.sh --write\` after every toolchain or"
+        echo "# dependency bump, in a commit of its own. A number here is a claim about THIS"
+        echo "# host and THIS toolchain; a different one will differ, and that is not a"
+        echo "# regression."
+        echo "# host: $host"
+        echo "# toolchain: $TOOLCHAIN"
+        echo "# recorded: $(date -u +%Y-%m-%d), $tree"
+        echo "benchmark,baseline_ns"
+        results | awk -F '\t' '{ printf "\"%s\",%s\n", $1, $2 }'
+    } > "$BASELINE.new"
+    mv "$BASELINE.new" "$BASELINE"
+    echo "bench-check: recorded $n benchmarks to $BASELINE ($TOOLCHAIN, $RUNS runs)"
+    exit 0
 fi
 
-awk -v baseline="$BASELINE" -v gate="$GATE" '
-function to_ns(v, u) {
-    if (u == "ns") return v
-    if (u == "us") return v * 1000
-    if (u == "ms") return v * 1000000
-    if (u == "s")  return v * 1000000000
-    return -1
-}
+recorded=$(sed -n 's/^# toolchain: //p' "$BASELINE" | head -n 1)
+if [ "$recorded" != "$TOOLCHAIN" ]; then
+    echo "⚠ WARNING: $BASELINE was recorded on '${recorded:-an unrecorded toolchain}'," >&2
+    echo "  and this is '$TOOLCHAIN'. The deltas below compare two compilers." >&2
+    echo "  Re-record with: sh scripts/bench-check.sh --write" >&2
+fi
+
+results | awk -v baseline="$BASELINE" -v gate="$GATE" '
 BEGIN {
-    FS = ","
     n = 0
     while ((getline line < baseline) > 0) {
         if (line ~ /^#/ || line ~ /^benchmark,/) continue
@@ -75,14 +168,9 @@ BEGIN {
     worst = 1.0; worst_name = "-"
 }
 {
-    line = $0
-    if (match(line, /^[ \t]*[^:]+: [0-9.]+(ns|us|ms|s) avg/) == 0) next
-    nm = line; sub(/^[ \t]+/, "", nm); sub(/:.*/, "", nm)
-    val = line; sub(/^[^:]*: /, "", val); sub(/ avg.*/, "", val)
-    unit = val; gsub(/[0-9.]/, "", unit)
-    num = val + 0
-    cur[nm] = to_ns(num, unit)
-    seen[nm] = 1
+    split($0, fld, "\t")
+    cur[fld[1]] = fld[2] + 0
+    seen[fld[1]] = 1
 }
 END {
     missing = 0
@@ -104,7 +192,4 @@ END {
     }
     if (missing > 0) exit 1
 }
-' "$OUT"
-rc=$?
-rm -f "$OUT"
-exit $rc
+'

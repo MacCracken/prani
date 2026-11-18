@@ -5,16 +5,17 @@
 
 ## Version
 
-**2.2.0** — the allocation-failure contract
-([ADR-0008](../adr/0008-a-refused-allocation-is-reported.md)), roadmap Lane B and the
-2.0.3 audit's F9. Every constructor and entry point that allocates reports a refused
-allocation as `PRANI_ERR_ALLOC` (−6), every allocation goes through `src/error.cyr`'s
-funnel (`scripts/check-alloc.sh` enforces it), and every renderer passes an error
-handle straight back. The builders refuse a NaN, which 2.0.5 deferred here. A stream
-records why it retired (`stream_last_error`). No dependency moved since 2.1.2 (cyrius
-6.7.18, svara **3.14.0**), and output on valid input is byte-identical to it.
-Consumers still need **cyrius 6.7.2 or later**. **2287 assertions / 19 suites**,
-audit exit 0, and the build is warning-free.
+**2.2.1** — the second P(-1) sweep
+([audit](../audit/2026-11-17-audit.md)): 53 confirmed findings plus 4 found while
+verifying, 52 repaired, each with a regression test that fails on 2.2.0. Six of the
+repairs are the oracle's own render defects, and
+[ADR-0009](../adr/0009-renders-do-not-depend-on-how-they-are-cut.md) records them.
+A tract keeps a sample clock, a stream renders vocalize's 20 ms blocks and its own
+voice, and an estimated formant above Nyquist is placed in band. Every public function
+answers a null or error handle without reading it, and the four hand-written decoders
+require every field. No dependency moved since 2.1.2 (cyrius 6.7.18, svara **3.14.0**).
+Consumers still need **cyrius 6.7.2 or later**. **2477 assertions /
+21 suites**, audit exit 0, and the build is warning-free.
 
 Standing facts from 2.0.14: `f64_to` saturates, so a count is ranged in f64 before the
 cast, and past `VEC_CAP_MAX` (2^28 samples) a push exits the process, so every path
@@ -99,16 +100,18 @@ oracle at `2.0.3`.
 
 ## Tests
 
-`cyrius audit` is green end to end as of 2.2.0: fmt · lint · docs · tests · bench,
-**exit 0**. 19 suites / **2287 assertions** (770 at 2.0.3; 2.0.4 added 430 closing
-the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)). CI runs
+`cyrius audit` is green end to end as of 2.2.1: fmt · lint · docs · tests · bench,
+**exit 0**. 21 suites / **2477 assertions** (770 at 2.0.3; 2.0.4 added
+430 closing the parity shortfalls — see [`rust-test-parity.md`](rust-test-parity.md)),
+plus the decoders' fuzz harness, `tests/prani.fcyr` (2.2.1).
+Measured with `for t in tests/*.tcyr; do cyrius test $t; done`, summing each total. CI runs
 the audit and a `dist/` bundle-coherence check on every push, as of 2.0.4 — plus
 `scripts/run-examples.sh` (2.0.6) and `scripts/bench-check.sh` (2.0.11); before
 2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
 
-`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **131** today) is the
-P(-1) sweep's regression suite — one group per repaired finding, each written so it FAILS on
-the 2.0.2 tree (the memory-safety groups crash the process there). Every group
+`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **242** at 2.2.1) is the
+P(-1) sweeps' regression suite — one group per repaired finding, each written so it FAILS on
+the tree before it (the memory-safety groups crash the process there). Every group
 carries controls so it cannot pass vacuously. It also holds the two allocation
 budgets, measured with `alloc_used()` rather than asserted as wall-clock.
 
@@ -116,8 +119,13 @@ budgets, measured with `alloc_used()` rather than asserted as wall-clock.
 proof. It redefines `prani_alloc_raw` to refuse each of prani's own requests in
 every public path, singly and from then on, and requires exactly `PRANI_ERR_ALLOC`
 back. It redefines the stdlib `alloc` too, to reach naad's reporting constructors
-in measured windows. Eight mutants each fail it. `scripts/check-alloc.sh` (CI)
-keeps every allocation where the suite can see it.
+in measured windows. Eight mutants each fail it (CHANGELOG 2.2.0, *Verified*).
+`scripts/check-alloc.sh` (CI) keeps every allocation where the suite can see it.
+
+`tests/layers.tcyr` (2.2.1, 45 assertions) pins the RMS of 15 renders to a relative
+1e-9: every synthesis layer past the tract. A level move is a failure there, and the
+14 mutants in the 2.2.1 audit report each fail it. Re-record a level only with the
+change that moves it, and name it in that release's notes.
 
 One `tests/<module>.tcyr` per module, cross-checked against the Rust oracle
 serde roundtrip tests INCLUDED (serde restored in 2.0.1 via `#derive(Serialize)`
@@ -135,7 +143,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, on the cyrius 6.7.18 matched dep set, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), and with a gate that would catch the next one (2.0.11).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), with a gate that would catch the next one (2.0.11), reporting a refused allocation (2.2.0), and swept a second time (2.2.1).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x was one arc with one destination: retiring `rust-old/`** — it

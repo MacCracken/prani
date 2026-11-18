@@ -39,5 +39,6 @@ species tag rendered audio and reported success (fixed in 2.0.6, pinned as F13 i
 call** on the path advertised for audio callbacks — ~757 KB/s at 44100 Hz with
 512-sample blocks, retained for the life of the process (fixed in 2.0.10, down to
 one `svara_glottal_new` per fill, prani's own share 0 B, and budgeted in
-`tests/allocbudget.tcyr`). That is the argument for
+`tests/allocbudget.tcyr`; since 2.2.1 one per 20 ms block, so a 512-sample fill
+retains that or nothing). That is the argument for
 examples as a gate rather than a nicety.

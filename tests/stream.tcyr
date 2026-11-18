@@ -248,12 +248,13 @@ assert_eq(vec_len(batch), vec_len(streamed), "batch length == streamed length");
 assert_eq(t_all_finite(batch), 1, "batch output all finite");
 
 # ================================================================
-test_group("full drain -- control: block-wise render diverges from single-pass");
-# A single 22050-sample fill renders the whole stream at t = 0: one contour
-# point (400*0.8 == 320) and one boundary_boost (the t < 0.1 attack arm). The
-# 512-block drain above re-evaluates t on every pass. The two outputs must
-# therefore differ -- if fill_buffer ever stopped advancing t per block, this is
-# the assertion that catches it, since length and finiteness would still hold.
+test_group("full drain -- the host's buffer size does not change what a stream renders");
+# 2.2.1 (ADR-0009, audit B3): a stream renders fixed 20 ms blocks on its own
+# timeline and serves the host from them, with the tilt filter's state carried
+# between blocks. So one 22050-sample fill and the 512-sample drain above must be
+# the SAME samples. Through 2.2.0 they differed: the contour was sampled once per
+# fill, a single fill rendered the whole call at t = 0, and the tilt lowpass
+# restarted at every fill.
 var sone = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_500);
 var obuf = vec_new();
 prani_vec_push_zeros(obuf, 22050);
@@ -264,7 +265,68 @@ while (oi < 22050) {
     if (vec_get(obuf, oi) != vec_get(streamed, oi)) { ndiff = ndiff + 1; }
     oi = oi + 1;
 }
-assert_gt(ndiff, 0, "block-wise drain diverges from single-pass (t advances per block)");
+assert_eq(ndiff, 0, "the 512-sample drain and the single fill are bit-identical (2.2.0: they differed)");
+var s3 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_DUR_500);
+var s3buf = vec_new();
+prani_vec_push_zeros(s3buf, 333);
+var s3out = vec_new();
+while (stream_is_finished(s3) == 0) {
+    var s3n = stream_fill_buffer(s3, s3buf);
+    var s3i = 0;
+    while (s3i < s3n) { vec_push(s3out, vec_get(s3buf, s3i)); s3i = s3i + 1; }
+    if (s3n == 0) { break; }
+}
+var s3diff = 0;
+oi = 0;
+while (oi < 22050) {
+    if (vec_get(obuf, oi) != vec_get(s3out, oi)) { s3diff = s3diff + 1; }
+    oi = oi + 1;
+}
+assert_eq(vec_len(s3out), 22050, "control: a 333-sample drain delivers the whole stream too");
+assert_eq(s3diff, 0, "and is bit-identical, at a size that never lines up with a 20 ms block");
+# What the stream renders, rebuilt from public pieces: the voice's tract, 20 ms
+# blocks, each at the contour f0 and boundary boost of its own START, the tilt
+# lowpass carried from block to block, then the amplitude. Bit-exact agreement
+# pins all three; zero crossings, tried first, do not track pitch here, because
+# wolf F1 sits on f0.
+var rf_v = crvoice_new(PRANI_SP_WOLF);
+var rf_mods = prani_intent_modifiers(PRANI_INTENT_SOCIAL);
+var rf_t = crtract_new(crvoice_clone_params(CreatureVoice_params(rf_v)), T_SR);
+var rf_f0 = f64_mul(crvoice_effective_f0(rf_v), IntentModifiers_pitch_scale(rf_mods));
+# effort_amp = 0.3 + effort * 1.2, computed as the stream computes it (0.9 written
+# as a literal is one ulp away from that sum).
+var rf_eamp = f64_add(0x3FD3333333333333, f64_mul(CreatureVoice_vocal_effort(rf_v), 0x3FF3333333333333));
+var rf_amp = f64_mul(IntentModifiers_amplitude_scale(rf_mods), rf_eamp);
+var rf_tilt = f64_add(SpeciesParams_spectral_tilt(CreatureVoice_params(rf_v)),
+  crvoice_vocalization_spectral_offset(PRANI_VOC_HOWL));
+var rf_opt = crtract_options_default();
+var rf_blk = vec_new();
+var rf_cell = prani_alloc(8);
+store64(rf_cell, 0);
+var rf_start = 0;
+var rf_bad = 0;
+while (rf_start < 22050) {
+    var rf_n = 882;
+    if (22050 - rf_start < rf_n) { rf_n = 22050 - rf_start; }
+    var rf_tt = f64_div(f64_from(rf_start), f64_from(22050));
+    var rf_cf = stream_pitch_contour_at(PRANI_VOC_HOWL, rf_f0, rf_tt);
+    var rf_boost = F64_ONE;
+    if (f64_lt(rf_tt, 0x3FB999999999999A) == 1) {
+        rf_boost = f64_add(F64_ONE, f64_mul(f64_sub(F64_ONE, f64_div(rf_tt, 0x3FB999999999999A)), F64_HALF));
+    } elif (f64_gt(rf_tt, 0x3FEB333333333333) == 1) {
+        rf_boost = f64_add(F64_ONE, f64_mul(f64_div(f64_sub(rf_tt, 0x3FEB333333333333), 0x3FC3333333333333), F64_HALF));
+    }
+    SynthesisOptions_set_perturbation_scale(rf_opt, f64_add(rf_boost, IntentModifiers_urgency(rf_mods)));
+    crtract_synthesize_into(rf_t, rf_cf, rf_n, rf_opt, rf_blk);
+    crtract_apply_spectral_tilt_from(rf_blk, rf_tilt, T_SR, rf_cell);
+    var rf_i = 0;
+    while (rf_i < rf_n) {
+        if (f64_mul(vec_get(rf_blk, rf_i), rf_amp) != vec_get(obuf, rf_start + rf_i)) { rf_bad = rf_bad + 1; }
+        rf_i = rf_i + 1;
+    }
+    rf_start = rf_start + rf_n;
+}
+assert_eq(rf_bad, 0, "the stream is its voice's tract in 20 ms blocks, contour per block, tilt carried");
 
 # ================================================================
 test_group("stream_finishes -- Wolf BARK drained by next_block (oracle case)");
@@ -332,6 +394,9 @@ assert_gt(cdiff, 0, "purr stream advances state -- block 2 differs from block 1"
 var T_1E300    = 0x7e37e43c8800759c;   # 1e300   finite, but 1e300 samples is not
 var T_2P53     = 0x4340000000000000;   # 2^53    9007199254740992, the ceiling
 var T_2P54     = 0x4350000000000000;   # 2^54    one binade past the ceiling
+var T_8192     = 0x40c0000000000000;   # 8192 Hz, a power of two svara accepts
+var T_2P40     = 0x4270000000000000;   # 2^40 s: x 8192 Hz is exactly 2^53 samples
+var T_2P41     = 0x4280000000000000;   # 2^41 s: x 8192 Hz is 2^54
 var T_1_7E308  = 0x7fee42d130773b76;   # 1.7e308 finite f0; x1.2 (BARK) is +inf
 var T_0_8      = 0x3fe999999999999a;   # 0.8     a real vocal-effort setting
 var T_2_0      = 0x4000000000000000;   # 2.0     a real size scale
@@ -350,16 +415,14 @@ assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, 0, T_DUR_005),
   PRANI_ERR_INVALID_TRACT, "zero sample_rate -> PRANI_ERR_INVALID_TRACT");
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, f64_neg(T_SR), T_DUR_005),
   PRANI_ERR_INVALID_TRACT, "negative sample_rate -> PRANI_ERR_INVALID_TRACT");
-# CONTROL: the ADR-0001/ADR-0003 split is preserved exactly. 10 Hz is a rate
-# svara will refuse, and stream_new must STILL construct -- the refusal belongs
-# to the first fill, which reports 0 written and retires (tests/hardening.tcyr
-# pins that contract, and this guard must not move it forward to construction).
+# CONTROL: prani's own guard still does not restate svara's floor (ADR-0001): 10 Hz
+# passes it. Since 2.2.1 (ADR-0009, audit B10) stream_new builds the tract, so
+# svara's rule is applied right here and its code comes back; through 2.2.0 the
+# stream constructed and only the first fill failed.
 var g_lo = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), T_1_0);
-assert_eq(prani_is_err(g_lo), 0, "10 Hz still CONSTRUCTS -- svara's floor stays a fill-time failure");
-var g_lobuf = vec_new();
-prani_vec_push_zeros(g_lobuf, 8);
-assert_eq(stream_fill_buffer(g_lo, g_lobuf), 0, "and the 10 Hz stream fails at the fill (ADR-0003)");
-assert_eq(stream_is_finished(g_lo), 1, "and retires so a drain loop terminates (ADR-0003)");
+assert_eq(g_lo, PRANI_ERR_SVARA, "10 Hz: stream_new reports svara's rejection");
+var g_lo0 = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(10), 0x3FA999999999999A);
+assert_eq(g_lo0, PRANI_ERR_SVARA, "even for a stream too short to have a sample (2.2.0: a valid empty stream)");
 
 # ================================================================
 test_group("2.0.5 stream_new -- duration must be finite and >= 0 (zero is VALID)");
@@ -397,14 +460,16 @@ assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, T_1E300),
   PRANI_ERR_INVALID_VOCALIZATION, "1e300 s at 44.1 kHz -> rejected (product overflows to +inf)");
 assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_1E300),
   PRANI_ERR_INVALID_VOCALIZATION, "finite-but-unrepresentable product (1e300 samples) also rejected");
-# the ceiling itself, from both sides, at 1 Hz so the product is the duration.
-var g_max = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_2P53);
+# the ceiling itself, from both sides: 8192 Hz x 2^40 s is exactly 2^53, every
+# factor a power of two so the product is exact. (Through 2.2.0 this used 1 Hz; since
+# 2.2.1 stream_new builds the tract, and svara refuses a 1 Hz rate.)
+var g_max = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_8192, T_2P40);
 assert_eq(prani_is_err(g_max), 0, "exactly 2^53 samples is accepted (the boundary is inclusive)");
 assert_eq(stream_total_samples(g_max), 9007199254740992, "and total_samples is that count exactly");
-assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_1_0, T_2P54),
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_8192, T_2P41),
   PRANI_ERR_INVALID_VOCALIZATION, "2^54 samples -> rejected");
 # the intent scale is INSIDE the check: Mating doubles an accepted duration.
-assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_MATING, T_1_0, T_2P53),
+assert_eq(stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_MATING, T_8192, T_2P40),
   PRANI_ERR_INVALID_VOCALIZATION, "Mating (x2 duration) pushes an accepted 2^53 over the ceiling");
 # CONTROL: an hour of audio at 44.1 kHz is 158,760,000 samples and still builds.
 var g_hr = stream_new(g_v, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, T_SR, f64_from(3600));
@@ -514,10 +579,15 @@ test_group("2.0.5 fill_buffer -- a non-finite contour retires the stream (ADR-00
 var g_vbig = crvoice_new(PRANI_SP_WOLF);
 SpeciesParams_set_f0_max(CreatureVoice_params(g_vbig), T_1_7E308);
 SpeciesParams_set_f0_default(CreatureVoice_params(g_vbig), T_1_7E308);
-assert_eq(prani_is_finite(crvoice_effective_f0(g_vbig)), 1, "1.7e308 is a FINITE f0 -- stream_new accepts it");
-var g_sbig = stream_new(g_vbig, PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
-assert_eq(prani_is_err(g_sbig), 0, "so the stream constructs");
-assert_eq(stream_total_samples(g_sbig), 2205, "with a normal 2205-sample length");
+assert_eq(prani_is_finite(crvoice_effective_f0(g_vbig)), 1, "1.7e308 is a FINITE f0");
+# Since 2.2.1 the stream builds its tract from the voice's params (ADR-0009), and
+# those are ranged when they are cloned for it, so this voice is refused up front.
+assert_eq(stream_new(g_vbig, PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, T_DUR_005), PRANI_ERR_INVALID_SPECIES,
+  "stream_new refuses a voice whose f0 range is absurd (2.2.1)");
+# The fill's own guard is still the one for a state that arrives already built:
+var g_sbig = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
+SynthStream_set_f0(g_sbig, T_1_7E308);
+assert_eq(stream_total_samples(g_sbig), 2205, "a normal 2205-sample stream, carrying that f0 raw");
 var g_bbuf = vec_new();
 prani_vec_push_zeros(g_bbuf, 64);
 assert_eq(stream_fill_buffer(g_sbig, g_bbuf), 0,
@@ -676,22 +746,24 @@ test_group("2.2.0 a failed fill names its cause, and next_block reports it");
 # ADR-0003: a failed fill returns 0 and retires the stream. The count cannot say
 # why, so 2.2.0 records it: stream_last_error. stream_next_block, which has an
 # error channel, now uses it. Through 2.1.2 it handed back the zero-filled block
-# as a rendered one -- here for a sample rate svara rejects (<= 1200 Hz).
+# as a rendered one. (2.2.1: a sample rate svara rejects is now stream_new's to
+# report, so the failure here is a contour that overflows, set raw.)
 var le_ok = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, T_SR, T_DUR_005);
 assert_eq(stream_last_error(le_ok), PRANI_ERR_NONE, "a healthy stream has no last error");
 var le_obuf = vec_new();
 prani_vec_push_zeros(le_obuf, 256);
 while (stream_is_finished(le_ok) == 0) { stream_fill_buffer(le_ok, le_obuf); }
 assert_eq(stream_last_error(le_ok), PRANI_ERR_NONE, "control: nor does one that finished by rendering");
-var le_bad = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(1000), F64_ONE);
-assert_eq(prani_is_err(le_bad), 0, "control: 1000 Hz constructs (svara's rule is applied at the first fill)");
+var le_bad = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, F64_ONE);
+SynthStream_set_f0(le_bad, T_1_7E308);
 var le_buf = vec_new();
 prani_vec_push_zeros(le_buf, 64);
-assert_eq(stream_fill_buffer(le_bad, le_buf), 0, "the first fill fails and writes nothing (ADR-0003)");
+assert_eq(stream_fill_buffer(le_bad, le_buf), 0, "the fill fails and writes nothing (ADR-0003)");
 assert_eq(stream_is_finished(le_bad), 1, "and retires the stream (ADR-0003)");
-assert_eq(stream_last_error(le_bad), PRANI_ERR_SVARA, "stream_last_error names svara's rejection");
-var le_bad2 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_IDLE, f64_from(1000), F64_ONE);
-assert_eq(stream_next_block(le_bad2, 64), PRANI_ERR_SVARA,
+assert_eq(stream_last_error(le_bad), PRANI_ERR_SYNTHESIS_FAILED, "stream_last_error names the failure");
+var le_bad2 = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_BARK, PRANI_INTENT_IDLE, T_SR, F64_ONE);
+SynthStream_set_f0(le_bad2, T_1_7E308);
+assert_eq(stream_next_block(le_bad2, 64), PRANI_ERR_SYNTHESIS_FAILED,
   "stream_next_block reports the failed fill (2.1.2 returned 64 zeros as a block)");
 assert_eq(stream_is_finished(le_bad2), 1, "control: it retired the stream too");
 var le_after = stream_next_block(le_bad2, 64);

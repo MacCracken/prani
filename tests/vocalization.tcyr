@@ -169,7 +169,7 @@ assert_eq(n_pairs, 21, "the loop actually compared all 21 pairs");
 # ================================================================
 # Port extension, no oracle counterpart: the Rust enum is #[non_exhaustive] and
 # the Cyrius lookup is total, so an intent outside 0..6 falls through to the
-# neutral tuple (src/vocalization.cyr:127) instead of trapping. Pinned here so
+# neutral tuple (prani_intent_modifiers' last return) instead of trapping. Pinned here so
 # the distinctness loop's 0..6 bound is not the whole contract -- and note the
 # neutral tuple is itself distinct from all seven (Idle shares its pitch and
 # duration but has amplitude 0.5, not 1.0).

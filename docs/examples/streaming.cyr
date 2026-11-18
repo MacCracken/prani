@@ -35,15 +35,14 @@ include "dist/prani.cyr"
 # ---- parameters -------------------------------------------------------------
 # Non-integer f64 literals are IEEE-754 bit patterns in Cyrius (the decimal is
 # in the comment); whole numbers come from f64_from(n).
-var EX_SR      = 0x40e5888000000000;   # 44100.0 Hz. Anything at or below svara's
-                                       # ~1200 Hz floor is refused at the first
-                                       # fill, not at construction -- see the
-                                       # note under "stream_new" below.
+# EX_SR is 44100.0 Hz. A rate at or below svara's ~1200 Hz floor is refused by
+# stream_new itself (since 2.2.1, which builds the tract at construction).
+var EX_SR      = 0x40e5888000000000;
 var EX_DUR     = 0x3fa999999999999a;   # 0.05 s -> 2205 samples at 44100 Hz
 var EX_DUR_NEG = 0xbff0000000000000;   # -1.0 s -- a host bug, used as a guard demo
-var EX_BLOCK   = 512;                  # the host's callback block size. A real
-                                       # host is handed this number; it is not
-                                       # prani's to choose.
+# EX_BLOCK is the host's callback block size. A real host is handed this number;
+# it is not prani's to choose.
+var EX_BLOCK   = 512;
 
 # ---- check accounting -------------------------------------------------------
 # Passing checks stay silent so the transcript reads as a transcript; a failure
@@ -161,6 +160,11 @@ fn main() {
     var acc = vec_new();
     prani_vec_push_zeros(acc, stream_total_samples(stream));
 
+    # Per-fill retained bytes, recorded into storage sized here for the same
+    # reason: so the measurement does not allocate inside the loop it measures.
+    var fill_bytes = vec_new();
+    prani_vec_push_zeros(fill_bytes, 32);
+
     line("Draining into ONE reused 512-sample buffer, the way a callback would:");
     var used_before = alloc_used();
     var fills = 0;
@@ -170,7 +174,9 @@ fn main() {
     # of the pattern -- a regression that stops advancing samples_rendered leaves
     # through the bound and fails a check instead of hanging the build.
     while (stream_is_finished(stream) == 0 && fills < 32) {
+        var f0_used = alloc_used();
         var n = stream_fill_buffer(stream, buf);
+        vec_set(fill_bytes, fills, alloc_used() - f0_used);
         fills = fills + 1;
         # fill_buffer's ONLY failure channel is "0 samples written" -- there is
         # no code to return, because the count is the return. A 0 here (with the
@@ -190,6 +196,7 @@ fn main() {
         say("  fill "); fmt_int(fills); say(" -> "); fmt_int(n);
         say(" samples   rendered "); fmt_int(stream_samples_rendered(stream));
         say("/"); fmt_int(stream_total_samples(stream));
+        say("   retained "); fmt_int(vec_get(fill_bytes, fills - 1)); say(" B");
         if (n < EX_BLOCK) { say("   <- short fill: the stream ran out"); }
         nl();
     }
@@ -210,7 +217,7 @@ fn main() {
     line("One-shot cross-check -- crvoice_vocalize_with_intent, same parameters:");
     var v2 = crvoice_new(PRANI_SP_WOLF);
     var batch = crvoice_vocalize_with_intent(v2, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL,
-                                             EX_SR, EX_DUR);
+      EX_SR, EX_DUR);
     if (prani_is_err(batch) == 1) {
         say("crvoice_vocalize_with_intent failed: "); say(prani_err_name(batch)); nl();
         return 1;
@@ -228,10 +235,11 @@ fn main() {
     # substitutes -- pick streaming for latency, not for identical audio.
     say("  differing samples "); fmt_int(ex_count_diffs(acc, batch));
     say(" of "); fmt_int(total); line("  <- expected: different post chains");
-    line("  The two peaks above are the practical consequence: the streamed signal");
-    line("  comes out roughly a tenth of the one-shot's level, because the one-shot");
-    line("  envelope and AM stages never run on it. A host swapping one path for the");
-    line("  other has to re-gain, not just re-buffer.");
+    say("  The two peaks above are the practical consequence: the streamed peak is ");
+    fmt_float(f64_div(ex_peak_abs(acc), ex_peak_abs(batch)), 2); line("x");
+    line("  the one-shot's, because the one-shot envelope and AM stages never run on");
+    line("  it. A host swapping one path for the other has to re-gain, not just");
+    line("  re-buffer.");
     nl();
 
     line("The allocation rule -- Cyrius's arena never frees:");
@@ -239,21 +247,39 @@ fn main() {
     say("  heap retained after the drain   "); fmt_int(used_after); line(" bytes");
     say("  retained by the drain           "); fmt_int(used_after - used_before);
     say(" bytes over "); fmt_int(fills); line(" fills");
-    say("  per fill                        ");
-    fmt_int((used_after - used_before) / fills); line(" bytes");
+    # Where those bytes come from, measured rather than asserted: one svara glottal
+    # source, built the way prani builds one for each block it renders.
+    var g_before = alloc_used();
+    var gsrc = svara_glottal_new(f64_from(400), EX_SR);
+    var glottal = alloc_used() - g_before;
+    if (svara_is_err(gsrc) == 1) {
+        line("svara_glottal_new failed -- cannot attribute the drain's bytes");
+        return 1;
+    }
+    say("  one svara_glottal_new           "); fmt_int(glottal); line(" bytes");
+    var fill_ok = 1;
+    var fi = 0;
+    while (fi < fills) {
+        var fb = vec_get(fill_bytes, fi);
+        if (fb != 0 && fb != glottal) { fill_ok = 0; }
+        fi = fi + 1;
+    }
+    expect_eq(fill_ok, 1, "every fill retained 0 B or exactly one svara glottal source");
     line("  The loop body above allocates NOTHING: the buffer was allocated once,");
-    line("  before the loop. Those bytes are what stream_fill_buffer allocates");
-    line("  internally per call -- a fresh block vec from the tract, the pitch");
-    line("  contour table, and svara's per-call working set. They are retained too,");
-    line("  so size the arena for the whole session: streaming lowers latency, it");
-    line("  does not make synthesis allocation-free.");
+    line("  before the loop, and stream_new built the tract and sized the stream's");
+    line("  block. prani renders in its own 20 ms blocks (882 samples here), and a");
+    line("  512-sample fill renders one block or none, so each fill retained either");
+    line("  0 B or the one glottal source svara builds per block. prani's own share");
+    line("  is 0 B. svara's share is retained too, so size the arena for the whole");
+    line("  session: streaming lowers latency, it does not make synthesis");
+    line("  allocation-free.");
     nl();
 
     # CONTROL, so the rule is demonstrated rather than asserted: the identical
     # drain with vec_new moved inside the loop. Same 2205 samples out; the only
     # difference is where the buffer comes from.
     var s_ctl = stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL,
-                           PRANI_INTENT_SOCIAL, EX_SR, EX_DUR);
+      PRANI_INTENT_SOCIAL, EX_SR, EX_DUR);
     if (prani_is_err(s_ctl) == 1) {
         say("control stream_new failed: "); say(prani_err_name(s_ctl)); nl();
         return 1;
@@ -318,7 +344,7 @@ fn main() {
     say("       rejected: the same call with duration -1.0     -> ");
     fmt_int(prani_ffi_stream_start(fvoice, 0, 6, EX_SR, EX_DUR_NEG)); line("  null");
     expect_eq(prani_ffi_stream_start(fvoice, 0, 6, EX_SR, EX_DUR_NEG), 0,
-              "negative duration -> null");
+      "negative duration -> null");
 
     # 3. fill -----------------------------------------------------------------
     # One buffer, allocated before the loop, for the reason Part 1 measured. The

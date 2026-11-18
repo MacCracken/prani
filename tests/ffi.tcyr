@@ -178,7 +178,9 @@ prani_ffi_voice_destroy(0);
 prani_ffi_voice_destroy(vs);
 prani_ffi_stream_destroy(0);
 prani_ffi_stream_destroy(st);
-assert_eq(1, 1, "destroy no-ops completed without crashing");
+var vs_after = prani_ffi_voice_create(PRANI_SP_WOLF);
+assert_gt(vs_after, 0, "after the destroys the FFI still answers: a fresh voice_create succeeds");
+assert_eq(prani_ffi_stream_is_finished(0), 1, "and a null stream still reads finished");
 
 # ================================================================
 test_group("voice_set_effort -- non-finite rejected, finite clamp preserved");
@@ -277,18 +279,17 @@ assert_eq(prani_ffi_stream_fill(st_zero, zbuf, 32), 0, "zero-duration fill write
 # ================================================================
 test_group("stream_start -- svara's rate floor stays svara's (ADR-0001/0003)");
 # 999 Hz is finite and positive, so this guard passes it through: prani does not
-# restate svara's ~1000 Hz threshold (ADR-0001 rejected duplicating it). The
-# rejection surfaces at the FIRST FILL, which reports 0 written and retires the
-# stream (ADR-0003). This group is here so the range guard above can never
-# quietly swallow that path.
+# restate svara's floor (ADR-0001). Since 2.2.1 (ADR-0009, audit B10) the stream
+# builds its tract when it starts, so svara's own rule is applied there, and the
+# FFI answers null, as for every failure. Through 2.2.0 the handle came back and
+# only the first fill failed; a stream too short to have a sample never failed.
 var st_low = prani_ffi_stream_start(vst, 0, 6, T_999, T_1_0);
-assert_neq(st_low, 0, "999 Hz passes stream_start -- the floor is svara's rule");
-assert_eq(prani_ffi_stream_is_finished(st_low), 0, "sub-threshold stream starts unfinished");
+assert_eq(st_low, 0, "999 Hz: stream_start answers null (svara rejects the rate when the tract is built)");
+assert_eq(prani_ffi_stream_is_finished(st_low), 1, "and the null handle reads as finished, so a drain loop ends");
 var lbuf = vec_new();
 var li = 0;
 while (li < 64) { vec_push(lbuf, 0); li = li + 1; }
-assert_eq(prani_ffi_stream_fill(st_low, lbuf, 64), 0, "first fill reports 0 written (svara rejects the rate)");
-assert_eq(prani_ffi_stream_is_finished(st_low), 1, "and retires the stream (ADR-0003)");
+assert_eq(prani_ffi_stream_fill(st_low, lbuf, 64), 0, "a fill on it writes nothing");
 
 # ================================================================
 test_group("stream_fill -- buffer_len >= 0 range");
@@ -308,13 +309,16 @@ assert_eq(prani_ffi_stream_fill(st_bl, blbuf, 2205), 2205, "a corrected buffer_l
 # ================================================================
 test_group("2.2.0 prani_ffi_stream_last_error names why a fill wrote nothing");
 var fle_v = prani_ffi_voice_create(0);
-var fle_st = prani_ffi_stream_start(fle_v, 0, 4, f64_from(1000), F64_ONE);
-assert_neq(fle_st, 0, "control: a 1000 Hz stream starts (svara's rule is applied at the first fill)");
+var fle_st = prani_ffi_stream_start(fle_v, 1, 4, f64_from(44100), F64_ONE);
+assert_neq(fle_st, 0, "control: a 44.1 kHz bark starts");
 assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_NONE, "before a fill: no error");
+# A failure mid-stream: an f0 whose contour overflows (BARK opens at 1.2x), set
+# raw, the way a crafted state would carry it.
+SynthStream_set_f0(fle_st, 0x7fee42d130773b76);
 var fle_buf = vec_new();
 prani_vec_push_zeros(fle_buf, 64);
 assert_eq(prani_ffi_stream_fill(fle_st, fle_buf, 64), 0, "the fill writes nothing");
-assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_SVARA, "and last_error says svara rejected the rate");
+assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_SYNTHESIS_FAILED, "and last_error says why");
 assert_eq(prani_ffi_stream_last_error(0), PRANI_ERR_INVALID_VOCALIZATION, "a null handle is answered, not read");
 
 var rc = assert_summary();

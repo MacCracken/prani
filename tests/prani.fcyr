@@ -1,16 +1,246 @@
-# prani fuzz harness
+# prani.fcyr -- fuzz harness for prani's four hand-written JSON decoders (2.2.1).
+#
+# `cyrius fuzz` compiles and runs this file, and fails on a non-zero exit or a fault.
+# Until 2.2.1 it was the scaffold's stub, whose fuzz_main ignored its input (audit
+# D17). The 2026-11-17 sweep found two decoders reading a field they never checked
+# was there (A2, C4), and one whose own output it refused to read back (A3/A4), so
+# this is where those classes are hunted continuously.
+#
+# INPUTS. Each seed is a document prani wrote itself: a voice, a preset, a tract and
+# a call phrase, encoded by their own to_json. Each round takes one, applies 1-4
+# mutations (overwrite a byte, truncate, delete a span, duplicate a span, insert a
+# structural character, insert a JSON escape), and hands the result to all four
+# decoders. The PRNG is
+# prani's own, from a fixed seed, so a failing round reproduces exactly.
+#
+# PROPERTIES, per decoder, per input:
+#   1. it returns: no fault, no exit;
+#   2. the answer is a handle (> 0) or one of prani's codes (-1 .. -6), never 0 and
+#      never something else;
+#   3. a document it accepts re-encodes, the re-encoding decodes again, and encodes
+#      to the same bytes (decode + encode has a fixed point);
+#   4. a voice or tract it accepts renders (64 samples at 8 kHz) without fault, and
+#      the render answers with a vec or a prani code.
+# A violation prints the round, the decoder and the input, and exits 1.
 
-# Fuzz driver — feeds generated input to the target and checks it never faults.
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "lib/hisab.cyr"
+include "lib/goonj.cyr"
+include "lib/naad.cyr"
+include "lib/svara.cyr"
+include "src/error.cyr"
+include "src/logging.cyr"
+include "src/rng.cyr"
+include "src/dsp.cyr"
+include "src/vocalization.cyr"
+include "src/sequence.cyr"
+include "src/species.cyr"
+include "src/bridge.cyr"
+include "src/tract.cyr"
+include "src/voice.cyr"
+include "src/preset.cyr"
+
+var FZ_ROUNDS = 1500;
+var FZ_CAP = 4096;            # bytes per mutated input, NUL and strlen's slack included
+var FZ_SR = 0x40BF400000000000;   # 8000.0
+var fz_rng = 0;
+var fz_buf = 0;
+var fz_tmp = 0;
+var fz_round = 0;
+var fz_accepted = 0;
+
+# fz_rand(n) -- a draw in [0, n) from the harness's fixed-seed PRNG.
+fn fz_rand(n) {
+    var r = prani_rng_next_u32(fz_rng);
+    return r % n;
+}
+
+# fz_code_ok(r) -- property 2: a handle, or one of prani's six codes.
+fn fz_code_ok(r) {
+    if (r > 0) { return 1; }
+    if (r >= PRANI_ERR_ALLOC) {
+        if (r < 0) { return 1; }
+    }
     return 0;
 }
 
-# Fuzz entry point — drives the harness below.
+# fz_say(s) -- a C string to stdout, with no newline.
+fn fz_say(s) {
+    print(s, strlen(s));
+    return 0;
+}
+
+# fz_fail(which, what) -- report a violated property with the input, and stop.
+fn fz_fail(which, what) {
+    println("fuzz: VIOLATION");
+    fz_say("  round    "); print_num(fz_round); println("");
+    fz_say("  decoder  "); println(which);
+    fz_say("  property "); println(what);
+    fz_say("  input    "); println(fz_buf);
+    syscall(60, 1);
+    return 0;
+}
+
+# fz_encode(kind, h) -- the to_json of a decoded handle, as a fresh C string.
+fn fz_encode(kind, h) {
+    var sb = str_builder_new();
+    if (kind == 0) { crvoice_to_json(h, sb); }
+    if (kind == 1) { preset_to_json(h, sb); }
+    if (kind == 2) { crtract_to_json(h, sb); }
+    if (kind == 3) { sequence_call_phrase_to_json(h, sb); }
+    return str_data(str_builder_build(sb));
+}
+
+# fz_decode(kind, json) -- the decoder for kind.
+fn fz_decode(kind, json) {
+    if (kind == 0) { return crvoice_from_json_str(json); }
+    if (kind == 1) { return preset_from_json_str(json); }
+    if (kind == 2) { return crtract_from_json_str(json); }
+    return sequence_call_phrase_from_json_str(json);
+}
+
+# fz_name(kind) -- the decoder's name, for a report.
+fn fz_name(kind) {
+    if (kind == 0) { return "crvoice_from_json_str"; }
+    if (kind == 1) { return "preset_from_json_str"; }
+    if (kind == 2) { return "crtract_from_json_str"; }
+    return "sequence_call_phrase_from_json_str";
+}
+
+# fz_render(kind, h) -- property 4, for the decoders whose result renders.
+fn fz_render(kind, h) {
+    var out = 0;
+    if (kind == 0) {
+        out = crvoice_vocalize(h, PRANI_VOC_GROWL, FZ_SR, 0x3F60624DD2F1A9FC);   # 0.002 s
+    }
+    if (kind == 2) {
+        out = crtract_synthesize(h, f64_from(200), 64, crtract_options_default());
+    }
+    if (kind == 1) { out = preset_build(h); }
+    if (out == 0) { return 1; }
+    return fz_code_ok(out);
+}
+
+# fuzz_main(data, len) -- run all four decoders on one NUL-terminated input and
+# check properties 1-4. Returns the number of decoders that accepted it.
+fn fuzz_main(data, len) {
+    if (len < 0) { return 0; }
+    var accepted = 0;
+    var kind = 0;
+    while (kind < 4) {
+        var h = fz_decode(kind, data);
+        if (fz_code_ok(h) == 0) { fz_fail(fz_name(kind), "answer is neither a handle nor a prani code"); }
+        if (h > 0) {
+            accepted = accepted + 1;
+            var enc = fz_encode(kind, h);
+            var again = fz_decode(kind, enc);
+            if (again <= 0) { fz_fail(fz_name(kind), "an accepted document's re-encoding is refused"); }
+            if (streq(fz_encode(kind, again), enc) == 0) {
+                fz_fail(fz_name(kind), "the re-encoding is not a fixed point of decode + encode");
+            }
+            if (fz_render(kind, h) == 0) { fz_fail(fz_name(kind), "an accepted document renders an invalid answer"); }
+        }
+        kind = kind + 1;
+    }
+    return accepted;
+}
+
+# fz_copy_seed(seed) -- the seed into fz_buf; returns its length.
+fn fz_copy_seed(seed) {
+    var n = strlen(seed);
+    if (n > FZ_CAP - 64) { n = FZ_CAP - 64; }
+    memcpy(fz_buf, seed, n);
+    store8(fz_buf + n, 0);
+    return n;
+}
+
+# fz_mutate(n) -- one mutation of fz_buf[0..n); returns the new length.
+fn fz_mutate(n) {
+    if (n == 0) { return 0; }
+    var op = fz_rand(7);
+    var at = fz_rand(n);
+    if (op == 6) {
+        # insert a JSON escape, which only a decoder that unescapes and an encoder
+        # that does not would disagree about (audit A3).
+        var esc = "\\\"\\\\\\n\\u0022";
+        var e0 = fz_rand(4) * 2;
+        var elen = 2;
+        if (e0 == 6) { elen = 6; }
+        if (n + elen > FZ_CAP - 64) { return n; }
+        memcpy(fz_tmp, fz_buf + at, n - at);
+        memcpy(fz_buf + at, esc + e0, elen);
+        memcpy(fz_buf + at + elen, fz_tmp, n - at);
+        return n + elen;
+    }
+    if (op == 0) {
+        store8(fz_buf + at, fz_rand(256));
+        return n;
+    }
+    if (op == 1) {
+        return at;   # truncate
+    }
+    if (op == 2) {
+        var span = fz_rand(8) + 1;
+        if (at + span > n) { span = n - at; }
+        memcpy(fz_tmp, fz_buf + at + span, n - at - span);
+        memcpy(fz_buf + at, fz_tmp, n - at - span);
+        return n - span;
+    }
+    if (op == 3) {
+        var dspan = fz_rand(24) + 1;
+        if (at + dspan > n) { dspan = n - at; }
+        if (n + dspan > FZ_CAP - 64) { return n; }
+        memcpy(fz_tmp, fz_buf + at, n - at);
+        memcpy(fz_buf + at + dspan, fz_tmp, n - at);
+        return n + dspan;
+    }
+    # 4, 5: overwrite with a character the JSON grammar cares about.
+    var chars = "{}[]\":,-.0123456789eE+ ntfl";
+    store8(fz_buf + at, load8(chars + fz_rand(27)));
+    return n;
+}
+
+# Fuzz entry point -- builds the seeds and runs FZ_ROUNDS mutated inputs.
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+    fz_rng = prani_rng_new(0x5EED2211);
+    fz_buf = alloc(FZ_CAP + 16);
+    fz_tmp = alloc(FZ_CAP + 16);
+    var seeds = vec_new();
+    vec_push(seeds, fz_encode(0, crvoice_new(PRANI_SP_WOLF)));
+    vec_push(seeds, fz_encode(1, preset_alpha_wolf()));
+    vec_push(seeds, fz_encode(2, crtract_new(species_params(PRANI_SP_CROW), FZ_SR)));
+    var els = vec_new();
+    vec_push(els, sequence_call_element_new(PRANI_VOC_GROWL, 0x3FB999999999999A, 0x3FA999999999999A));
+    vec_push(els, sequence_call_element_new(PRANI_VOC_BARK, 0x3FA999999999999A, 0));
+    vec_push(seeds, fz_encode(3, sequence_call_phrase_new(els, PRANI_INTENT_THREAT)));
+
+    # Control: every unmutated seed is accepted by its own decoder, so the rounds
+    # below start from documents that reach the decoders' deep paths.
+    var k = 0;
+    while (k < 4) {
+        var n0 = fz_copy_seed(vec_get(seeds, k));
+        if (fz_decode(k, fz_buf) <= 0) { fz_fail(fz_name(k), "control: an unmutated seed is refused"); }
+        fuzz_main(fz_buf, n0);
+        k = k + 1;
+    }
+
+    fz_round = 0;
+    while (fz_round < FZ_ROUNDS) {
+        var n = fz_copy_seed(vec_get(seeds, fz_rand(4)));
+        var m = fz_rand(4) + 1;
+        while (m > 0) {
+            n = fz_mutate(n);
+            m = m - 1;
+        }
+        store8(fz_buf + n, 0);
+        fz_accepted = fz_accepted + fuzz_main(fz_buf, n);
+        fz_round = fz_round + 1;
+    }
+    fz_say("fuzz: ok, ");
+    print_num(FZ_ROUNDS);
+    fz_say(" mutated inputs x 4 decoders, ");
+    print_num(fz_accepted);
+    println(" accepted and re-checked");
     return 0;
 }
 
