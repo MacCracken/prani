@@ -80,13 +80,33 @@ The f32 build is measured against the f64 build, which is its reference.
    from the widened rate in f64, and rounds only the sine. `tests/tract.tcyr` renders a
    cricket and a bee 1000 s into their clock against the same at 0. Both formats match
    within 1e-6; with the f32 arithmetic instead, all three cases fail.
+
+   *Amended in 2.3.2 (audit C1, B1, B4).* The rule covers every absolute position, not
+   only an oscillator's. Three places 2.3.1 missed now follow it:
+   - **Spatial's Doppler resampler** computes its read position, `i × ratio`, and its
+     output length in f64. In f32 the fraction lost a bit per doubling of the buffer:
+     a 10 s buffer was 9.2e-3 off, and past 190 s it was nearest-neighbour.
+     `tests/spatial.tcyr` resamples 441,000 samples against an f64 reference.
+   - **A phase accumulator** (the purr, the laryngeal subharmonic) adds in f64 for the
+     whole call and is rounded once, when it is stored. In f32 each increment was
+     re-rounded to the phase's grid, a frequency error of 1.7e-5 on the purr, so a
+     stream drifted out of phase without bound (0.27 cycles in 10 minutes).
+   - **Tests.** The syringeal dual source has a case in the 1000 s group. Voice's
+     three arms share one helper, `crvoice_tone`, which `tests/voice.tcyr` holds to
+     the true sine at 1000 s: 2.8e-8 in f32, 2.4e-10 in f64. Through 2.3.1 those four
+     arms could be written in f32 time and every suite still passed.
 3. **A random draw stays in [0, 1).** `prani_rng_next_f32` scales a 31-bit draw by
    2^-31. Rounding those 31 bits to f32's 24-bit significand, as the Rust did, sends the
    top 64 of them to 2^31, and the draw to exactly 1.0. That is once in 2^25 draws, or
-   about 13 minutes of a 44.1 kHz noise source. The f32 build keeps the 24 high bits, so
-   every draw is exact, the largest is 1 − 2^-24, and each is within one ulp of the f64
-   build's draw from the same state. `tests/rng.tcyr` solves for the state that produces
-   the top value.
+   about 13 minutes of a 44.1 kHz noise source. `tests/rng.tcyr` solves for the state
+   that produces the top value.
+
+   *Corrected in 2.3.2 (audit C3).* 2.3.1 kept the 24 high bits and said each draw was
+   within one ulp of the f64 build's. Truncating is exact only in 1.0's binade: of
+   1,000,000 draws, 250,282 were more than an ulp off, by up to 499,712 ulps (all within
+   2^-24 absolute). Since 2.3.2 the f32 build rounds the f64 draw once and clamps it to
+   1 − 2^-24, the largest f32 below 1. Every draw is the f64 draw correctly rounded,
+   except the top 64 values, which land on that clamp; `tests/rng.tcyr` checks 100,000.
 4. **Each format truncates its own sample count.** A count is `trunc(duration ×
    sample_rate)` in the build's arithmetic, and a constant like 0.7 is a different
    number in each format. So a length can differ by a few samples. 0.1 s × 0.7 × 8 kHz
@@ -94,6 +114,17 @@ The f32 build is measured against the f64 build, which is its reference.
    of 404 renders differ in length, by 1 to 3 samples, and no render changed its status.
    Forcing equal lengths would need a second, f64 copy of every constant that reaches a
    count, and in cases like this one f32's product is the exact answer.
+
+   *Amended in 2.3.2 (audit B2).* A count is bounded in integers, after the cast. Past
+   2^24 a real cannot hold every count: the nasal anti-formant compared its count with
+   `pr_from(len)`, which rounds 16,777,219 up to 16,777,220, and the f32 build read past
+   the buffer and exited the process.
+5. **A blend stays where the exact one is.** *Added in 2.3.2 (audit B5).* The emotion
+   update `v·s + t·(1 − s)` can be rounded past its target once v has all but reached it,
+   in either format, and a target on a zone bound then reads the zone beyond. The exact
+   blend lies between v and t, so the result is held there, which can only move it
+   toward the exact value. The f32 build blends in f64 and rounds once. The f64 build's
+   bits change only where the result used to pass the target.
 
 ### Documents carry f64 bit patterns in both builds
 
@@ -106,6 +137,14 @@ types holding reals get the same in the f32 build through a 64-bit shadow struct
 derived encoder and decoders do the work under the type's own names (`T_to_json`,
 `T_from_json_str`, `T_from_json`).
 
+*Amended in 2.3.2 (audit B3).* A maximum a builder clamps to is the f32 at or below the
+f64 maximum. Rounded to nearest, the f32 0.05 and 0.1 are above the decimals, so a
+voice at the jitter or shimmer ceiling, written by the f32 build, was refused by the f64
+build's range check. An f0 offset clamped to the range of a custom voice whose bounds
+are not integers likewise came out above the exact range. Those three ceilings now round
+toward zero. The decoders' bounds stay at nearest, so each build reads the other's
+documents.
+
 ### Tests hold f64 exactly and f32 to a measured accuracy
 
 Every suite runs in both formats. An expected real is stated as the f64 value it should
@@ -114,7 +153,9 @@ the f64 build. In the f32 build it allows `ulps` units in the last place of f32,
 `ulps` is the measured error of that computation, recorded beside it: 0 or 1 for one
 rounding, up to 6 for 30 accumulated calls, 10 where 0.15 − 0.14 cancels. Where a format
 decides an input or an answer itself, such as the next representable count past a limit
-or a truncated length, `t_per(a64, a32)` states both.
+or a truncated length, `t_per(a64, a32)` states both. *Since 2.3.2 (audit C5)* a NaN
+fails `assert_real` in both builds, and in f32 so does a word with any of its high 32
+bits set, which through 2.3.1 was measured as the real in its low half.
 
 **Measured f32 accuracy against the f64 build**, from the sweep:
 
@@ -143,6 +184,11 @@ arithmetic, and it goes when cycc stops copying). A request past 2^24 samples is
 - **Neutral.** The generated twins and the primitive layer exist because cyrius has no
   type alias and `#inline` copies its arguments. If either changes, the twins can go.
   The consumer floor is measured per format. It is cyrius 6.7.2 for both: a from-scratch consumer builds there and its output is byte-identical to 6.7.18's. That held only after cycc 6.7.2's miscompile of `!` on a float builtin's result was kept out of the f64 build (a negated compare is written `== 0`; see `src/real.cyr`).
+  *Since 2.3.2 (audit A1–A4)* `gen-f64.sh` refuses a source it cannot read exactly: it
+  recognises a directive by its first word, fails on an unbalanced or unknown one, and
+  leaves strings alone. It checks that `[lib].modules` lists each source with its twin,
+  and lints the code the f32 build compiles for f64 arithmetic outside an f32 arm. Through
+  2.3.1 a comment after `#else` dropped the f64 arm's last line and every gate passed.
 
 ## Alternatives considered
 

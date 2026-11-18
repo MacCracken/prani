@@ -242,8 +242,8 @@ fn main() {
     println("the same return value as the rest, which is the point.");
     println("");
     println("Failures raised inside the synthesis chain are ALSO written to");
-    println("sakshi: the two ERROR lines and one WARN you will see on STDERR,");
-    println("each with a timestamp, interleaved with this transcript on stdout.");
+    println("sakshi: the two ERROR lines you will see on STDERR, each with a");
+    println("timestamp, interleaved with this transcript on stdout.");
     println("Rejected arguments are not logged -- the return code already says");
     println("so. The code is the contract; the log line is a courtesy, and");
     println("sakshi_set_level silences it.");
@@ -316,20 +316,24 @@ fn main() {
     ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_1200, EX_DUR_005),
       PRANI_ERR_SVARA);
     # One Hz higher is the whole difference: 0.05 s * 1201 truncates to 60.
-    ex_call("crvoice_vocalize(wolf, HOWL, 1201.0, 0.05)   <- one Hz higher");
-    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, pr_from(1201), EX_DUR_005), 60);
+    ex_call("crvoice_vocalize(wolf, GROWL, 1201.0, 0.05)  <- one Hz higher");
+    ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_GROWL, pr_from(1201), EX_DUR_005), 60);
+    # A HOWL there is refused by prani itself (ADR-0011): a wolf howls with a second
+    # voice at 1.78 x its pitch, 712 Hz, and 1201 Hz can only hold up to 600 Hz.
+    ex_call("crvoice_vocalize(wolf, HOWL, 1201.0, 0.05)   <- its second voice is past 600 Hz");
+    ex_rejected(crvoice_vocalize(wolf, PRANI_VOC_HOWL, pr_from(1201), EX_DUR_005), PRANI_ERR_INVALID_TRACT);
     ex_call("crvoice_vocalize(wolf, HOWL, 44100.0, 0.05)");
     ex_accepted_audio(crvoice_vocalize(wolf, PRANI_VOC_HOWL, EX_SR_44100, EX_DUR_005), 2205);
 
     println("");
-    println("The 1201 Hz call also puts a WARN on stderr -- \"species formants");
-    println("out of range, using defaults\". That is the one failure shape prani");
-    println("has that is NOT a return value: svara could not place a wolf's");
-    println("upper formants that close to nyquist, so prani logs it and carries");
-    println("on with svara's defaults. Degraded is not failed -- the 60 samples");
-    println("above are real audio, and no code is returned because nothing the");
-    println("caller has to decide about went wrong. Watch the log if you care");
-    println("about the gap between what you asked for and what is usable.");
+    println("At 1201 Hz a wolf's F2 and F3 (1250 and 2100 Hz) are past nyquist.");
+    println("Through 2.3.1 svara refused all five formants for it, and prani put");
+    println("a WARN on stderr and rendered through svara's own fallback, a single");
+    println("500 Hz formant, as success. Since 2.3.2 a formant past nyquist is");
+    println("placed inside the band, halfway from the one below it to nyquist, so");
+    println("the 60 samples above are this wolf's voice, band-limited, with its");
+    println("own F1. What svara still refuses, a formant that is not a positive");
+    println("finite number, comes back as a code like every other failure here.");
 
     # =========================================================================
     ex_section("3. A document that does not parse  (ADR-0002)");

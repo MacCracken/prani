@@ -55,9 +55,10 @@ so both are tested, and both must pass.
   primitives are what make one source compile in either. A constant is a pair:
   `#ifdef PRANI_F32` with its f32 bits, `#else` with its f64 bits, each from the same
   decimal.
-- **Write a compare as a bare truth value**: `if (pr_lt(a, b))`, `if (!pr_ge(a, b))`.
-  After an `#inline` replay, cycc 6.7.18 does not fuse `== 1` / `== 0` into the
-  branch, which cost 2x on a clamp.
+- **Write a compare as a bare truth value**: `if (pr_lt(a, b))`. After an `#inline`
+  replay, cycc 6.7.18 does not fuse `== 1` into the branch, which cost 2x on a clamp.
+  **Negate one with `== 0`**, `if (pr_ge(a, b) == 0)`, never `!`: cycc 6.7.2, the
+  consumers' floor, miscompiles `!` on a float builtin's result.
 - **svara, naad, hisab and bayan are f64 in both builds.** Widen a real into them
   with `pr_to64`, and narrow what comes back with `pr_of64`. A missed crossing
   compiles: the f32 suites are what find it.

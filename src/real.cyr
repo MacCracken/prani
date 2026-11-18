@@ -41,7 +41,8 @@
 #     rounded once to f32. sqrt is then correctly rounded (53 >= 2*24 + 2); the
 #     others are correctly rounded except where the f64 result sits within half an
 #     f64 ulp of an f32 tie.
-#   - pr_from rounds an integer to f32 once (exact up to 2^24, as an f32 holds).
+#   - pr_from rounds an integer to f32 once (exact up to 2^24, as an f32 holds, and
+#     correctly rounded to 2^53).
 #
 # THE SVARA BOUNDARY. svara, naad, hisab and bayan are f64 in both builds. A real crosses
 # into them through pr_to64 (an f32 widens exactly) and comes back through pr_of64
@@ -115,7 +116,10 @@ fn pr_floor(a): i64 { return f32_from(f64_floor(f32_to(a))); }
 # truncation toward zero; exact in any format.
 #inline
 fn pr_trunc(a): i64 { return f32_from(f64_trunc(f32_to(a))); }
-# an integer as a real: rounded once to f32 (exact below 2^24).
+# an integer as a real: exact to 2^24, and correctly rounded to 2^53, where the f64
+# step is exact and only the f32 one rounds. Past 2^53 it rounds twice (int -> f64 ->
+# f32) and can be one ulp off (audit A8); no count in prani gets there, since every
+# one is ranged to 2^53 or less first (prani_sample_count_ok).
 #inline
 fn pr_from(n): i64 { return f32_from(f64_from(n)); }
 # a real as an integer: truncated, saturating as f64_to does (NaN -> 0).
@@ -127,6 +131,15 @@ fn pr_to64(a): i64 { return f32_to(a); }
 # an f64 from svara / naad / bayan as a real: rounded to the nearest f32.
 #inline
 fn pr_of64(a): i64 { return f32_from(a); }
+
+# an f64 as a real, rounded TOWARD ZERO: never larger in magnitude than a, so a bound
+# the f32 build stores is never past the same bound in the f64 build (2.3.2, audit
+# B3). Not inline: it branches. A NaN passes through, and an overflow is FLT_MAX.
+fn pr_of64_tz(a): i64 {
+    var r = f32_from(a);
+    if (f64_gt(f64_abs(f32_to(r)), f64_abs(a)) == 1) { return r - 1; }
+    return r;
+}
 
 # TIME AND PHASE STAY f64 (ADR-0010). An oscillator evaluated as sin(w * n / sr)
 # at sample n cannot be computed in f32: n stops being exact at 2^24 samples (6.3
@@ -239,6 +252,9 @@ fn pr_to64(a): i64 { return a; }
 # an f64 as a real: the identity in this build.
 #inline
 fn pr_of64(a): i64 { return a; }
+# an f64 as a real, toward zero: the identity in this build.
+#inline
+fn pr_of64_tz(a): i64 { return a; }
 
 # x bounded to [lo, hi]: f64_clamp's own body. It calls the builtins, not the
 # wrappers above, because cycc 6.7.18 does not fuse a replayed #inline compare

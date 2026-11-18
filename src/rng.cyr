@@ -29,7 +29,8 @@ var PRANI_PCG_MULT   = 6_364_136_223_846_793_005;   # PCG32 LCG multiplier
 var PRANI_U32_MASK   = 0xFFFFFFFF;                   # low 32 bits
 #ifdef PRANI_F32
 var PRANI_INV_I32MAX = 0x30000000;                  # 2^-31 = 1.0 / (i32::MAX as f32)
-var PRANI_INV_2P24   = 0x33800000;                  # 2^-24: the f32 build's draw scale
+var PRANI_INV_I32MAX64 = 0x3E00000000000000;        # 2^-31 as an f64: the draw is scaled in f64
+var PRANI_BELOW_ONE    = 0x3F7FFFFF;                # 1 - 2^-24, the largest f32 below 1.0
 #else
 var PRANI_INV_I32MAX = 0x3E00000000000000;          # 2^-31 = 1.0 / (i32::MAX as f32)
 #endif
@@ -76,17 +77,20 @@ fn prani_rng_new(seed) {
 # next_f32 -- value in [0.0, 1.0). bits = (next_u32() >> 1) in [0, 2^31-1],
 # scaled by 2^-31. Matches the Rust code (not its [-1,1] doc comment).
 #
-# The f32 build keeps the 24 high bits of those 31 (ADR-0010). Rounding all 31 to
-# f32's 24-bit significand, as the Rust did, sends the top 64 values of the range,
-# 2^31 - 64 .. 2^31 - 1, to 2^31, and the draw to exactly 1.0: outside [0, 1), once
-# in 2^25 draws, which a 44.1 kHz noise source reaches in about 13 minutes.
-# Truncated, every draw is exact in f32 and the largest is 1 - 2^-24, within one
-# f32 ulp of the f64 build's draw from the same state.
+# The f32 build rounds the f64 build's draw once, and clamps the top of the range
+# (ADR-0010). Rounding all 31 bits to f32's 24-bit significand, as the Rust did,
+# sends the top 64 values, 2^31 - 64 .. 2^31 - 1, to 2^31 and the draw to exactly
+# 1.0: outside [0, 1), once in 2^25 draws, which a 44.1 kHz noise source reaches in
+# about 13 minutes. So those 64 are clamped to 1 - 2^-24, one ulp below 1.0, and
+# every other draw is the f64 draw correctly rounded. (2.3.1 truncated to the 24
+# high bits instead: exact near 1.0, but below 0.5 it threw away bits rounding
+# keeps, and a quarter of all draws were more than one ulp from the f64 draw, up to
+# 499,712 ulps for a small one; audit C3, 2.3.2.)
 #must_use
 fn prani_rng_next_f32(self) {
     var bits = prani_rng_next_u32(self) >> 1;
     #ifdef PRANI_F32
-    return pr_mul(pr_from(bits >> 7), PRANI_INV_2P24);
+    return pr_min(pr_of64(f64_mul(f64_from(bits), PRANI_INV_I32MAX64)), PRANI_BELOW_ONE);
     #else
     return pr_mul(pr_from(bits), PRANI_INV_I32MAX);
     #endif

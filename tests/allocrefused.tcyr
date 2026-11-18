@@ -614,7 +614,8 @@ ga_arm(FI_ONE, 0);
 var ng_nz = noise_new(NOISE_WHITE, 42);
 var ng_noise = ga_disarm();
 ga_arm(FI_ONE, 0);
-var ng_lf = modulation_lfo_new(MODULATION_LFO_SINE, pr_of64(0x3F50624DD2F1A9FC), SR8);
+# naad is f64 in both builds (ADR-0010), so its rate and sample rate are f64 here too.
+var ng_lf = modulation_lfo_new(MODULATION_LFO_SINE, 0x3F50624DD2F1A9FC, pr_to64(SR8));
 var ng_lfo = ga_disarm();
 var ng_own = ng_all - ng_noise - ng_lfo;
 assert_gt(ng_noise + ng_lfo, 0, "control: naad's two constructors allocate");

@@ -73,6 +73,9 @@ cut.**
    midway between the formant below and Nyquist, so the order holds. F1–F3 are the
    species' own and are not moved. If they do not fit, svara still refuses the target
    and the tract keeps the oracle's fallback.
+   *Extended in 2.3.2 by [ADR-0013](0013-a-formant-past-nyquist-is-placed-in-band.md)
+   (audit D3):* F1–F3 are placed the same way, and every placed formant, an estimate
+   included, carries the level its resonance has where it is placed.
 3. **A stream renders vocalize's blocks.** The stream renders internal blocks of
    `sample_rate × 0.02` samples (vocalize's 20 ms), with the contour and boundary boost
    taken at each block's start and the tilt filter's state carried from block to block.

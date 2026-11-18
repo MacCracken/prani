@@ -43,7 +43,7 @@ assert_neq(prani_rng_next_u32(c), prani_rng_next_u32(a), "different seed -> diff
 # ================================================================
 test_group("next_f32 exact + range (seed 42)");
 var rf = prani_rng_new(PRANI_RNG_DEFAULT_SEED);
-assert_real(prani_rng_next_f32(rf), pr_of64(0x3FD02CA5E1000000), 1, "next_f32[0] == 0.2527250955 (exact f64)");
+assert_real(prani_rng_next_f32(rf), pr_of64(0x3FD02CA5E1000000), 0, "next_f32[0] == 0.2527250955 (exact f64)");
 assert_eq(prani_rng_next_f32(rf), pr_of64(0x3FA5166E0C000000), "next_f32[1] == 0.0411867513 (exact f64)");
 # remaining draws must stay in [0.0, 1.0)
 var i = 0;
@@ -87,6 +87,26 @@ PrRng_set_state(rtop, 576458553405997536);
 var rtop_v = prani_rng_next_f32(rtop);
 assert_eq(pr_lt(rtop_v, PR_ONE), 1, "the draw from 2^31 - 1 is below 1.0");
 assert_real(rtop_v, pr_of64(0x3fefffffffc00000), 1, "and it is 1 - 2^-31 (f32: 1 - 2^-24, one ulp from it)");
+
+# ================================================================
+test_group("2.3.2 C3 -- every draw is the f64 draw, correctly rounded (ADR-0010)");
+# Two generators from one seed: one gives the raw 31-bit value, the other the draw.
+# The f32 build's draw is bits * 2^-31 rounded once, except that the top 64 values,
+# which round to 1.0, are clamped to 1 - 2^-24. The f64 build's is bits * 2^-31.
+# Through 2.3.1 the f32 build truncated to the 24 high bits: a quarter of all draws
+# were more than one ulp from the rounded f64 draw, up to 499,712 ulps.
+var cr_a = prani_rng_new(42);
+var cr_b = prani_rng_new(42);
+var cr_bad = 0;
+var cr_i = 0;
+while (cr_i < 100000) {
+    var cr_bits = prani_rng_next_u32(cr_a) >> 1;
+    var cr_want = pr_of64(f64_mul(f64_from(cr_bits), 0x3E00000000000000));
+    if (pr_ge(cr_want, PR_ONE)) { cr_want = t_next_down(PR_ONE); }
+    if (prani_rng_next_f32(cr_b) != cr_want) { cr_bad = cr_bad + 1; }
+    cr_i = cr_i + 1;
+}
+assert_eq(cr_bad, 0, "100000 draws, each the rounded f64 draw (2.3.1's f32 build: 25% more than an ulp off)");
 
 var rc = assert_summary();
 syscall(60, rc);

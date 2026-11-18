@@ -20,6 +20,179 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.3.2] - the 2.3 sweep
+
+Patch release: an independent review of the 2.3.0 and 2.3.1 work, and the repair of
+everything it found ([audit](docs/audit/2026-11-17-2.3-audit.md)). Four reviews
+confirmed 25 findings, 4 HIGH, 6 MEDIUM and 15 LOW, and six constant mutants that no
+test caught in either format. All are repaired. Each repair has a regression test, run
+against tag 2.3.1 in both formats, that fails there. Verifying them found one more,
+older than 2.3: a render's level depended on the sample rate, by 19 dB at 8 kHz. That is
+repaired too ([ADR-0014](docs/adr/0014-a-render-does-not-depend-on-the-sample-rate.md)).
+
+No dependency moves: cyrius 6.7.18, svara 3.14.0, naad 2.3.5, hisab 3.5.0, goonj
+2.3.2, sakshi 2.5.10. The consumer floor stays cyrius 6.7.2, for both formats.
+**2,681 assertions / 22 suites, in each format.**
+
+### Changed
+
+- ⚠ **A render's level does not depend on the sample rate**
+  ([ADR-0014](docs/adr/0014-a-render-does-not-depend-on-the-sample-rate.md), audit V1).
+  prani's levels are calibrated at 44.1 kHz (ADR-0007), and a render at another rate is
+  now that render cut to its band. Through 2.3.1 the median render was +18.8 dB at 8 kHz,
+  +11.1 at 16 and −8.7 at 96, against the same call at 44.1 kHz cut to the lower Nyquist
+  (127 renders a rate, by 1/3-octave band). Four stages had a response fixed per sample:
+  - svara's lip radiation, `y = x − 0.97·x[n−1]` at every rate: its zero now keeps its
+    place in Hz, and its gain is restored in svara's output gain and interaction strength;
+  - svara's formant bandwidths, which render b · sin(2πf/sr) wide, not b, so a wolf's F1
+    was 6.0 Hz wide at 44.1 kHz and 32 at 8: each is now handed svara at the width that
+    passes the noise power in Hz it does at 44.1 kHz, as is the snake's naad bandpass;
+  - the spectral tilt and the DC blocker, whose corners fell with the rate: each pole is
+    now the 44.1 kHz one moved to the rate. The tilt reads its sample rate, which the
+    Rust left unused, and refuses one that is not positive and finite when it applies;
+  - every white-noise source, svara's aspiration included, now scaled by √(sr/44100)
+    to keep its power density.
+
+  Over 861 renders at seven rates, the mean level error is 0.25 dB (worst 3.1), from 7.2
+  (worst 26.2), and the median at every rate is within ±0.3 dB. Every 44.1 kHz render is
+  bit-identical; every render at another rate moves.
+- ⚠ **A formant past Nyquist is placed in band, not lost**
+  ([ADR-0013](docs/adr/0013-a-formant-past-nyquist-is-placed-in-band.md), audit D3).
+  One species formant at or past Nyquist made svara refuse all five, and the tract
+  rendered svara's default vowel as the species: schwa for a cat at 8 kHz, for a crow,
+  a raptor or a songbird at 8 or 11.025 kHz, and for a raptor or a songbird at 16 kHz,
+  and a single 500 Hz formant below 7.5 kHz. Per block, vocalize discarded the refusal,
+  as the Rust did, so a cat's meow at 8 kHz kept its last accepted formants in 152 of
+  208 blocks, and the syringeal coupling never ran below 22.05 kHz. Each formant is now
+  placed as ADR-0009 places the F4/F5 estimates, halfway from the one below it to
+  Nyquist, at the level its own resonance has there. A cat's F3 at 8 kHz, 4200 Hz, goes
+  to 3250 Hz with amplitude 0.046, not svara's 0.5 for that slot. ADR-0009's estimates
+  carry that level too, so a dog at 8 kHz renders differently from 2.2.1. A formant
+  svara still refuses, which only a raw setter can produce, is returned as
+  `PRANI_ERR_SVARA` instead of rendered, so prani's one runtime WARN is gone.
+- ⚠ **Voice's own sources are held to Nyquist too**
+  ([ADR-0011](docs/adr/0011-a-pitch-past-nyquist-is-refused.md), audit D1). A canid
+  howl or whine adds a second voice at 1.78 × f0, and lions, crocodilians and dragons
+  a subharmonic at 0.5 × f0, after the render and from the unclamped f0. 2.3.1 checked
+  only the tract's pitch. A dog with an f0 offset of 1900 Hz howling at 8 kHz rendered
+  its 4984 Hz second voice at 3016 Hz, and a default wolf howl at 1201 Hz its 712 Hz one
+  at 489 Hz, both as success. Both are now `PRANI_ERR_INVALID_TRACT`. A call of no
+  samples renders neither source, and is still an empty buffer.
+- ⚠ **The 2·f0 partial is left out past Nyquist** (ADR-0011, audit D5). The
+  stridulatory and vibratile paths add 0.3 × sin(2π·2f0·t). A cricket at 16 kHz, a rate
+  2.3.1 said holds it, rendered its 9 kHz partial at 7 kHz. The carrier now renders
+  alone when 2f0 is past Nyquist.
+- **An emotion update never passes its target** (audit B5). `v·s + t·(1 − s)` could be
+  rounded past t once v had all but reached it, so a target set on a zone bound read
+  the zone beyond. Over 76 paths toward the bounds, 2.3.1 misread 5 in f64 (1,364
+  steps) and 9 in f32 (2,588). The blend is held between v and t, which only moves it
+  toward the exact value, and the f32 build blends in f64. The f64 build's bits change
+  only where the old result passed the target.
+
+### Fixed
+
+- **f32 accuracy** (ADR-0010, amended).
+  - **HIGH: Doppler resampling** (audit B1). The read position `i × ratio` was f32, so
+    a 10 s buffer was 9.2e-3 off and past 190 s it was nearest-neighbour. It is f64,
+    with the output length.
+  - **HIGH: a process exit** (audit B2). The nasal anti-formant bounded its count with
+    `pr_from(len)`, which in f32 rounds 16,777,219 up, and a fraction of 1.0 on such a
+    buffer read past it and exited. The count is bounded in integers.
+  - **MEDIUM: documents at a builder's maximum** (audit B3). The f32 0.05 and 0.1 round
+    above the decimals, so an f32 voice at the jitter or shimmer ceiling was refused by
+    the f64 build. The builders' ceilings, and `crvoice_with_f0_offset`'s range, round
+    toward zero.
+  - **Phase accumulators** (audit B4). The purr and the laryngeal subharmonic add in
+    f64 within a call, where f32 re-rounded each increment: a purr drifted 0.27 cycles
+    in 10 minutes.
+  - **The random draw** (audit C3). 2.3.1 truncated it to 24 bits and called each draw
+    within an ulp of the f64 build's; 25% were not, by up to 499,712 ulps. It is now the
+    f64 draw correctly rounded, with the top 64 values clamped to 1 − 2^-24.
+- **Gates that could pass a wrong build.**
+  - **`gen-f64.sh`** (audit A1–A4). A comment after `#else` or `#endif` silently
+    dropped f64 code, and every gate passed. The generator now recognises a directive by
+    its first word and fails on an unbalanced one, leaves strings alone, checks that
+    `[lib].modules` pairs each source with its twin (two missing twins passed every
+    suite and example), and lints the f32-compiled code for f64 arithmetic.
+  - **`check-alloc.sh`** (audit A5) counted its funnel's helper lines, not calls, so a
+    raw `alloc` on a helper's line passed.
+- **Tests that did not test what they said.**
+  - **HIGH: four of ADR-0010's six time-base arms were untested** (audit C1): the
+    syringeal dual source, and voice's trill AM, subharmonic and biphonation, each of
+    which could be written in f32 time with every suite passing. The syringeal arm has
+    a 1000 s case, and voice's three share `crvoice_tone`, held to the true sine.
+  - **Per-format inputs** (audit C2, C6). In f32, `pr_of64` of an f64 subnormal is 0
+    and of f64::MAX is inf, so six assertions tested another branch; spatial's
+    reciprocal guard could be deleted from the f32 build unnoticed. Two overflow inputs
+    in `tests/hardening.tcyr` were one value in f32, and one of them did not overflow
+    in f64.
+  - **`assert_real`** (audit C5) measured an f32-build word with high bits set as the
+    real in its low half, and passed equal NaNs in f64 only.
+  - **`pr_neg(1)` as −1** (audit A6), and **f32 reals passed to naad** (A7).
+  - **Six constants no mutant of which failed a test** (audit C, K2–K16): the purr's
+    noise scale, the contour's epsilon, the fatigue duration bound, the notch's pole
+    ceiling, the arousal Low/Mid bound and the jitter bound. Each is now pinned on both
+    sides, in both formats.
+- **Docs.** CONTRIBUTING recommended `!pr_ge`, which cycc 6.7.2, the consumer floor,
+  miscompiles (audit C4). ADR-0011 put a half-size cricket at Nyquist; it sings at the
+  rate itself (D4). An example printed "f64 samples" in the f32 build (C7). `pr_from`'s
+  comment claimed one rounding above 2^53 (A8).
+
+### Verified
+
+- **Every defect's regression group fails on 2.3.1.** Each was extracted with what it
+  needs and run on a snapshot of the tag, in both formats:
+  - in both: D3 (19 of 21 assertions; the two controls pass), D5 (3 of 7), D1 (2 of 5),
+    B5 (2 of 3);
+  - in f32, the f32 build's defects, each passing in f64: B1 (1 of 2), B3 (3 of 5), B4
+    (2 of 4), C3, and B2, which exits the process ("vec: index out of bounds").
+- **Mutants.** The groups that pin what 2.3.1 already did right (D2's two placements, and
+  the six constants) pass on 2.3.1, and each fails on its mutant. Every mutant the
+  reviews found surviving now fails a suite, each planted in a fresh copy with the
+  twins regenerated: K2, K4 (epsilon halved and doubled), K6, K7, K10 and K16 in each
+  format, at the reviewers' values and at a second value each; T1 (the syringeal arm in
+  f32 time), voice's time-base arm in f32 time (12 of 15 samples miss), and G1
+  (spatial's reciprocal guard deleted), in f32; D2a and D2b. So do the 2.3.2 repairs'
+  own: the emotion hold removed (1,364 misread steps), its f32 blend in f32 (the 0.92
+  pin, 1 ulp), the formant placement without its finiteness check (3 assertions), and
+  the placed formants at full amplitude (4) or with the bank left unrebuilt (2).
+- **The audio moved only where the repairs put it.** In the whole-surface sweep against
+  tag 2.3.1, in each format:
+  - in f64, every render at a rate other than 44.1 kHz moved (161 of 404: the intents,
+    bouts, streams, builders, phrase, chorus and presets, all at 8 kHz), by ADR-0014,
+    and by D3 where a formant is placed. None of the 127 renders at 44.1 kHz moved, nor
+    the purr there;
+  - in f32, 225 moved: those, and at 44.1 kHz the draws now correctly rounded (C3) and
+    the purr's phase (B4);
+  - no render changed its status or length, none became non-finite, and all 26 JSON
+    documents are byte-identical;
+  - 1 of 953 hostile cases changed status: a wolf howl of 0.01 s at 1201 Hz is refused
+    (D1). A zero-length one is still an empty buffer. 62 changed their samples, every
+    one at a rate other than 44.1 kHz;
+  - the loudest render now peaks at 0.665, where 2.3.1's peaked at 0.786. None is past
+    full scale.
+
+  Against the f64 build, the f32 build's purr is now 1.0e-5 of peak off, where 2.3.1's
+  was 0.21 (B4), and vocalize's 127 renders at most 8.8e-5, where they were 1.2e-4.
+- **Gates.**
+  - All 22 suites pass in each format (2,681 assertions each), and so do the fuzz
+    harness and the five examples.
+  - `cyrius audit` exits 0, `scripts/check-alloc.sh` and `gen-f64.sh --check` pass,
+    every file is clean under `cyrfmt` and lint, and `cyrius deps --verify` is 50/50.
+  - The consumer floor is still cyrius 6.7.2 in both formats: a from-scratch consumer
+    that reaches every 2.3.2 path builds there warning-free, and its output is
+    byte-identical to 6.7.18's.
+
+
+### Docs
+
+- ADR-0013 and ADR-0014, and amendments to ADR-0007, ADR-0009, ADR-0010 and ADR-0011,
+  marked with the release.
+- The 2.3 audit report.
+- `input-ranges.md`: the biphonation guard, formant placement, the builders' ceilings,
+  the tilt's sample rate, renders at any rate.
+- CONTRIBUTING: negated compares.
+
 ## [2.3.1] - the deferred decisions
 
 Patch release: the three items the 2.2.1 sweep left on roadmap 2.3.x, each settled by

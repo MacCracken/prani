@@ -66,6 +66,32 @@ checked on the pitch it renders after its own clamp. Through 2.3.0 such a pitch 
 back as success: silence at exactly sample_rate / 2, and an alias past it. At 8 kHz that
 refuses the songbird, the raptor's high calls and the cricket, whose songs pass 4 kHz.
 
+Since 2.3.2 (audit D1) that includes the two sources voice adds after the render: a
+canid howl's or whine's second voice at 1.78 × f0, and the subharmonic layer at
+0.5 × f0. A default wolf howl at svara's 1201 Hz floor is refused, since its 712 Hz
+second voice is past 600 Hz. The stridulatory and vibratile 2 × f0 partial past Nyquist
+is left out rather than refused (audit D5): the carrier still renders.
+
+### A formant past Nyquist (2.3.2)
+
+A formant is not refused. Each one at or past Nyquist is placed in band, halfway
+between the formant below it and Nyquist, at the level its own resonance has there
+([ADR-0013](../adr/0013-a-formant-past-nyquist-is-placed-in-band.md)), in `crtract_new`
+and in every per-block blend. Through 2.3.1 one such formant made svara refuse all
+five, and the tract rendered svara's default vowel as the species, with a WARN.
+What svara still refuses, a formant or bandwidth that is not a positive finite number,
+is returned: by `crtract_new` as `PRANI_ERR_SVARA`, and by `crvoice_vocalize` for a
+block.
+
+### A render at any rate (2.3.2)
+
+A render at a rate other than 44.1 kHz is held to the same call at 44.1 kHz, cut to its
+band ([ADR-0014](../adr/0014-a-render-does-not-depend-on-the-sample-rate.md)). No input
+gains a range for it. A sample rate is still any positive finite value svara's tract
+accepts. svara clamps the interaction strength at 0.3, and above about 265 kHz the
+calibration reaches that clamp, so the source-filter feedback is weaker there than at
+44.1 kHz.
+
 ### In the f32 build (2.3.0)
 
 The table above holds in both float formats ([ADR-0010](../adr/0010-two-float-formats.md)):
@@ -82,6 +108,11 @@ format itself:
   each limit per format: 2^28 + 1 in f64, 2^28 + 32 in f32.
 - **The tiniest positive value is the format's.** 1e-300 is 0 in f32. The "a tiny rate
   is accepted, not floored" control uses f32's smallest normal, 2^-126, there.
+- **A builder's ceiling is at or below the decimal (2.3.2, audit B3).** `crvoice_with_jitter`
+  and `crvoice_with_shimmer` clamp to the f32 just below 0.05 and 0.1, and
+  `crvoice_with_f0_offset` to its range rounded toward zero, so a voice saved at a
+  maximum by the f32 build is in range in the f64 build. The deserializers' bounds are
+  the decimals rounded to nearest, so each build reads the other's documents.
 
 ## Guards
 
@@ -324,6 +355,7 @@ format itself:
 | `crtract_synthesize_purr` | `purr_f0` | finite, in [0, sample_rate / 2) (2.2.1 bounded it by sample_rate; 2.3.1, ADR-0011) | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_synthesize_purr` | `num_samples` | [0, VEC_CAP_MAX] (0 is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crtract_apply_spectral_tilt` | `tilt_db` | finite | `PRANI_ERR_INVALID_TRACT` |
+| `crtract_apply_spectral_tilt` | `sample_rate` (2.3.2, ADR-0014; read only when the tilt is applied) | finite and > 0 | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_from_json_str` | `phase` | [0, 1] inclusive | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_from_json_str` | `dcb_x_prev, dcb_y_prev` | finite | `PRANI_ERR_INVALID_TRACT` |
 | `crtract_from_json_str` | `dcb_r` | [0, 1) -- non-negative and strictly less than 1 | `PRANI_ERR_INVALID_TRACT` |
@@ -360,10 +392,11 @@ format itself:
 | `crvoice_vocalize_with_intent` | `num_samples (derived: effective_duration * sample_rate)` | [0, VEC_CAP_MAX] == [0, 268435456] | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_vocalize_with_intent` | `self's params (all 16 SpeciesParams fields, via crvoice_params_in_range)` | apparatus [0,4]; f0_min/f0_max finite >= 0 with f0_min <= f0_max; f0_default in [f0_min, f0_max]; tract_scale finite > 0; formant0..2 and bandwidth0..2 finite > 0; breathiness [0,1]; jitter [0,0.05]; shimmer [0,0.1]; spectral_tilt finite | `PRANI_ERR_INVALID_SPECIES` |
 | `crvoice_vocalize_with_intent` | `crvoice_effective_f0(self) and crvoice_effective_tract_scale(self)` | both finite | `PRANI_ERR_INVALID_TRACT` |
+| `crvoice_vocalize_with_intent` | `the biphonation (canid HOWL/WHINE, 1.78 x f0) and subharmonic (0.5 x f0) sources` | below sample_rate / 2, checked after the tract is built (2.3.2, audit D1) | `PRANI_ERR_INVALID_TRACT` |
 | `crvoice_synthesize_cat_purr` | `sample_rate` | finite and > 0 | `PRANI_ERR_INVALID_TRACT` |
 | `crvoice_synthesize_cat_purr` | `num_samples` | [0, VEC_CAP_MAX] (zero is VALID) | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_synthesize_cat_purr` | `self's size_scale` | finite and > 0 | `PRANI_ERR_INVALID_SPECIES` |
-| `crvoice_apply_nasal_antiformant` | `iteration bound nasal_len (LIVE CRASH)` | min(nasal_len, len), clamped in f64 before the f64_to | `n/a -- parity repair, not a rejection` |
+| `crvoice_apply_nasal_antiformant` | `iteration bound nasal_len (LIVE CRASH)` | min(nasal_len, len), clamped in f64 before the f64_to, and since 2.3.2 bounded again in integers after it (in f32, pr_from(len) can round up past 2^24; audit B2) | `n/a -- parity repair, not a rejection` |
 | `crvoice_apply_nasal_antiformant` | `sample_rate` | finite and > 0 | `PRANI_ERR_INVALID_TRACT` |
 | `crvoice_apply_nasal_antiformant` | `nasal_fraction` | finite and >= 0 | `PRANI_ERR_INVALID_VOCALIZATION` |
 | `crvoice_apply_am_pattern` | `sample_rate` | finite and > 0 | `PRANI_ERR_INVALID_TRACT` |
@@ -503,7 +536,7 @@ function that consumes it checks the voice's own derived values.
 
 - crtract_new's sample_rate -- svara owns that threshold and crtract_new already reports its rejection (ADR-0001). Restating the constant here is exactly what ADR-0001 refused, because the duplicate is the thing that goes stale. Pinned: a document naming a 10 Hz sample rate is still rejected, by svara, via crtract_new.
 - crtract_set_formant_blend's blend / target / target_bw -- MEASURED on the pre-guard tree: svara ALREADY rejects a NaN blend and a NaN target formant (both come back as PRANI_ERR_SVARA through prani_from_svara), and the tract is left synthesizing finite audio afterwards with its old formants. A guard here would restate a dependency's rule. Pinned as four assertions so that if svara ever stops refusing, prani's suite fails and says it now needs its own guard.
-- crtract_apply_spectral_tilt's sample_rate -- the function never reads it (the coefficient comes from tilt_db alone; the parameter exists for oracle signature parity). Rejecting a value a function does not read reports a failure that cannot happen. Pinned: a NaN sample_rate is accepted and changes nothing (y[0] is still 0.5 for a -6 dB/oct tilt).
+- ~~crtract_apply_spectral_tilt's sample_rate -- the function never reads it.~~ **Reversed in 2.3.2** ([ADR-0014](../adr/0014-a-render-does-not-depend-on-the-sample-rate.md)): the coefficient is the 44.1 kHz one moved to the rate, with its corner in Hz, so the function reads sample_rate, and refuses one that is not positive and finite with `PRANI_ERR_INVALID_TRACT` whenever the tilt is applied. A neutral tilt reads no rate and is not refused. Pinned in `tests/tract.tcyr`.
 - options on the stridulatory path -- never read there (the oracle writes `let _ = options;`), so there is nothing with a range. Pinned: NaN options with a cricket still succeed.
 - f0 on the noise path -- crtract_synthesize_noise takes no f0, so a snake's synthesis never looks at it. This is why the guards live in the five apparatus paths rather than in the crtract_synthesize dispatcher: a dispatcher-level guard would reject a NaN f0 for a snake, a failure that cannot happen. Pinned, so moving the guard up fails the suite and says why.
 - from_json_str rng_state -- every 64-bit pattern is a reachable PCG32 state; it is not a number with a range. ~~rng_inc likewise~~ **Reversed in 2.2.1 (audit B5):** prani_rng_new always makes `inc` odd, and state 0 with inc 0 is a fixed point, so a document spelling both as 0 (or omitting them) gave a tract whose noise path rendered exact silence as success. An even `inc` is now refused with `PRANI_ERR_INVALID_TRACT`.
@@ -519,6 +552,6 @@ function that consumes it checks the voice's own derived values.
 - crvoice_to_json -- serializing has no range hazard; it writes whatever the struct holds, and the deserializer is where the contract is enforced.
 - ~~The species tag stored on a CreatureVoice, at vocalize time.~~ **Reversed in 2.0.6, and the reasoning below was wrong.** 2.0.5 argued that species_params' DOCUMENTED fallthrough to the Fantasy row ('preserves totality since the Rust enum is #[non_exhaustive]') made an unknown species species.cyr's choice rather than voice.cyr's defect. `error_handling.cyr` then showed what that cost: `crvoice_new(99)` returned a voice and `crvoice_vocalize` rendered 2205 samples for it **as a success**. Totality in the table is not the same as accepting a tag the caller cannot have meant. The guard now sits at the point of use — `src/voice.cyr` and `src/stream.cyr` in the tables above — exactly where ADR-0006 puts a builder's range check, since crvoice_new returns a pointer with no error channel. Pinned as F13 in `tests/hardening.tcyr`. The tag is still separately range-checked in crvoice_from_json_str, where the deserializer contract (decision 1) applies.
 - SpeciesParams.resonance_seed -- an RNG seed. Every i64 bit pattern is a legal one, and pinned as accepted (a -1 seed round-trips) so a future tightening cannot creep in unnoticed.
-- Nyquist upper bounds on formant0..2 / bandwidth0..2 in the deserializer. The sample rate is not known at deserialize time, so any bound would be a guess; they are checked finite and > 0 only.
+- Nyquist upper bounds on formant0..2 / bandwidth0..2 in the deserializer. The sample rate is not known at deserialize time, so any bound would be a guess; they are checked finite and > 0 only. Since 2.3.2 the tract places a formant past Nyquist in band instead (ADR-0013).
 - An upper bound on duration itself. A long call is a legitimate request, so the limit is on the derived sample count, one vec's worth, rather than an invented maximum call length. A longer render goes through `stream_new`.
 

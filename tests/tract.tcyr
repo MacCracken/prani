@@ -600,9 +600,13 @@ assert_eq(vec_get(tl2, 0), T_0_5, "control: -6 dB/oct still filters (y[0] == 0.5
 var tl3 = vec_new();
 vec_push(tl3, PR_ONE);
 vec_push(tl3, 0);
-assert_eq(crtract_apply_spectral_tilt(tl3, T_TILT_N6, t_nan()), PRANI_ERR_NONE,
-  "tilt: a NaN sample_rate is accepted -- the function never reads it");
-assert_eq(vec_get(tl3, 0), T_0_5, "tilt: NaN sample_rate changed nothing (y[0] == 0.5)");
+# Since 2.3.2 the function reads it (ADR-0014): the coefficient keeps its corner in Hz
+# at every rate. A NaN rate is refused, and the buffer left as it was.
+assert_eq(crtract_apply_spectral_tilt(tl3, T_TILT_N6, t_nan()), PRANI_ERR_INVALID_TRACT,
+  "tilt: a NaN sample_rate is refused (2.3.1 accepted it, unread)");
+assert_eq(vec_get(tl3, 0), PR_ONE, "tilt: and the refused buffer is unchanged");
+assert_eq(crtract_apply_spectral_tilt(tl3, 0, t_nan()), PRANI_ERR_NONE,
+  "tilt: a neutral tilt reads no rate, so it is not refused");
 
 # ================================================================
 test_group("2.0.5 from_json_str -- raw f64 bit patterns are range-checked");
@@ -714,10 +718,12 @@ assert_eq(t_all_finite(fb_after3), 1, "blend: still finite after a refused infin
 # here; these two are far past it at any sample rate.
 var fb_max_b = vec_new();
 vec_push(fb_max_b, pr_from(80));
-vec_push(fb_max_b, pr_of64(0x7FEFFFFFFFFFFFFF));   # f64::MAX
+# f64::MAX, and in f32 f32::MAX, the format's largest finite real: pr_of64 of
+# f64::MAX is inf in f32, which svara refuses by another rule (audit C2, 2.3.2).
+vec_push(fb_max_b, t_per(pr_of64(0x7FEFFFFFFFFFFFFF), 0x7F7FFFFF));
 vec_push(fb_max_b, pr_from(120));
 assert_eq(crtract_set_formant_blend(fb_tract, fb_t, fb_max_b, PR_ONE), PRANI_ERR_SVARA,
-  "blend: an f64::MAX target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.5)");
+  "blend: the format's largest finite target bandwidth -> PRANI_ERR_SVARA (svara's rejection, since 3.6.5)");
 var fb_f32_b = vec_new();
 vec_push(fb_f32_b, pr_from(80));
 vec_push(fb_f32_b, pr_of64(0x47EFFFFFE0000000));   # f32::MAX as an f64
@@ -800,23 +806,24 @@ assert_eq(f64_gt(xl_noise, pr_to64(T_1EM3)), 1, "control: the b = 1 source is no
 # The helpers: with b' and k as tract.cyr computes them, svara's mix scaled by k is
 # the oracle's mix times PR_TR_EXC_GAIN -- pulse weight (1-b), noise weight b.
 var xl_g = pr_of64(SV_G_ROSENBERG_GAIN);
-var xl_bp = crtract_svara_breathiness(XL_037R, xl_g);
-var xl_k = crtract_excitation_scale(XL_037R, xl_g);
+var xl_bp = crtract_svara_breathiness(XL_037R, xl_g, PR_ONE);   # q = 1: 44.1 kHz
+var xl_k = crtract_excitation_scale(XL_037R, xl_g, PR_ONE);
 var xl_pw = pr_mul(pr_mul(xl_k, xl_g), pr_sub(PR_ONE, xl_bp));
 var xl_nw = pr_mul(xl_k, xl_bp);
 assert_eq(pr_le(pr_abs(pr_sub(xl_pw, pr_mul(pr_sub(PR_ONE, XL_037R), PR_TR_EXC_GAIN))), XL_TOL), 1,
   "helpers: the unit-peak pulse is weighted (1 - b) x PR_TR_EXC_GAIN");
 assert_eq(pr_le(pr_abs(pr_sub(xl_nw, pr_mul(XL_037R, PR_TR_EXC_GAIN))), XL_TOL), 1,
   "helpers: the noise is weighted b x PR_TR_EXC_GAIN, the oracle's balance");
-assert_eq(crtract_svara_breathiness(0, xl_g), 0, "helpers: b = 0 stays 0");
-assert_eq(crtract_svara_breathiness(PR_ONE, xl_g), PR_ONE, "helpers: b = 1 stays 1");
-assert_eq(crtract_excitation_scale(PR_ONE, xl_g), PR_TR_EXC_GAIN, "helpers: noise alone is scaled by the gain only");
-assert_eq(crtract_excitation_scale(0, PR_ONE), PR_TR_EXC_GAIN, "helpers: a unit-peak model needs no division");
+assert_eq(crtract_svara_breathiness(0, xl_g, PR_ONE), 0, "helpers: b = 0 stays 0");
+assert_eq(crtract_svara_breathiness(PR_ONE, xl_g, PR_ONE), PR_ONE, "helpers: b = 1 stays 1");
+assert_eq(crtract_excitation_scale(PR_ONE, xl_g, PR_ONE), PR_TR_EXC_GAIN,
+  "helpers: noise alone is scaled by the gain only");
+assert_eq(crtract_excitation_scale(0, PR_ONE, PR_ONE), PR_TR_EXC_GAIN, "helpers: a unit-peak model needs no division");
 # and crtract_glottal_new hands svara the converted breathiness, not the species'.
 var xl_gl = crtract_glottal_new(T_220, T_SR, wolf, PR_ONE);
 var xl_wb = SpeciesParams_breathiness(wolf);
 assert_eq(pr_gt(xl_wb, 0), 1, "control: the wolf is breathy at all, so the conversion is visible");
-assert_eq(pr_of64(SvGlottalSource_breathiness(xl_gl)), crtract_svara_breathiness(xl_wb, xl_g),
+assert_eq(pr_of64(SvGlottalSource_breathiness(xl_gl)), crtract_svara_breathiness(xl_wb, xl_g, PR_ONE),
   "crtract_glottal_new gives svara g*b / (1 - b + g*b), not b");
 
 # ================================================================
@@ -917,6 +924,373 @@ CreatureTract_set_clock(tb_s1, TB_LATE);
 var tb_sa = crtract_synthesize_stridulatory(tb_s0, pr_from(200), 4000, opts);
 var tb_sb = crtract_synthesize_stridulatory(tb_s1, pr_from(200), 4000, opts);
 assert_eq(pr_le(tb_diff(tb_sa, tb_sb), TB_TOL), 1, "and the stridulatory path's low-carrier arm");
+# Audit C1, 2.3.2: the syringeal dual source above 2 kHz had no case, and its arm
+# written in f32 time passed every suite while its render at 1000 s was 0.349 off,
+# against a peak of 0.082. At 3000 Hz its second source is 4494 Hz, so both repeat
+# every second too. Measured: 2.9e-8 in f32, 0 in f64.
+var tb_y0 = crtract_new(species_params(PRANI_SP_SONGBIRD), T_SR);
+var tb_y1 = crtract_new(species_params(PRANI_SP_SONGBIRD), T_SR);
+CreatureTract_set_clock(tb_y1, TB_LATE);
+var tb_ya = crtract_synthesize_syringeal(tb_y0, pr_from(3000), 4000, opts);
+var tb_yb = crtract_synthesize_syringeal(tb_y1, pr_from(3000), 4000, opts);
+assert_eq(pr_gt(t_max_abs_range(tb_ya, 0, 4000), pr_of64(0x3f847ae147ae147b)), 1,
+  "control: the songbird's dual source is sounding (peak above 0.01)");
+assert_eq(pr_le(tb_diff(tb_ya, tb_yb), TB_TOL), 1, "and so does a songbird's dual source above 2 kHz");
+
+# ================================================================
+test_group("2.3.2 B4 -- a phase accumulator does not drift (ADR-0010)");
+# 10 s of a purr at 27 Hz and of a wolf's 200 Hz subharmonic, one call each, held to
+# the exact phase frac(n * f / sr) computed in f64. Each accumulator now adds in f64
+# in the f32 build and rounds once when it stores. Through 2.3.1 the f32 build added
+# in f32, re-rounding the increment at every sample: 4.5e-3 and 2.5e-3 cycles off.
+#ifdef PRANI_F32
+var PH_TOL = 0x3EB0C6F7A0B5ED8D;      # 1e-6: one f32 rounding of the stored phase
+#else
+var PH_TOL = 0x3E112E0BE826D695;      # 1e-9: f64's own accumulation, measured 4e-11
+#endif
+var PH_N = 441001;
+# ph_off(p, f) -- |p - frac(PH_N * f / 44100)| as an f64, the stored phase's error.
+fn ph_off(p, f) {
+    var want = f64_mul(f64_from(PH_N), f64_div(f64_from(f), f64_from(44100)));
+    want = f64_sub(want, f64_floor(want));
+    return f64_abs(f64_sub(pr_to64(p), want));
+}
+var ph_cat = crtract_new(species_params(PRANI_SP_CAT), T_SR);
+assert_eq(prani_is_err(crtract_synthesize_purr(ph_cat, PH_N, pr_from(27))), 0, "control: the purr renders");
+assert_eq(f64_le(ph_off(CreatureTract_phase(ph_cat), 27), PH_TOL), 1,
+  "the purr's phase after 10 s is the exact one (2.3.1's f32 build: 4.5e-3 cycles off)");
+var ph_wo = crtract_new(species_params(PRANI_SP_WOLF), T_SR);
+var ph_o = crtract_options_new(PR_HALF, PR_ONE);
+assert_eq(prani_is_err(crtract_synthesize(ph_wo, pr_from(400), PH_N, ph_o)), 0, "control: the subharmonic renders");
+assert_eq(f64_le(ph_off(CreatureTract_phase(ph_wo), 200), PH_TOL), 1,
+  "and the subharmonic's (2.3.1's f32 build: 2.5e-3 cycles off)");
+
+# ================================================================
+test_group("2.3.2 D5 -- the second harmonic is left out past Nyquist, not aliased");
+# Each raw oscillator adds 0.3 x sin(2 x w t). Past Nyquist that partial lands at
+# |sr - 2 f0|, a tone the creature does not make. Measured with a Goertzel filter at
+# that alias, against the carrier as a control. Through 2.3.1 a cricket at 16 kHz put
+# its 9 kHz partial at 7 kHz with amplitude 0.0526.
+# h2_amp(v, f, sr, n) -- the amplitude of v's component at f Hz over its first n samples.
+fn h2_amp(v, f, sr, n) {
+    var w = f64_div(f64_mul(F64_TAU, f64_from(f)), f64_from(sr));
+    var cw = f64_mul(F64_TWO, f64_cos(w));
+    var s1 = 0;
+    var s2 = 0;
+    var i = 0;
+    while (i < n) {
+        var x = f64_add(f64_sub(f64_mul(cw, s1), s2), pr_to64(vec_get(v, i)));
+        s2 = s1;
+        s1 = x;
+        i = i + 1;
+    }
+    var re = f64_sub(s1, f64_mul(s2, f64_cos(w)));
+    var im = f64_mul(s2, f64_sin(w));
+    return f64_div(f64_mul(F64_TWO, f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im)))), f64_from(n));
+}
+var H2_QUIET = 0x3F50624DD2F1A9FC;   # 1e-3
+var H2_LOUD  = 0x3F947AE147AE147B;   # 0.02
+var h2_o = crtract_options_default();
+# the cricket branch (f0 > 1000) at 16 kHz: carrier 4500 Hz, its partial 9000 Hz -> 7000
+var h2_c = crtract_synthesize_stridulatory(crtract_new(species_params(PRANI_SP_CRICKET), pr_from(16000)),
+  pr_from(4500), 2000, h2_o);
+assert_eq(f64_lt(h2_amp(h2_c, 7000, 16000, 2000), H2_QUIET), 1, "cricket at 16 kHz: nothing at 7 kHz (2.3.1: 0.0526)");
+assert_eq(f64_gt(h2_amp(h2_c, 4500, 16000, 2000), H2_LOUD), 1, "control: its 4500 Hz carrier is there");
+var h2_c44 = crtract_synthesize_stridulatory(crtract_new(species_params(PRANI_SP_CRICKET), T_SR),
+  pr_from(4500), 2000, h2_o);
+assert_eq(f64_gt(h2_amp(h2_c44, 9000, 44100, 2000), H2_LOUD), 1, "control: at 44.1 kHz the 9 kHz partial is kept");
+# the vibratile path at 16 kHz: carrier 4500, partial 9000 -> 7000, its sidebands at 6750
+var h2_v = crtract_synthesize_vibratile(crtract_new(species_params(PRANI_SP_BEE), pr_from(16000)), pr_from(4500), 2000);
+assert_eq(f64_lt(h2_amp(h2_v, 7000, 16000, 2000), H2_QUIET), 1, "vibratile at 16 kHz: nothing at 7 kHz");
+assert_eq(f64_gt(h2_amp(h2_v, 4500, 16000, 2000), H2_LOUD), 1, "control: its carrier is there");
+# the stridulatory bee branch (f0 <= 1000) at 1600 Hz: carrier 500, partial 1000 -> 600
+var h2_b = crtract_synthesize_stridulatory(crtract_new(species_params(PRANI_SP_BEE), pr_from(1600)),
+  pr_from(500), 1600, h2_o);
+assert_eq(f64_lt(h2_amp(h2_b, 600, 1600, 1600), H2_QUIET), 1, "the low-carrier branch at 1600 Hz: nothing at 600 Hz");
+assert_eq(f64_gt(h2_amp(h2_b, 500, 1600, 1600), H2_LOUD), 1, "control: its 500 Hz carrier is there");
+
+# Audit D3, 2.3.2. svara refuses a five-formant target if any formant is not below
+# Nyquist, and the tract keeps what it had: svara's default vowel, schwa (523, 1588,
+# 2469, 3300, 3750 Hz), or below a 7.5 kHz rate, where schwa is past Nyquist too, a
+# single 500 Hz formant. 2.2.1 kept prani's F4/F5 estimates in band (ADR-0009); a
+# species whose own F2 or F3 is past Nyquist still lost all five. Every midpoint
+# below is exact in both formats, so each is pinned as a value. A placed formant
+# keeps the level its own resonance has where it is placed (ADR-0013): at full
+# amplitude, four resonances piled below Nyquist, and a crow's bark at 8 kHz
+# peaked at 1.81.
+test_group("2.3.2 D3 -- a species' own formants past Nyquist are placed, not lost");
+# d3_f(t, i) -- the tract's formant i, f64 in both builds; 0 if it has no formant i.
+fn d3_f(t, i) {
+    var fv = SvVocalTract_formants(CreatureTract_tract(t));
+    if (i >= vec_len(fv)) { return 0; }
+    return SvFormant_frequency(vec_get(fv, i));
+}
+# d3_a(t, i) -- the tract's formant i's amplitude, f64 in both builds; 0 if none.
+fn d3_a(t, i) {
+    var fv = SvVocalTract_formants(CreatureTract_tract(t));
+    if (i >= vec_len(fv)) { return 0; }
+    return SvFormant_amplitude(vec_get(fv, i));
+}
+var d3_cat = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+assert_eq(d3_f(d3_cat, 0), f64_from(850), "a cat at 8 kHz keeps its F1 (2.3.1: schwa's 523)");
+assert_eq(d3_f(d3_cat, 1), f64_from(2500), "and its F2");
+assert_eq(d3_f(d3_cat, 2), f64_from(3250), "F3, 4200 Hz, is placed halfway from F2 to Nyquist");
+assert_eq(d3_f(d3_cat, 3), f64_from(3625), "F4 halfway above that");
+assert_eq(d3_f(d3_cat, 4), 0x40adc90000000000, "and F5 at 3812.5");
+assert_eq(d3_a(d3_cat, 0), 0x3FF0000000000000, "F1, in band, keeps svara's amplitude 1.0");
+assert_eq(d3_a(d3_cat, 1), 0x3FE999999999999A, "and F2 its 0.8");
+# 0.5 x 200 x 3250 / sqrt((4200^2 - 3250^2)^2 + (200 x 3250)^2), in Python: the
+# resonance at 4200 Hz, 200 Hz wide, at 3250 Hz.
+assert_eq(d3_a(d3_cat, 2), 0x3fa7699fde383caf, "F3 has its resonance's level at 3250 Hz: 0.0457 of 0.5");
+assert_eq(f64_lt(d3_a(d3_cat, 3), 0x3FD3333333333333), 1, "F4's is below its 0.3");
+assert_eq(f64_gt(d3_a(d3_cat, 3), 0), 1, "and above 0: a placed formant is not dropped");
+# The level is the one the bank renders, not only the record's: an impulse through a
+# fresh cat tract at 8 kHz matches a twin whose bank the test rebuilds from the same
+# record, and differs from one rebuilt at svara's full amplitudes.
+var d3_ra = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+var d3_rb = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+var d3_rc = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+var d3_tb = CreatureTract_tract(d3_rb);
+var d3_tc = CreatureTract_tract(d3_rc);
+assert_eq(svara_tract_set_formants(d3_tb, SvVocalTract_formants(d3_tb)), 0, "control: the twin's bank rebuilds");
+SvFormant_set_amplitude(vec_get(SvVocalTract_formants(d3_tc), 2), 0x3FE0000000000000);
+SvFormant_set_amplitude(vec_get(SvVocalTract_formants(d3_tc), 3), 0x3FD3333333333333);
+SvFormant_set_amplitude(vec_get(SvVocalTract_formants(d3_tc), 4), 0x3FC999999999999A);
+assert_eq(svara_tract_set_formants(d3_tc, SvVocalTract_formants(d3_tc)), 0, "control: so does the full-level one");
+var d3_same = 1;
+var d3_diff = 0;
+var d3_k = 0;
+while (d3_k < 64) {
+    var d3_x = 0;
+    if (d3_k == 0) { d3_x = 0x3FF0000000000000; }
+    var d3_ya = svara_tract_process_sample(CreatureTract_tract(d3_ra), d3_x);
+    if (d3_ya != svara_tract_process_sample(d3_tb, d3_x)) { d3_same = 0; }
+    if (d3_ya != svara_tract_process_sample(d3_tc, d3_x)) { d3_diff = 1; }
+    d3_k = d3_k + 1;
+}
+assert_eq(d3_same, 1, "the bank renders the placed levels: 64 samples of an impulse match the rebuilt twin");
+assert_eq(d3_diff, 1, "control: and differ from svara's full levels");
+var d3_crow = crtract_new(species_params(PRANI_SP_CROW), pr_from(5000));
+assert_eq(vec_len(SvVocalTract_formants(CreatureTract_tract(d3_crow))), 5,
+  "a crow at 5 kHz has five formants (2.3.1: svara's single 500 Hz one)");
+assert_eq(d3_f(d3_crow, 0), f64_from(1400), "its own F1");
+assert_eq(d3_f(d3_crow, 1), f64_from(1950), "F2, 4200 Hz, placed between F1 and Nyquist");
+assert_eq(d3_f(d3_crow, 2), f64_from(2225), "F3, 7000 Hz, between F2 and Nyquist");
+assert_eq(d3_f(d3_crow, 4), 0x40a2fe8000000000, "F5 at 2431.25, below Nyquist");
+var d3_wolf = crtract_new(species_params(PRANI_SP_WOLF), pr_from(1201));
+assert_eq(d3_f(d3_wolf, 0), f64_from(420), "a wolf at svara's 1201 Hz floor keeps F1");
+assert_eq(d3_f(d3_wolf, 1), 0x407fe40000000000, "F2 at 510.25");
+assert_eq(d3_f(d3_wolf, 2), 0x40815b0000000000, "F3 at 555.375");
+var d3_c44 = crtract_new(species_params(PRANI_SP_CAT), pr_from(44100));
+assert_eq(d3_f(d3_c44, 2), f64_from(4200), "control: at 44.1 kHz the cat's F3 is its own");
+assert_eq(d3_f(d3_c44, 3), pr_to64(pr_mul(pr_from(4200), PR_TR_1_3)), "and F4 the plain 1.3 x F3 estimate");
+assert_eq(d3_a(d3_c44, 2), 0x3FE0000000000000, "at svara's amplitude, 0.5");
+# A blend toward a target past Nyquist is placed the same way. 2.3.1 refused it, and
+# crvoice_vocalize discarded the refusal, as the Rust did, so the block kept the last
+# block's formants as success.
+var d3_tf = vec_new();
+vec_push(d3_tf, pr_from(4500));
+vec_push(d3_tf, pr_from(5000));
+vec_push(d3_tf, pr_from(6000));
+var d3_tb = vec_new();
+vec_push(d3_tb, pr_from(120));
+vec_push(d3_tb, pr_from(150));
+vec_push(d3_tb, pr_from(200));
+assert_eq(crtract_set_formant_blend(d3_cat, d3_tf, d3_tb, PR_ONE), PRANI_ERR_NONE,
+  "a blend to (4500, 5000, 6000) Hz at 8 kHz is accepted (2.3.1: PRANI_ERR_SVARA)");
+assert_eq(d3_f(d3_cat, 0), f64_from(2000), "its F1 placed at 2000");
+assert_eq(d3_f(d3_cat, 1), f64_from(3000), "F2 at 3000");
+assert_eq(d3_f(d3_cat, 2), f64_from(3500), "F3 at 3500");
+assert_eq(f64_lt(d3_a(d3_cat, 0), 0x3FF0000000000000), 1, "each at its resonance's level there: F1 below 1.0");
+# What svara still refuses is not a formant past Nyquist, and is not placed: a NaN or
+# an infinite formant, which only a raw setter can put in a params record. 2.3.1
+# rendered schwa for it and returned the tract.
+var d3_pn = species_params(PRANI_SP_CAT);
+SpeciesParams_set_formant1(d3_pn, pr_div(0, 0));
+assert_eq(crtract_new(d3_pn, pr_from(8000)), PRANI_ERR_SVARA, "a NaN F2 is refused, not rendered through schwa");
+var d3_pi = species_params(PRANI_SP_CAT);
+SpeciesParams_set_formant0(d3_pi, PRANI_POS_INF);
+assert_eq(crtract_new(d3_pi, pr_from(44100)), PRANI_ERR_SVARA, "an infinite F1 is refused, not placed at 11025");
+
+# Audit K2, 2.3.2: a mutant moving the purr's closed-phase noise scale survived. Held
+# in its closed phase (phase 0.5, f0 0: it never leaves), the purr excites the tract
+# with nothing but the rng's draws x 0.02. A twin tract, with the same seed, fed
+# those draws x 0.02 by hand and then DC-blocked as the purr's buffer is, renders the
+# same samples, bit for bit in both builds.
+test_group("2.3.2 K2 -- the purr's closed phase is noise x 0.02");
+var k2_a = crtract_new(species_params(PRANI_SP_CAT), T_SR);
+var k2_b = crtract_new(species_params(PRANI_SP_CAT), T_SR);
+CreatureTract_set_phase(k2_a, T_0_5);
+var k2_out = crtract_synthesize_purr(k2_a, 256, 0);
+assert_eq(prani_is_err(k2_out), 0, "control: a purr at 0 Hz renders");
+var k2_twin = vec_new();
+var k2_i = 0;
+while (k2_i < 256) {
+    var k2_x = pr_mul(prani_rng_next_f32(CreatureTract_rng(k2_b)), pr_of64(0x3f947ae147ae147b));
+    vec_push(k2_twin, pr_of64(svara_tract_process_sample(CreatureTract_tract(k2_b), pr_to64(k2_x))));
+    k2_i = k2_i + 1;
+}
+dcblocker_process_buffer(CreatureTract_dc_blocker(k2_b), k2_twin);
+var k2_same = 1;
+var k2_loud = 0;
+k2_i = 0;
+while (k2_i < 256) {
+    if (vec_get(k2_out, k2_i) != vec_get(k2_twin, k2_i)) { k2_same = 0; }
+    if (pr_gt(pr_abs(vec_get(k2_twin, k2_i)), 0)) { k2_loud = k2_loud + 1; }
+    k2_i = k2_i + 1;
+}
+assert_eq(k2_same, 1, "256 closed-phase samples are the tract's response to noise x 0.02");
+assert_eq(pr_gt(pr_from(k2_loud), pr_from(200)), 1, "control: and they are not silence");
+
+# Audit V1, 2.3.2 (ADR-0014). prani's levels are calibrated at 44.1 kHz, and a render
+# at another rate is to be that render, cut to its band. Through 2.3.1 four stages had
+# a response fixed per sample: svara's lip radiation, svara's formant bandwidths, the
+# one-pole tilt and DC blocker, and every white-noise source. The median render was
+# +18.8 dB at 8 kHz and -8.7 dB at 96 kHz against the same call at 44.1 kHz cut to the
+# lower Nyquist (127 renders a rate, by 1/3-octave band). Each expected value below is
+# computed in Python from the formula in src/tract.cyr.
+test_group("2.3.2 V1 -- a render's level does not depend on the sample rate (ADR-0014)");
+var v1_w44 = crtract_new(species_params(PRANI_SP_WOLF), T_SR);
+var v1_s44 = CreatureTract_tract(v1_w44);
+assert_eq(SvVocalTract_lip_radiation(v1_s44), 0x3FEF0A3D70A3D70A, "at 44.1 kHz svara's lip radiation is its own 0.97");
+assert_eq(SvVocalTract_interaction_strength(v1_s44), 0x3FA999999999999A, "its interaction its own 0.05");
+assert_eq(SvSmoothedParam_current(SvVocalTract_gain(v1_s44)), 0x3FF0000000000000, "its gain 1.0");
+assert_eq(DcBlocker_r(CreatureTract_dc_blocker(v1_w44)), PRANI_DCBLOCK_R, "and the DC blocker's pole its 0.995");
+assert_eq(SvFormant_bandwidth(vec_get(SvVocalTract_formants(v1_s44), 0)), f64_from(100), "F1 has its own 100 Hz");
+var v1_w8 = crtract_new(species_params(PRANI_SP_WOLF), pr_from(8000));
+var v1_s8 = CreatureTract_tract(v1_w8);
+var V1_TOL = t_per(0x3D719799812DEA11, 0x3E7AD7F29ABCAF48);   # 1e-12 / 1e-7
+assert_eq(SvSmoothedParam_current(SvVocalTract_gain(v1_s8)), 0x3fc7384ef2a605ce,
+  "at 8 kHz svara's gain is 8000 / 44100, the lip radiation's gain there");
+assert_eq(SvVocalTract_interaction_strength(v1_s8), 0x3f8293725bb804a5, "the interaction strength 0.05 x that");
+assert_eq(f64_le(f64_abs(f64_sub(SvVocalTract_lip_radiation(v1_s8), 0x3feb0dc976a8aa64)), 0x3D719799812DEA11), 1,
+  "the lip radiation 0.97^(44100/8000), its zero where it is at 44.1 kHz");
+var v1_r8 = pr_to64(DcBlocker_r(CreatureTract_dc_blocker(v1_w8)));
+assert_eq(f64_le(f64_abs(f64_sub(v1_r8, 0x3fef20bd87a38be5)), V1_TOL), 1,
+  "the DC blocker's pole 0.995^(44100/8000), its corner where it is at 44.1 kHz");
+var v1_c8 = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+var v1_bw = SvFormant_bandwidth(vec_get(SvVocalTract_formants(CreatureTract_tract(v1_c8)), 0));
+assert_eq(f64_le(f64_abs(f64_sub(v1_bw, 0x403786b0bc3e60ac)), 0x3E45798EE2308C3A), 1,
+  "a cat's F1 is handed svara 23.53 Hz wide at 8 kHz, to pass what its 120 Hz does at 44.1 kHz");
+assert_real(crtract_noise_scale(pr_from(8000)), pr_of64(0x3fdb423c5acf2baa), 1,
+  "white noise at 8 kHz x sqrt(8000/44100)");
+assert_eq(crtract_noise_scale(T_SR), PR_ONE, "and x 1 at 44.1 kHz");
+var v1_tl = vec_new();
+vec_push(v1_tl, PR_ONE);
+vec_push(v1_tl, 0);
+assert_eq(crtract_apply_spectral_tilt(v1_tl, T_TILT_N6, pr_from(8000)), PRANI_ERR_NONE,
+  "control: a -6 dB/oct tilt at 8 kHz");
+assert_eq(f64_le(f64_abs(f64_sub(pr_to64(vec_get(v1_tl, 0)), 0x3fef4c8ad44db68d)), V1_TOL), 1,
+  "has its 44.1 kHz corner: y[0] = 1 - 0.5^(44100/8000)");
+# naad's bandpass for a noise-only voice passes the noise power in Hz it does at
+# 44.1 kHz: a snake's Q 2 at 2500 Hz is 0.583 at 8 kHz (Python), where 2.3.1's Q 2
+# passed half of it, its alpha sin(w0) / 2Q shrinking toward Nyquist.
+var v1_sn = crtract_new(species_params(PRANI_SP_SNAKE), pr_from(8000));
+assert_eq(f64_le(f64_abs(f64_sub(BiquadFilter_q(CreatureTract_noise_filter(v1_sn)), 0x3fe2a8dabdcaa6e3)),
+    0x3D719799812DEA11), 1, "a snake's noise band at 8 kHz has Q 0.583");
+var v1_sn44 = crtract_new(species_params(PRANI_SP_SNAKE), T_SR);
+assert_eq(BiquadFilter_q(CreatureTract_noise_filter(v1_sn44)), f64_from(2), "and Q 2 at 44.1 kHz");
+# The glottal source's noise carries the same density: svara is handed the breathiness
+# whose noise is scaled by sqrt(8000/44100), not the 44.1 kHz one.
+var v1_gl = crtract_glottal_new(T_220, pr_from(8000), wolf, PR_ONE);
+var v1_wb = SpeciesParams_breathiness(wolf);
+var v1_gp = pr_of64(SV_G_ROSENBERG_GAIN);
+var v1_q8 = crtract_noise_scale(pr_from(8000));
+assert_eq(pr_of64(SvGlottalSource_breathiness(v1_gl)), crtract_svara_breathiness(v1_wb, v1_gp, v1_q8),
+  "at 8 kHz svara's breathiness carries the noise scale");
+assert_neq(pr_of64(SvGlottalSource_breathiness(v1_gl)), crtract_svara_breathiness(v1_wb, v1_gp, PR_ONE),
+  "control: which is not the 44.1 kHz one");
+# The purr's closed phase at 8 kHz, as K2's twin, with the noise at its density.
+var v1_pa = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+var v1_pb = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
+CreatureTract_set_phase(v1_pa, T_0_5);
+var v1_po = crtract_synthesize_purr(v1_pa, 256, 0);
+var v1_tw = vec_new();
+var v1_q = pr_of64(0x3fdb423c5acf2baa);
+var v1_i = 0;
+while (v1_i < 256) {
+    var v1_x = pr_mul(pr_mul(prani_rng_next_f32(CreatureTract_rng(v1_pb)), pr_of64(0x3f947ae147ae147b)), v1_q);
+    vec_push(v1_tw, pr_of64(svara_tract_process_sample(CreatureTract_tract(v1_pb), pr_to64(v1_x))));
+    v1_i = v1_i + 1;
+}
+dcblocker_process_buffer(CreatureTract_dc_blocker(v1_pb), v1_tw);
+var v1_same = 1;
+v1_i = 0;
+while (v1_i < 256) {
+    if (t_ulps(vec_get(v1_po, v1_i), vec_get(v1_tw, v1_i)) > t_per(0, 1)) { v1_same = 0; }
+    v1_i = v1_i + 1;
+}
+assert_eq(v1_same, 1, "a purr's closed-phase noise at 8 kHz is the rng's draws x 0.02 x sqrt(8000/44100)");
+# The noise-only path, and the syringeal dual source's breath noise (a songbird at
+# breathiness 1, where its two tones are weighted 0), at 8 and 16 kHz, each against a
+# twin tract fed the rng's draws at sqrt(sr/44100) by hand.
+# v1_noise_ok(sp, sr) -- 1 iff 256 samples of sp's noise at sr match the hand-fed twin.
+fn v1_noise_ok(sp, sr) {
+    var p = species_params(sp);
+    if (sp == PRANI_SP_SONGBIRD) { SpeciesParams_set_breathiness(p, PR_ONE); }
+    var ta = crtract_new(p, pr_from(sr));
+    var tb = crtract_new(p, pr_from(sr));
+    var out = 0;
+    if (sp == PRANI_SP_SNAKE) { out = crtract_synthesize_noise(ta, 256); }
+    if (sp == PRANI_SP_SONGBIRD) {
+        out = crtract_synthesize_syringeal(ta, pr_from(3000), 256, crtract_options_default());
+    }
+    var q = pr_of64(f64_sqrt(f64_div(f64_from(sr), f64_from(44100))));
+    var tw = vec_new();
+    var i = 0;
+    while (i < 256) {
+        var d = prani_rng_next_f32(CreatureTract_rng(tb));
+        var y = 0;
+        if (sp == PRANI_SP_SNAKE) {
+            var xn = pr_to64(pr_mul(pr_mul(d, PR_TR_0_5), q));
+            y = pr_of64(filter_biquad_process_sample(CreatureTract_noise_filter(tb), xn));
+        }
+        if (sp == PRANI_SP_SONGBIRD) {
+            y = pr_of64(svara_tract_process_sample(CreatureTract_tract(tb), pr_to64(pr_mul(pr_mul(d, PR_ONE), q))));
+        }
+        vec_push(tw, y);
+        i = i + 1;
+    }
+    dcblocker_process_buffer(CreatureTract_dc_blocker(tb), tw);
+    var ok = 1;
+    i = 0;
+    while (i < 256) {
+        if (t_ulps(vec_get(out, i), vec_get(tw, i)) > t_per(0, 1)) { ok = 0; }
+        i = i + 1;
+    }
+    return ok;
+}
+assert_eq(v1_noise_ok(PRANI_SP_SNAKE, 8000), 1, "a snake's hiss at 8 kHz is its draws x 0.5 x sqrt(8000/44100)");
+assert_eq(v1_noise_ok(PRANI_SP_SONGBIRD, 16000), 1, "a songbird's breath at 16 kHz is its draws x sqrt(16000/44100)");
+
+# The render, in a group of its own so that it runs on 2.3.1 as it is: a wolf's voice
+# at its 400 Hz harmonic at 8, 16 and 96 kHz against 44.1 kHz, 0.5 s each, by a
+# Goertzel filter, held to 0.5 dB. Measured -0.34, -0.15 and +0.05 dB; 2.3.1 fails all
+# three. A bee's 200 Hz wing tone is the control: the vibratile path never reaches
+# svara's tract, so it held its level on 2.3.1 too (+0.10, +0.04, -0.01 dB now).
+test_group("2.3.2 V1 -- a tone through the tract keeps its level at any rate");
+# v1_amp(sp, sr, f) -- the amplitude at f Hz of 0.5 s of species sp's tract at sr.
+fn v1_amp(sp, sr, f) {
+    var t = crtract_new(species_params(sp), pr_from(sr));
+    var n = sr / 2;
+    var v = 0;
+    if (sp == PRANI_SP_BEE) { v = crtract_synthesize_vibratile(t, pr_from(f), n); }
+    if (sp == PRANI_SP_WOLF) { v = crtract_synthesize_laryngeal(t, pr_from(f), n, crtract_options_default()); }
+    return h2_amp(v, f, sr, n);
+}
+# v1_off(sp, sr, f) -- 1 iff the tone at sr is more than 0.5 dB from the same at 44.1 kHz.
+fn v1_off(sp, sr, f) {
+    var r = f64_div(v1_amp(sp, sr, f), v1_amp(sp, 44100, f));
+    if (f64_lt(r, 0x3FEE35BF27A298B9) == 1) { return 1; }   # 10^(-0.5/20)
+    if (f64_gt(r, 0x3FF0F2B408BCD790) == 1) { return 1; }   # 10^(0.5/20)
+    return 0;
+}
+assert_eq(v1_off(PRANI_SP_BEE, 8000, 200), 0, "control: a bee's 200 Hz tone at 8 kHz is its level at 44.1 kHz");
+assert_eq(v1_off(PRANI_SP_BEE, 16000, 200), 0, "control: and at 16 kHz");
+assert_eq(v1_off(PRANI_SP_BEE, 96000, 200), 0, "control: and at 96 kHz");
+assert_eq(v1_off(PRANI_SP_WOLF, 8000, 400), 0, "a wolf's 400 Hz harmonic at 8 kHz is its level at 44.1 kHz");
+assert_eq(v1_off(PRANI_SP_WOLF, 16000, 400), 0, "and at 16 kHz");
+assert_eq(v1_off(PRANI_SP_WOLF, 96000, 400), 0, "and at 96 kHz");
 
 var rc = assert_summary();
 syscall(60, rc);

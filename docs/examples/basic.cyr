@@ -127,7 +127,7 @@ fn main() {
 
     # ---- 3. synthesize ------------------------------------------------------
     # THE ONE CONVENTION TO LEARN. Every fallible function in prani returns
-    # either a handle (here: a vec of f64 samples, a large positive pointer) or
+    # either a handle (here: a vec of samples, a large positive pointer) or
     # a NEGATIVE PRANI_ERR_* code, in the same i64 slot. There is no out-param
     # and no exception. prani_is_err(x) is how you tell the two apart, and
     # prani_err_name(x) turns the code into a static string for a log line.
@@ -155,7 +155,8 @@ fn main() {
     println("");
 
     # ---- 4. what came back --------------------------------------------------
-    # A vec of f64 samples, nominally in [-1, 1]. The loops below are written
+    # A vec of samples, nominally in [-1, 1]: f64 reals, or f32 ones in a PRANI_F32
+    # build (ADR-0010), each in its own i64 slot. The loops below are written
     # out rather than folded into a helper so it is plain what a returned
     # buffer actually contains.
     println("4. What came back");
@@ -211,7 +212,8 @@ fn main() {
     ex_line_int("   non-finite      : ", nonfinite, " of the samples");
     ex_line_int("   outside [-1,1]  : ", outside, " of the samples");
     println("");
-    println("   Next step for a caller: hand these f64 samples to an audio device");
+    println("   Next step for a caller: hand these samples (f64, or f32 in a");
+    println("   PRANI_F32 build) to an audio device");
     println("   opened at the same rate you asked for (44100 Hz here). prani renders");
     println("   buffers; it never opens a device or writes a file.");
     println("");

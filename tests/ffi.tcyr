@@ -343,8 +343,9 @@ var fle_st = prani_ffi_stream_start(fle_v, 1, 4, pr_from(44100), PR_ONE);
 assert_neq(fle_st, 0, "control: a 44.1 kHz bark starts");
 assert_eq(prani_ffi_stream_last_error(fle_st), PRANI_ERR_NONE, "before a fill: no error");
 # A failure mid-stream: an f0 whose contour overflows (BARK opens at 1.2x), set
-# raw, the way a crafted state would carry it.
-SynthStream_set_f0(fle_st, pr_of64(0x7fee42d130773b76));
+# raw, the way a crafted state would carry it: 1.7e308 in f64, and 3.2e38 in f32,
+# where 1.7e308 is inf, not a finite f0 that overflows (audit C2, 2.3.2).
+SynthStream_set_f0(fle_st, t_per(pr_of64(0x7fee42d130773b76), 0x7F70BDC2));
 var fle_buf = vec_new();
 prani_vec_push_zeros(fle_buf, 64);
 assert_eq(prani_ffi_stream_fill(fle_st, fle_buf, 64), 0, "the fill writes nothing");

@@ -102,7 +102,10 @@ test_group("update -- exponential decay toward target (s=0.1)");
 var eu = emotion_new();
 emotion_update(eu, T_1_0, T_1_0);
 assert_eq(emotion_valence(eu), pr_of64(0x3feccccccccccccd), "update valence -> 0.9");
-assert_real(emotion_arousal(eu), pr_of64(0x3fed70a3d70a3d71), 1, "update arousal -> 0.92");
+# f32: 0 ulps since 2.3.2, when the f32 build began to blend in f64 (audit B5); 2.3.1
+# was 1 off. The 1- and 3-ulp budgets below are the f32 inputs' own error: 0.2f x 0.1f
+# and 1 - 0.95f are not 0.02 and 0.05, and the blend of them is correctly rounded.
+assert_real(emotion_arousal(eu), pr_of64(0x3fed70a3d70a3d71), 0, "update arousal -> 0.92");
 # targets clamped before blending: update toward (-2.0, -2.0) from new()
 var eu2 = emotion_new();
 emotion_update(eu2, T_NEG_2_0, T_NEG_2_0);
@@ -158,6 +161,57 @@ emotion_update(eu6, T_1_0, T_1_0);
 assert_real(emotion_valence(eu6), pr_of64(0x3fa99999999999a0), 3, "s clamped to 0.95 -> valence 0.05");
 assert_eq(emotion_arousal(eu6), pr_of64(0x3fe0cccccccccccd), "s clamped to 0.95 -> arousal 0.525");
 assert_eq(pr_lt(emotion_valence(eu6), emotion_valence(eu4)), 1, "s=0.95 moves less than s=0.75");
+
+# ================================================================
+# Audit B5, 2.3.2. Exact smoothing approaches its target and never passes it, so a
+# state moving inside a zone toward a target ON that zone's bound stays in the zone
+# at every step. 2.3.1's two roundings passed the target once the state had all but
+# reached it, and the zone flipped: over this grid (smoothing k/20, k = 1..19, 300
+# updates from (0.0, 0.5)) it misread 5 of the 76 paths, 1364 of their steps, in the
+# f64 build and 9, 2588 steps, in the f32 build. Each count below was 1364 / 2588.
+test_group("2.3.2 B5 -- smoothing toward a zone bound never crosses it");
+var bz_flip = 0;
+var bz_past = 0;
+var bz_far = 0;
+var bz_k = 1;
+while (bz_k < 20) {
+    var bz_s = pr_div(pr_from(bz_k), pr_from(20));
+    var bz_d = 0;
+    while (bz_d < 2) {
+        # d = 0 goes up to (0.2, 0.66), Neutral/Positive and Mid/High; d = 1 goes
+        # down to (-0.2, 0.33), Neutral/Negative and Low/Mid.
+        var bz_tv = PRE_0_2;
+        var bz_ta = PRE_0_66;
+        if (bz_d == 1) { bz_tv = PRE_NEG_0_2; bz_ta = PRE_0_33; }
+        var bz_e = emotion_with_smoothing(emotion_with_values(T_0_0, T_0_5), bz_s);
+        var bz_n = 0;
+        while (bz_n < 300) {
+            emotion_update(bz_e, bz_tv, bz_ta);
+            if (emotion_valence_zone(bz_e) != PRE_VZ_NEUTRAL) { bz_flip = bz_flip + 1; }
+            if (emotion_arousal_zone(bz_e) != PRE_AZ_MID) { bz_flip = bz_flip + 1; }
+            var bz_v = emotion_valence(bz_e);
+            var bz_a = emotion_arousal(bz_e);
+            if (bz_d == 0) {
+                if (pr_gt(bz_v, bz_tv) == 1) { bz_past = bz_past + 1; }
+                if (pr_gt(bz_a, bz_ta) == 1) { bz_past = bz_past + 1; }
+            }
+            if (bz_d == 1) {
+                if (pr_lt(bz_v, bz_tv) == 1) { bz_past = bz_past + 1; }
+                if (pr_lt(bz_a, bz_ta) == 1) { bz_past = bz_past + 1; }
+            }
+            bz_n = bz_n + 1;
+        }
+        # control: the state did travel, to within 1e-6 of each target
+        var bz_tol = pr_of64(0x3eb0c6f7a0b5ed8d);   # 1e-6
+        if (pr_gt(pr_abs(pr_sub(emotion_valence(bz_e), bz_tv)), bz_tol) == 1) { bz_far = bz_far + 1; }
+        if (pr_gt(pr_abs(pr_sub(emotion_arousal(bz_e), bz_ta)), bz_tol) == 1) { bz_far = bz_far + 1; }
+        bz_d = bz_d + 1;
+    }
+    bz_k = bz_k + 1;
+}
+assert_eq(bz_flip, 0, "no step of 76 paths reads a zone past its target's bound");
+assert_eq(bz_past, 0, "no step passes its target");
+assert_eq(bz_far, 0, "control: every path ends within 1e-6 of its target");
 
 # ================================================================
 test_group("valence_zone / arousal_zone boundaries");
@@ -606,6 +660,32 @@ assert_eq(emotion_state_in_range(un), 0, "state_in_range rejects the NaN state")
 assert_eq(emotion_state_in_range(emotion_with_values(T_NEG_1_0, T_0_0)), 1,
   "state_in_range accepts the -1.0/0.0 corner");
 assert_eq(emotion_state_in_range(emotion_with_values(T_1_0, T_1_0)), 1, "state_in_range accepts the 1.0/1.0 corner");
+
+# ================================================================
+# Audit K10, 2.3.2: a mutant moving a zone bound survived, since every test of the
+# bounds read the bound back from its own constant. Each is stated here as its
+# decimal, independently, and held on both sides by one real.
+test_group("2.3.2 K10 -- each zone bound is its decimal");
+var zb = emotion_new();
+var ZB_0_33 = pr_of64(0x3fd51eb851eb851f);
+var ZB_0_66 = pr_of64(0x3fe51eb851eb851f);
+var ZB_0_2 = pr_of64(0x3fc999999999999a);
+emotion_set(zb, T_0_0, ZB_0_33);
+assert_eq(emotion_arousal_zone(zb), PRE_AZ_MID, "arousal 0.33 is Mid");
+emotion_set(zb, T_0_0, t_next_down(ZB_0_33));
+assert_eq(emotion_arousal_zone(zb), PRE_AZ_LOW, "and the real below it Low");
+emotion_set(zb, T_0_0, ZB_0_66);
+assert_eq(emotion_arousal_zone(zb), PRE_AZ_MID, "arousal 0.66 is Mid");
+emotion_set(zb, T_0_0, t_next_up(ZB_0_66));
+assert_eq(emotion_arousal_zone(zb), PRE_AZ_HIGH, "and the real above it High");
+emotion_set(zb, ZB_0_2, T_0_5);
+assert_eq(emotion_valence_zone(zb), PRE_VZ_NEUTRAL, "valence 0.2 is Neutral");
+emotion_set(zb, t_next_up(ZB_0_2), T_0_5);
+assert_eq(emotion_valence_zone(zb), PRE_VZ_POSITIVE, "and the real above it Positive");
+emotion_set(zb, pr_neg(ZB_0_2), T_0_5);
+assert_eq(emotion_valence_zone(zb), PRE_VZ_NEUTRAL, "valence -0.2 is Neutral");
+emotion_set(zb, pr_neg(t_next_up(ZB_0_2)), T_0_5);
+assert_eq(emotion_valence_zone(zb), PRE_VZ_NEGATIVE, "and the real below it Negative");
 
 var rc = assert_summary();
 syscall(60, rc);

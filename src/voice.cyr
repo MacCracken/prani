@@ -156,6 +156,20 @@ var PR_V_0_05  = 0x3fa999999999999a;   # 0.05  jitter clamp ceiling / short-call
 var PR_V_0_02  = 0x3f947ae147ae147b;   # 0.02  synthesis block duration (20ms)
 #endif
 
+# The builders' ceilings for jitter and shimmer, 0.05 and 0.1. In f32 they are rounded
+# TOWARD ZERO, where PR_V_0_05 / PR_V_0_1 round to nearest and land above the decimal
+# (0.0500000007, 0.100000001): a host asking for the maximum then stored a value past
+# the f64 build's own bound, and the f64 build refused the f32 build's document
+# (2.3.2, audit B3). The decoders keep the nearest bounds, so each build still reads
+# the other's 0.05 and 0.1.
+#ifdef PRANI_F32
+var PR_V_JITTER_CEIL  = 0x3D4CCCCC;   # 0.049999997, the largest f32 not above 0.05
+var PR_V_SHIMMER_CEIL = 0x3DCCCCCC;   # 0.099999994, the largest f32 not above 0.1
+#else
+var PR_V_JITTER_CEIL  = 0x3fa999999999999a;   # 0.05
+var PR_V_SHIMMER_CEIL = 0x3fb999999999999a;   # 0.1
+#endif
+
 # ================================================================
 # CreatureVoice -- a creature's voice: species + individual variation.
 #   species      : PRANI_SP_* constant
@@ -314,7 +328,13 @@ fn crvoice_with_f0_offset(self, offset) {
     # and so does an infinity, which the clamp bounds to a legal endpoint.
     if (prani_is_nan(offset) == 1) { return PRANI_ERR_INVALID_SPECIES; }
     var params = CreatureVoice_params(self);
+    #ifdef PRANI_F32
+    # 2.3.2 (audit B3): the range in f64, narrowed toward zero, so a saturated offset
+    # is never past the f64 build's exact f0_max - f0_min for the same params.
+    var range = pr_of64_tz(f64_sub(pr_to64(SpeciesParams_f0_max(params)), pr_to64(SpeciesParams_f0_min(params))));
+    #else
     var range = pr_sub(SpeciesParams_f0_max(params), SpeciesParams_f0_min(params));
+    #endif
     CreatureVoice_set_f0_offset(self, pr_clamp(offset, pr_neg(range), range));
     return self;
 }
@@ -353,7 +373,7 @@ fn crvoice_with_jitter(self, jitter) {
     # as it was. A finite value, however far out, still clamps (the oracle's rails),
     # and so does an infinity, which the clamp bounds to a legal endpoint.
     if (prani_is_nan(jitter) == 1) { return PRANI_ERR_INVALID_SPECIES; }
-    SpeciesParams_set_jitter(CreatureVoice_params(self), pr_clamp(jitter, 0, PR_V_0_05));
+    SpeciesParams_set_jitter(CreatureVoice_params(self), pr_clamp(jitter, 0, PR_V_JITTER_CEIL));
     return self;
 }
 
@@ -365,7 +385,7 @@ fn crvoice_with_shimmer(self, shimmer) {
     # as it was. A finite value, however far out, still clamps (the oracle's rails),
     # and so does an infinity, which the clamp bounds to a legal endpoint.
     if (prani_is_nan(shimmer) == 1) { return PRANI_ERR_INVALID_SPECIES; }
-    SpeciesParams_set_shimmer(CreatureVoice_params(self), pr_clamp(shimmer, 0, PR_V_0_1));
+    SpeciesParams_set_shimmer(CreatureVoice_params(self), pr_clamp(shimmer, 0, PR_V_SHIMMER_CEIL));
     return self;
 }
 
@@ -816,6 +836,12 @@ fn crvoice_apply_nasal_antiformant(samples, sample_rate, nasal_fraction) {
     var take_scaled = scaled;
     if (pr_gt(take_scaled, pr_from(len))) { take_scaled = pr_from(len); }
     var take_len = pr_to(take_scaled);
+    # 2.3.2 (audit B2): the bound above compares reals, and in f32 pr_from(len) rounds
+    # to nearest, so past 2^24 it can round UP (16777219 -> 16777220) and the count
+    # come out one past the buffer: the f32 build exited the process with "vec: index
+    # out of bounds" for a fraction of 1.0 on such a buffer. The count is bounded in
+    # integers, after the cast, which is exact in either format.
+    if (take_len > len) { take_len = len; }
 
     var notch_freq = PR_V_250_0;
     var notch_bw = PR_V_80_0;
@@ -874,6 +900,22 @@ fn crvoice_vocalization_spectral_offset(voc) {
 
 # ---- apply_am_pattern -------------------------------------------------------
 
+# crvoice_tone(f, i, sample_rate) -- sin(2*pi*f*i / sample_rate): sample i of a tone
+# at f Hz from time 0. The one time base of the trill's AM and of the subharmonic
+# and biphonation layers, which through 2.3.1 each carried their own copy of its
+# format arms (audit C1, 2.3.2). The f32 build computes the time and the phase in
+# f64 and rounds once (ADR-0010, TIME AND PHASE STAY f64): in f32 the index is not
+# exact past 2^24, and one ulp of a phase of 1e4 rad is 1e-3 rad. The f64 arm is the
+# expression all three wrote, so the f64 build's bits are unchanged.
+#must_use
+fn crvoice_tone(f, i, sample_rate) {
+    #ifdef PRANI_F32
+    return pr_sinw(f64_mul(F64_TAU, pr_to64(f)), pr_time(i, pr_to64(sample_rate)));
+    #else
+    return pr_sin(pr_mul(pr_mul(PR_TAU, f), pr_div(pr_from(i), sample_rate)));
+    #endif
+}
+
 # apply_am_pattern(samples, voc, sample_rate) -- vocalization-specific AM.
 # Bird trills get 20 Hz sinusoidal AM modulating between 0.3 and 1.0
 # (0.65 + 0.35*sin). No-op for other vocalizations. Mutates in place.
@@ -887,20 +929,9 @@ fn crvoice_apply_am_pattern(samples, voc, sample_rate) {
     if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
     var am_rate = PR_V_20_0;
     var n = vec_len(samples);
-    #ifdef PRANI_F32
-    # ADR-0010: the time and the phase in f64 (TIME AND PHASE STAY f64, real.cyr).
-    var sr64 = pr_to64(sample_rate);
-    var wam = f64_mul(F64_TAU, pr_to64(am_rate));
-    #endif
     var i = 0;
     while (i < n) {
-        #ifdef PRANI_F32
-        var modulator = pr_add(PR_V_0_65, pr_mul(PR_V_0_35, pr_sinw(wam, pr_time(i, sr64))));
-        #else
-        var t = pr_div(pr_from(i), sample_rate);
-        var modulator = pr_add(PR_V_0_65,
-          pr_mul(PR_V_0_35, pr_sin(pr_mul(pr_mul(PR_TAU, am_rate), t))));
-        #endif
+        var modulator = pr_add(PR_V_0_65, pr_mul(PR_V_0_35, crvoice_tone(am_rate, i, sample_rate)));
         vec_set(samples, i, pr_mul(vec_get(samples, i), modulator));
         i = i + 1;
     }
@@ -1109,7 +1140,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
     # num_samples = (effective_duration * sample_rate) as usize -- ranged BEFORE
     # the cast, because the result is one vec. Past VEC_CAP_MAX the render ends in
     # a process exit, minutes in. A finite duration can also overflow the product
-    # (1e300 s at 44100 Hz), and since
+    # (1e305 s at 44100 Hz; 1e35 s in the f32 build), and since
     # cyrius 6.6.8 f64_to turns that into i64::MAX, which a floor check walks past.
     var raw_samples = pr_mul(effective_duration, sample_rate);
     if (prani_buffer_count_ok(raw_samples) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -1140,6 +1171,26 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
     var tract = crtract_new(effort_params, sample_rate);
     if (prani_is_err(tract) == 1) { return tract; }
+
+    # 2.3.2 (audit D1, ADR-0011): the layers below add sources of their own, each an
+    # independent pitch the tract's check never sees: the canid biphonation at 1.78 x
+    # f0 and the subharmonic at 0.5 x f0, both from the unclamped f0 and without the
+    # contour. Through 2.3.1 the biphonation aliased and returned success: a dog at
+    # 8 kHz with its f0 raised to 2000 Hz put its 4984 Hz voice at 3016 Hz, and a
+    # default wolf howling at 1201 Hz put its 712 Hz voice at 489 Hz. Checked after
+    # crtract_new, so a rate svara refuses is still reported as svara's. A call of no
+    # samples renders neither source and is not refused, as the tract's own checks,
+    # which run per block, do not refuse it either.
+    if (num_samples > 0) {
+        if (crvoice_species_is_canid(species) == 1) {
+            if (crvoice_voc_is_howl_or_whine(voc) == 1) {
+                if (crtract_pitch_ok(pr_mul(f0, PR_V_1_78), sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+            }
+        }
+        if (crvoice_species_has_subharmonics(species) == 1) {
+            if (crtract_pitch_ok(pr_mul(f0, PR_V_0_5), sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+        }
+    }
 
     # formant transition contour (0 == None)
     var formant_contour = crvoice_formant_transition_contour(voc, species);
@@ -1230,7 +1281,11 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
             vec_set(tb, 0, FormantBlend_b0(fb));
             vec_set(tb, 1, FormantBlend_b1(fb));
             vec_set(tb, 2, FormantBlend_b2(fb));
-            crtract_set_formant_blend(tract, tf, tb, FormantBlend_blend(fb));
+            # The Rust discarded this return (`let _ =`), so a refused block kept the
+            # last block's formants as success. 2.3.2 returns it (audit D3); the
+            # formants are placed in band first, so only a non-finite one is refused.
+            var fb_rc = crtract_set_formant_blend(tract, tf, tb, FormantBlend_blend(fb));
+            if (prani_is_err(fb_rc) == 1) { return fb_rc; }
         }
 
         # syringeal source-filter coupling: nudge F1 toward block_f0 (40%).
@@ -1239,7 +1294,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
             vec_set(ctf, 0, coupled_f1);
             vec_set(ctf, 1, sf1);
             vec_set(ctf, 2, sf2);
-            crtract_set_formant_blend(tract, ctf, ctb, PR_ONE);
+            var cf_rc = crtract_set_formant_blend(tract, ctf, ctb, PR_ONE);
+            if (prani_is_err(cf_rc) == 1) { return cf_rc; }   # audit D3, as above
         }
 
         # non-stationary perturbation: jitter/shimmer boost at boundaries + urgency
@@ -1277,26 +1333,18 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
 
     # ---- post-processing effect chain (order matters) -----------------------
     var total = vec_len(samples);
+    # 2.3.2 (ADR-0014): the layers' white noise at its 44.1 kHz power density.
+    var noise_q = crtract_noise_scale(sample_rate);
 
     # 1. subharmonics + deterministic chaos (Lion / Dragon / Crocodilian).
     if (crvoice_species_has_subharmonics(species) == 1) {
         var sub_f0 = pr_mul(f0, PR_V_0_5);
         var chaos_rng = prani_rng_new(species_params_resonance_seed(params) + 0xCA05);
         if (prani_is_err(chaos_rng) == 1) { return chaos_rng; }   # PRANI_ERR_ALLOC (2.2.0)
-        #ifdef PRANI_F32
-        # ADR-0010: the time and the phase in f64 (TIME AND PHASE STAY f64, real.cyr).
-        var sr64 = pr_to64(sample_rate);
-        var wsub = f64_mul(F64_TAU, pr_to64(sub_f0));
-        #endif
         var i = 0;
         while (i < total) {
             var t_norm = pr_div(pr_from(i), pr_from(num_samples_max));
-            #ifdef PRANI_F32
-            var sub_sin = pr_sinw(wsub, pr_time(i, sr64));
-            #else
-            var t_sec = pr_div(pr_from(i), sample_rate);
-            var sub_sin = pr_sin(pr_mul(pr_mul(PR_TAU, sub_f0), t_sec));
-            #endif
+            var sub_sin = crvoice_tone(sub_f0, i, sample_rate);
             # subharmonic envelope: peaks 0.3-0.7 of the call
             var sub_env = PR_ONE;
             if (pr_lt(t_norm, PR_V_0_15)) {
@@ -1309,7 +1357,8 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
             # deterministic chaos during peak (sub_env > 0.6)
             if (pr_gt(sub_env, PR_V_0_6)) {
                 var chaos_intensity = pr_div(pr_sub(sub_env, PR_V_0_6), PR_V_0_4);
-                var chaos_noise = pr_mul(pr_mul(prani_rng_next_f32(chaos_rng), PR_V_0_15), chaos_intensity);
+                var chaos_draw = pr_mul(prani_rng_next_f32(chaos_rng), noise_q);   # ADR-0014
+                var chaos_noise = pr_mul(pr_mul(chaos_draw, PR_V_0_15), chaos_intensity);
                 s = pr_add(s, chaos_noise);
             }
             vec_set(samples, i, s);
@@ -1331,7 +1380,7 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
             } elif (pr_gt(tf2, PR_V_0_8)) {
                 fire_env = pr_div(pr_sub(PR_ONE, tf2), PR_V_0_2);
             }
-            var noise = prani_rng_next_f32(fire_rng);
+            var noise = pr_mul(prani_rng_next_f32(fire_rng), noise_q);   # ADR-0014
             vec_set(samples, i2,
               pr_add(vec_get(samples, i2), pr_mul(pr_mul(noise, fire_amp), fire_env)));
             i2 = i2 + 1;
@@ -1343,19 +1392,9 @@ fn crvoice_vocalize_with_intent(self, voc, intent, sample_rate, duration) {
         if (crvoice_voc_is_howl_or_whine(voc) == 1) {
             var bipho_f0 = pr_mul(f0, PR_V_1_78);   # ~minor seventh
             var bipho_amp = PR_V_0_15;
-            #ifdef PRANI_F32
-            # ADR-0010: the time and the phase in f64.
-            var sr64b = pr_to64(sample_rate);
-            var wbi = f64_mul(F64_TAU, pr_to64(bipho_f0));
-            #endif
             var i3 = 0;
             while (i3 < total) {
-                #ifdef PRANI_F32
-                var bipho_sin = pr_sinw(wbi, pr_time(i3, sr64b));
-                #else
-                var t_sec3 = pr_div(pr_from(i3), sample_rate);
-                var bipho_sin = pr_sin(pr_mul(pr_mul(PR_TAU, bipho_f0), t_sec3));
-                #endif
+                var bipho_sin = crvoice_tone(bipho_f0, i3, sample_rate);
                 var t_norm3 = pr_div(pr_from(i3), pr_from(num_samples_max));
                 # biphonation appears in the middle: t_norm in [0.3, 0.8]
                 var bipho_env = 0;

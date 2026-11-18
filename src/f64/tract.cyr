@@ -170,26 +170,74 @@ struct CreatureTract {
     clock;
 }
 
-# crtract_in_band(est, below, nyquist) -- one of the two formants prani estimates
-# above the species' three (1.3x and 1.5x F3), kept inside the band. svara refuses a
-# five-formant target if any formant is not below Nyquist, and it used to refuse
-# the species' REAL F1-F3 with it: a dog, cat, crow or raptor at 8 kHz, a songbird or
-# raptor at 22.05 kHz, rendered through svara's default vowel (audit B2, 2.2.1,
-# ADR-0009). An estimate at or past Nyquist is placed halfway between the formant
-# below it and Nyquist, so F3 < F4 < F5 < Nyquist holds and nothing is invented but
-# the midpoint. An estimate already in band is returned as it is, so every render
-# whose estimates were in band (every species at 44.1 kHz) is unchanged.
+# crtract_in_band(est, below, nyquist) -- a formant kept inside the band. svara
+# refuses a five-formant target if any formant is not below Nyquist, and the tract
+# then keeps svara's default vowel, so one formant out of band cost a voice all five.
+# 2.2.1 placed the two prani estimates above the species' three, F4 and F5 at 1.3x
+# and 1.5x F3 (audit B2, ADR-0009); 2.3.2 places the species' own F1-F3 the same way
+# (audit D3, ADR-0013). A finite formant at or past Nyquist is placed halfway between
+# the formant below it (0 for F1) and Nyquist, so the order below Nyquist holds, and
+# crtract_skirt_amp gives it the level its resonance has there. A formant in band is returned as it is, so
+# every render whose formants were in band (every species at 44.1 kHz) is unchanged.
+# A NaN or infinite one is returned as it is too, for svara to refuse: it is not a
+# formant past Nyquist, and placing it would turn it into one nobody asked for.
 #must_use
 fn crtract_in_band(est, below, nyquist) {
     if (f64_lt(est, nyquist)) { return est; }
+    if (prani_is_finite(est) == 0) { return est; }
     return f64_mul(f64_add(below, nyquist), PR_HALF);
 }
 
+# crtract_skirt64(f, b, at) -- the gain at `at` Hz of a resonance at f Hz with
+# bandwidth b, relative to its peak: b*at / sqrt((f^2 - at^2)^2 + (b*at)^2), the
+# analog response whose lower skirt a resonance past Nyquist leaves in band. f64 in
+# both builds, as svara's amplitudes are (ADR-0010).
+#must_use
+fn crtract_skirt64(f, b, at) {
+    var d = f64_sub(f64_mul(f, f), f64_mul(at, at));        # f64-ok: svara's units
+    var ba = f64_mul(b, at);                                 # f64-ok: svara's units
+    return f64_div(ba, f64_sqrt(f64_add(f64_mul(d, d), f64_mul(ba, ba))));   # f64-ok: svara's units
+}
+
+# crtract_skirt_amp(tract, i, est, bw, nyquist) -- if formant i, `est` Hz wide `bw`,
+# was placed in band (a finite est at or past Nyquist, crtract_in_band), scale svara's
+# amplitude for its slot by the resonance's own gain where it was placed, and return
+# 1; otherwise leave the slot alone and return 0. A placed formant at full amplitude
+# piled up to four resonances below Nyquist that the voice does not have there: a
+# crow's bark at 8 kHz peaked at 1.81 (ADR-0013). The caller rebuilds the bank.
+fn crtract_skirt_amp(tract, i, est, bw, nyquist) {
+    if (f64_lt(est, nyquist)) { return 0; }
+    if (prani_is_finite(est) == 0) { return 0; }
+    var fm = vec_get(SvVocalTract_formants(tract), i);
+    var g = crtract_skirt64((est), (bw), SvFormant_frequency(fm));
+    SvFormant_set_amplitude(fm, f64_mul(SvFormant_amplitude(fm), g));   # f64-ok: svara's units
+    return 1;
+}
+
+# crtract_place_amps(tract, f0, f1, f2, b0, b1, b2, nyquist) -- crtract_skirt_amp for
+# the five formants a target was built from (F4/F5 and B4/B5 estimated as
+# crtract_new does), then one rebuild of svara's bank from its own record if any was
+# placed. svara copies a record's values and does not check an amplitude, so this
+# neither allocates nor can fail on a target svara just accepted.
+fn crtract_place_amps(tract, f0, f1, f2, b0, b1, b2, nyquist) {
+    var n = crtract_skirt_amp(tract, 0, f0, b0, nyquist);
+    n = n + crtract_skirt_amp(tract, 1, f1, b1, nyquist);
+    n = n + crtract_skirt_amp(tract, 2, f2, b2, nyquist);
+    n = n + crtract_skirt_amp(tract, 3, f64_mul(f2, PR_TR_1_3), f64_mul(b2, PR_TR_1_2), nyquist);
+    n = n + crtract_skirt_amp(tract, 4, f64_mul(f2, PR_TR_1_5), f64_mul(b2, PR_TR_1_4), nyquist);
+    if (n == 0) { return SVARA_ERR_NONE; }
+    return svara_tract_set_formants(tract, SvVocalTract_formants(tract));
+}
+
 # new(params, sample_rate) -- CreatureTract::new. Configures the svara tract
-# with species-specific formants (F4/F5 estimated at 1.3x/1.5x F3), pre-builds
-# a naad bandpass for NoiseOnly species, seeds the rng from the species'
-# resonance seed. Rust only WARNS if set_formants_from_target errors, then
-# continues -- so that return is ignored here too.
+# with species-specific formants (F4/F5 estimated at 1.3x/1.5x F3), each kept in
+# band (crtract_in_band), pre-builds a naad bandpass for NoiseOnly species, seeds
+# the rng from the species' resonance seed. The Rust only WARNED if
+# set_formants_from_target erred, and rendered on through svara's default vowel.
+# Since 2.3.2 (audit D3) the formants are placed in band first, so svara can refuse
+# only a formant or bandwidth that is not a positive finite number, which a params
+# record holds only through a raw setter (species_params_in_range); that refusal is
+# returned, as any tract error is, rather than rendered through another voice.
 #
 # Returns a CreatureTract ptr on success, or a NEGATIVE PRANI_ERR_* on failure.
 #
@@ -231,22 +279,34 @@ fn crtract_new(params, sample_rate) {
     # svara allocates and never checks: the setter copies its values out.
     var vt[80];
     var ny = f64_mul(sample_rate, PR_HALF);
-    var f3e = crtract_in_band(f64_mul(f2, PR_TR_1_3), f2, ny);   # audit B2 (ADR-0009)
+    var f0p = crtract_in_band(f0, 0, ny);     # audit D3, 2.3.2
+    var f1p = crtract_in_band(f1, f0p, ny);
+    var f2p = crtract_in_band(f2, f1p, ny);
+    var f3e = crtract_in_band(f64_mul(f2, PR_TR_1_3), f2p, ny);   # audit B2 (ADR-0009)
     var f4e = crtract_in_band(f64_mul(f2, PR_TR_1_5), f3e, ny);
+    var bw0 = crtract_bw64_at_rate(b0, f0p, sample_rate);   # ADR-0014
+    var bw1 = crtract_bw64_at_rate(b1, f1p, sample_rate);
+    var bw2 = crtract_bw64_at_rate(b2, f2p, sample_rate);
+    var bw3 = crtract_bw64_at_rate(f64_mul(b2, PR_TR_1_2), f3e, sample_rate);
+    var bw4 = crtract_bw64_at_rate(f64_mul(b2, PR_TR_1_4), f4e, sample_rate);
     var target = svara_vowel_target_set(&vt,
-      (f0), (f1), (f2), (f3e), (f4e),
-      (b0), (b1), (b2), (f64_mul(b2, PR_TR_1_2)), (f64_mul(b2, PR_TR_1_4)));
-    # Rust: `if let Err(e) = ... { warn!(...) }` then continue. Ports the
-    # tracing::warn! to sakshi (prani_log_warn), preserving warn-then-continue.
-    var _fmt_rc = svara_tract_set_formants_from_target(tract, target);
-    if (prani_is_err(_fmt_rc) == 1) {
-        prani_log_warn("prani: species formants out of range, using defaults");
+      (f0p), (f1p), (f2p), (f3e), (f4e), bw0, bw1, bw2, bw3, bw4);
+    # The Rust's `if let Err(e) = ... { warn!(...) }` then continue rendered svara's
+    # default vowel as this species. 2.3.2 returns the refusal (audit D3).
+    var fmt_rc = svara_tract_set_formants_from_target(tract, target);
+    if (svara_is_err(fmt_rc) == 1) {
+        prani_log_error("prani: svara refused the species formants");
+        return prani_from_svara(fmt_rc);
     }
+    var amp_rc = crtract_place_amps(tract, f0, f1, f2, b0, b1, b2, ny);   # ADR-0013
+    if (svara_is_err(amp_rc) == 1) { return prani_from_svara(amp_rc); }
+    crtract_calibrate_rate(tract, sample_rate);   # ADR-0014
 
     # naad-backend: pre-build a bandpass for NoiseOnly (snakes). Error -> None(0).
     var noise_filter = 0;
     if (SpeciesParams_apparatus(params) == PRANI_APP_NOISE_ONLY) {
-        var nf = filter_biquad_new(NAAD_FILTER_BANDPASS, (sample_rate), (f0), f64_from(2));
+        var nf_q = crtract_q64_at_rate(f64_from(2), f0, sample_rate);   # f64-ok: naad's Q 2 (ADR-0014)
+        var nf = filter_biquad_new(NAAD_FILTER_BANDPASS, (sample_rate), (f0), nf_q);
         # 2.2.0: since naad 2.3.4 a refused allocation inside the constructor comes
         # back as NAAD_ERR_ALLOCATION (naad ADR-0010). That is not the oracle's
         # "this species cannot have a filter" (which surfaces, as before, when the
@@ -261,6 +321,7 @@ fn crtract_new(params, sample_rate) {
     if (prani_is_err(rng) == 1) { return rng; }
     var dcb = dcblocker_new();
     if (prani_is_err(dcb) == 1) { return dcb; }
+    DcBlocker_set_r(dcb, crtract_pole_at_rate(DcBlocker_r(dcb), sample_rate));   # ADR-0014
     CreatureTract_set_tract(self, tract);
     CreatureTract_set_params(self, params);
     CreatureTract_set_rng(self, rng);
@@ -466,6 +527,118 @@ fn crtract_from_json_str(json) {
 #    0.810.
 var PR_TR_EXC_GAIN = 0x4002b14249472616;   # 2.336552212222851  (+7.37 dB), step 2 above
 
+# THE REFERENCE RATE (ADR-0014, audit V1, 2.3.2). prani's levels are calibrated at
+# 44.1 kHz (ADR-0007, above), and a render at another rate is to be that render, cut
+# to its band. Four stages had a response fixed per sample, not per second, so a
+# render's level moved with the rate: +18.8 dB at 8 kHz and -8.7 dB at 96 kHz, at the
+# median of 127 renders (measured on 2.3.2, before this). Each is now held to its
+# 44.1 kHz response:
+#   - svara's formant bandwidths, which are about b x sin(2 pi f / sr) wide, not b, so
+#     a formant was five times wider at 8 kHz than at 44.1 kHz, and the Q of naad's
+#     bandpass for a noise-only voice (crtract_bw64_at_rate, crtract_q64_at_rate);
+#   - svara's lip radiation, y = x - c*x[n-1] with c = 0.97 at every rate. Its zero
+#     keeps its place in Hz, and its gain is restored (crtract_calibrate_rate);
+#   - a one-pole's coefficient, the spectral tilt's and the DC blocker's:
+#     p^(44100/sr), the same corner in Hz (crtract_pole_at_rate);
+#   - white noise, a fixed variance per sample and so a power density that falls as
+#     the rate rises: each source is scaled by sqrt(sr/44100) (crtract_noise_scale).
+# At exactly 44.1 kHz each is what it was, so every render there is unchanged.
+var PR_TR_REF_RATE = 0x40e5888000000000;   # 44100.0 Hz
+
+# crtract_pole_at_rate(p, sr) -- a one-pole coefficient p calibrated at 44.1 kHz,
+# moved to rate sr with its corner in Hz: p^(44100/sr). p itself at exactly
+# 44.1 kHz. INTERNAL: 0 < p < 1, and sr positive and finite.
+#must_use
+fn crtract_pole_at_rate(p, sr) {
+    if (f64_eq(sr, PR_TR_REF_RATE)) { return p; }
+    return f64_pow(p, f64_div(PR_TR_REF_RATE, sr));
+}
+
+# crtract_noise_scale(sr) -- sqrt(sr / 44100), the amplitude at which white noise at
+# rate sr has the power density it has at 44.1 kHz. Exactly 1 there.
+#must_use
+fn crtract_noise_scale(sr) {
+    return f64_sqrt(f64_div(sr, PR_TR_REF_RATE));
+}
+
+# crtract_alpha64_at_rate(a, sr) -- a bandpass's alpha at 44.1 kHz, as the alpha at
+# rate sr that passes the same noise power in Hz (ADR-0014). For the constant-peak
+# bandpass svara's formants and naad's filters both are, that noise bandwidth is
+# alpha / (1 + alpha) x sr / 2 at any centre frequency (measured 2.3.2). A resonance
+# wider than the band at sr (m past 0.999) passes what the band holds. f64, in both
+# builds. INTERNAL: a > 0, sr positive and finite.
+#must_use
+fn crtract_alpha64_at_rate(a, sr) {
+    var m = f64_div(f64_mul(f64_div(a, f64_add(F64_ONE, a)), (PR_TR_REF_RATE)), (sr));   # f64-ok: units
+    var top = 0x3FEFF7CED916872B;   # f64-ok: 0.999
+    if (f64_gt(m, top) == 1) { m = top; }   # f64-ok: svara's units
+    return f64_div(m, f64_sub(F64_ONE, m));   # f64-ok: svara's units
+}
+
+# crtract_bw64_at_rate(b, f, sr) -- the bandwidth, f64 as svara takes it in both builds,
+# to hand svara at rate sr for a formant at f Hz specified b Hz wide, so that it passes
+# the noise power it passes at 44.1 kHz (ADR-0014). svara's resonator, alpha = sin(w0) x
+# sinh(pi b / sr), is about b x sin(2 pi f / sr) wide, not b: a wolf's 100 Hz F1 at
+# 420 Hz is 6.0 Hz wide at 44.1 kHz, 32 at 8 kHz and 2.7 at 96 kHz (measured 2.3.2), and
+# the 8 kHz one passed 13 dB more of the voice. So alpha is carried from 44.1 kHz
+# (crtract_alpha64_at_rate) and b solved from it: (sr / pi) asinh(alpha / sin(w0)),
+# which stays below svara's own bandwidth bound however close to Nyquist f is. b itself
+# at exactly 44.1 kHz, and for a formant at or past 22.05 kHz, which the reference rate
+# has no band for.
+#must_use
+fn crtract_bw64_at_rate(b, f, sr) {
+    var b64 = (b);
+    if (f64_eq(sr, PR_TR_REF_RATE)) { return b64; }
+    if (f64_ge(f, f64_mul(PR_TR_REF_RATE, PR_HALF))) { return b64; }
+    var ref = (PR_TR_REF_RATE);
+    var r = (sr);
+    var wr = f64_div(f64_mul(F64_TAU, (f)), ref);                            # f64-ok: svara's units
+    var ws = f64_div(f64_mul(F64_TAU, (f)), r);                              # f64-ok: svara's units
+    var a_ref = f64_mul(f64_sin(wr), f64_sinh(f64_div(f64_mul(F64_PI, b64), ref)));   # f64-ok: svara's units
+    var x = f64_div(crtract_alpha64_at_rate(a_ref, sr), f64_sin(ws));               # f64-ok: svara's units
+    var ash = f64_ln(f64_add(x, f64_sqrt(f64_add(f64_mul(x, x), F64_ONE))));        # f64-ok: asinh(x)
+    var bw = f64_mul(f64_div(r, F64_PI), ash);                                      # f64-ok: svara's units
+    if (f64_gt(bw, 0) == 0) { return b64; }   # f64-ok: a non-finite or empty result is svara's to refuse as b
+    return bw;
+}
+
+# crtract_q64_at_rate(q, f, sr) -- naad's bandpass Q at rate sr for a filter at f Hz
+# with Q q at 44.1 kHz, passing the same noise power in Hz (crtract_alpha64_at_rate):
+# naad's alpha is sin(w0) / (2Q), which near Nyquist narrowed the snake's 2500 Hz band
+# at 8 kHz by half. q itself at exactly 44.1 kHz and at or past 22.05 kHz. f64.
+#must_use
+fn crtract_q64_at_rate(q, f, sr) {
+    if (f64_eq(sr, PR_TR_REF_RATE)) { return q; }
+    if (f64_ge(f, f64_mul(PR_TR_REF_RATE, PR_HALF))) { return q; }
+    var wr = f64_div(f64_mul(F64_TAU, (f)), (PR_TR_REF_RATE));        # f64-ok: naad's units
+    var ws = f64_div(f64_mul(F64_TAU, (f)), (sr));                    # f64-ok: naad's units
+    var a = crtract_alpha64_at_rate(f64_div(f64_sin(wr), f64_mul(F64_TWO, q)), sr);   # f64-ok: naad's units
+    return f64_div(f64_sin(ws), f64_mul(F64_TWO, a));                               # f64-ok: naad's units
+}
+
+# crtract_calibrate_rate(tract, sr) -- hold svara's lip radiation to its 44.1 kHz
+# response at rate sr (above). 1 - c z^-1 with c = e^(-a / sr) is about (s + a) / sr,
+# so the zero keeps its place in Hz at c = c44^(44100 / sr), and the gain sr / 44100
+# goes in svara's output gain and in the interaction strength, whose feedback taps the
+# radiated signal ahead of that gain. Within 1.2 dB RMS of the 44.1 kHz filter over
+# the band the rates share, at every rate from 8 to 192 kHz. A two-point fit to that
+# filter halves this, and makes whole renders worse: over 861 of them its mean level
+# error was 0.38 dB, this rule's 0.25 (2.3.2). Untouched at exactly 44.1 kHz. svara's
+# values are f64 in both builds. svara clamps the interaction strength at 0.3, which
+# its default 0.05 reaches only past 264.6 kHz, where the feedback is then weaker.
+fn crtract_calibrate_rate(tract, sr) {
+    if (f64_eq(sr, PR_TR_REF_RATE)) { return 0; }
+    var g = f64_div((sr), (PR_TR_REF_RATE));                          # f64-ok: svara's units
+    var c = f64_pow(SvVocalTract_lip_radiation(tract), f64_div(F64_ONE, g));          # f64-ok: svara's units
+    svara_tract_set_lip_radiation(tract, c);
+    var st = f64_mul(SvVocalTract_interaction_strength(tract), g);                  # f64-ok: svara's units
+    svara_tract_set_interaction_strength(tract, st);
+    var gain = SvVocalTract_gain(tract);
+    SvSmoothedParam_set_current(gain, g);
+    SvSmoothedParam_set_target(gain, g);
+    return 0;
+}
+
 # crtract_pulse_peak(glottal) -- the peak of the voiced pulse svara will emit:
 # SV_G_ROSENBERG_GAIN for the Rosenberg model, which is the only one prani builds
 # (svara_glottal_new's default; prani never calls set_model). Read from svara, not
@@ -476,21 +649,22 @@ fn crtract_pulse_peak(glottal) {
     return PR_ONE;
 }
 
-# crtract_svara_breathiness(b, g) -- the breathiness to hand svara so that its
-# noise-to-pulse balance at pulse peak g is the oracle's at breathiness b:
-# g*b / (1 - b + g*b). b is a species breathiness in [0, 1] (clamped upstream),
-# and g >= 1, so the denominator is >= 1 and the result stays in [0, 1].
-fn crtract_svara_breathiness(b, g) {
-    var gb = f64_mul(g, b);
+# crtract_svara_breathiness(b, g, q) -- the breathiness to hand svara so that its
+# noise-to-pulse balance at pulse peak g is the oracle's at breathiness b, with the
+# noise scaled by q, crtract_noise_scale of the rate (ADR-0014):
+# q*g*b / (1 - b + q*g*b). b is a species breathiness in [0, 1] (clamped upstream),
+# and g >= 1, so the result stays in [0, 1]. At q = 1 (44.1 kHz) it is 2.3.1's.
+fn crtract_svara_breathiness(b, g, q) {
+    var gb = f64_mul(f64_mul(g, b), q);
     return f64_div(gb, f64_add(f64_sub(PR_ONE, b), gb));
 }
 
-# crtract_excitation_scale(b, g) -- the factor that takes svara's sample, built
-# with crtract_svara_breathiness(b, g), into prani's gain stage:
-# (1 - b + g*b) / g for the oracle's excitation (step 1), times PR_TR_EXC_GAIN
-# for the oracle's loudness (step 2).
-fn crtract_excitation_scale(b, g) {
-    return f64_mul(f64_div(f64_add(f64_sub(PR_ONE, b), f64_mul(g, b)), g), PR_TR_EXC_GAIN);
+# crtract_excitation_scale(b, g, q) -- the factor that takes svara's sample, built
+# with crtract_svara_breathiness(b, g, q), into prani's gain stage:
+# (1 - b + q*g*b) / g for the oracle's excitation (step 1) with its noise scaled by q,
+# times PR_TR_EXC_GAIN for the oracle's loudness (step 2).
+fn crtract_excitation_scale(b, g, q) {
+    return f64_mul(f64_div(f64_add(f64_sub(PR_ONE, b), f64_mul(f64_mul(g, b), q)), g), PR_TR_EXC_GAIN);
 }
 
 # crtract_glottal_new(clamped_f0, sr, params, pert) -- the glottal source both
@@ -503,7 +677,8 @@ fn crtract_glottal_new(clamped_f0, sr, params, pert) {
     var glottal = svara_glottal_new((clamped_f0), (sr));
     if (svara_is_err(glottal) == 1) { return glottal; }
     var b = f64_clamp(SpeciesParams_breathiness(params), 0, PR_ONE);
-    svara_glottal_set_breathiness(glottal, (crtract_svara_breathiness(b, crtract_pulse_peak(glottal))));
+    var q = crtract_noise_scale(sr);   # ADR-0014
+    svara_glottal_set_breathiness(glottal, (crtract_svara_breathiness(b, crtract_pulse_peak(glottal), q)));
     var ps = f64_max(pert, 0);
     svara_glottal_set_jitter(glottal, (f64_min(f64_mul(SpeciesParams_jitter(params), ps), PR_TR_0_05)));
     svara_glottal_set_shimmer(glottal, (f64_min(f64_mul(SpeciesParams_shimmer(params), ps), PR_TR_0_1)));
@@ -514,8 +689,9 @@ fn crtract_glottal_new(clamped_f0, sr, params, pert) {
 # |f0| below Nyquist, sr / 2 (2.3.1, ADR-0011). At exactly sr / 2 a sine samples as
 # sin(pi * n), zero at every sample, and above it a tone aliases to another pitch.
 # Either way the render is not the pitch asked for, and through 2.3.0 it came back
-# as success: a half-size cricket at 8 kHz rendered 0.1 s of numerical silence
-# (RMS 3.3e-14). Checked once per call, after each path's clamp, on the pitch the
+# as success: a cricket at exactly 4 kHz through an 8 kHz tract rendered silence, and
+# a half-size one (8 kHz, the rate itself, where sin(2 pi n) is zero) rendered 0.1 s
+# of RMS 3.3e-14. Checked once per call, after each path's clamp, on the pitch the
 # path actually renders.
 #must_use
 fn crtract_pitch_ok(f0, sr) {
@@ -560,8 +736,8 @@ fn crtract_synthesize_laryngeal_into(self, f0, num_samples, options, out) {
     # the excitation at the oracle's level (see THE EXCITATION LEVEL above).
     var glottal = crtract_glottal_new(clamped_f0, sr, params, pert);
     if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
-    var k = crtract_excitation_scale(
-      f64_clamp(SpeciesParams_breathiness(params), 0, PR_ONE), crtract_pulse_peak(glottal));
+    var k = crtract_excitation_scale(f64_clamp(SpeciesParams_breathiness(params), 0, PR_ONE),
+      crtract_pulse_peak(glottal), crtract_noise_scale(sr));   # ADR-0014
 
     var output = out;
     vec_truncate(output, 0);
@@ -634,8 +810,8 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
     if (f64_le(clamped_f0, f64_from(2000))) {
         var glottal = crtract_glottal_new(clamped_f0, sr, params, pert);
         if (svara_is_err(glottal) == 1) { return prani_from_svara(glottal); }
-        var k = crtract_excitation_scale(
-          f64_clamp(SpeciesParams_breathiness(params), 0, PR_ONE), crtract_pulse_peak(glottal));
+        var k = crtract_excitation_scale(f64_clamp(SpeciesParams_breathiness(params), 0, PR_ONE),
+          crtract_pulse_peak(glottal), crtract_noise_scale(sr));   # ADR-0014
         var i = 0;
         while (i < num_samples) {
             var gs = f64_mul((svara_glottal_next_sample(glottal)), k);
@@ -650,12 +826,13 @@ fn crtract_synthesize_syringeal_into(self, f0, num_samples, options, out) {
         var breathiness = SpeciesParams_breathiness(params);
         var rng = CreatureTract_rng(self);
         var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009): continuous across calls
+        var q = crtract_noise_scale(sr);        # ADR-0014
         var i = 0;
         while (i < num_samples) {
             var t = f64_div(f64_from(t0 + i), sr);
             var tone1 = f64_sin(f64_mul(f64_mul(PR_TAU, clamped_f0), t));
             var tone2 = f64_mul(f64_sin(f64_mul(f64_mul(PR_TAU, f0_2), t)), PR_TR_0_6);
-            var noise = f64_mul(prani_rng_next_f32(rng), breathiness);
+            var noise = f64_mul(f64_mul(prani_rng_next_f32(rng), breathiness), q);   # ADR-0014
             # excitation = (tone1+tone2)*0.5*(1-breathiness) + noise
             var excitation = f64_add(
               f64_mul(f64_mul(f64_add(tone1, tone2), PR_TR_0_5), f64_sub(PR_ONE, breathiness)),
@@ -695,9 +872,10 @@ fn crtract_synthesize_noise_into(self, num_samples, out) {
     var output = out;
     vec_truncate(output, 0);
     var rng = CreatureTract_rng(self);
+    var q = crtract_noise_scale(CreatureTract_sample_rate(self));   # ADR-0014
     var i = 0;
     while (i < num_samples) {
-        var noise = f64_mul(prani_rng_next_f32(rng), PR_TR_0_5);
+        var noise = f64_mul(f64_mul(prani_rng_next_f32(rng), PR_TR_0_5), q);   # ADR-0014
         var fy = (filter_biquad_process_sample(filter, (noise)));
         if (prani_vec_push(output, fy) < 0) { return PRANI_ERR_ALLOC; }
         i = i + 1;
@@ -739,6 +917,11 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
     var t0 = CreatureTract_clock(self);
     if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
     if (crtract_pitch_ok(f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # ADR-0011: the carrier
+    # 2.3.2 (audit D5, ADR-0011): the second harmonic is a sine prani adds itself, at
+    # 2 x f0, so past Nyquist it is left out rather than aliased: a cricket's 9 kHz
+    # partial at 16 kHz came out at 7 kHz. The render is then the band-limited one.
+    var h2_gain = PR_TR_0_3;
+    if (crtract_pitch_ok(f64_mul(f0, PR_TWO), sr) == 0) { h2_gain = 0; }
     var output = out;
     vec_truncate(output, 0);
 
@@ -758,7 +941,7 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
             var pos_in_chirp = crtract_fmod(f64_from(t0 + i), chirp_period);
 
             var carrier = f64_sin(f64_mul(f64_mul(PR_TAU, f0), t));
-            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(PR_TAU, f0), PR_TWO), t)), PR_TR_0_3);
+            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(PR_TAU, f0), PR_TWO), t)), h2_gain);
             var signal = f64_mul(f64_add(carrier, h2), PR_TR_0_25);
 
             if (f64_lt(pos_in_chirp, chirp_active)) {
@@ -789,7 +972,7 @@ fn crtract_synthesize_stridulatory_into(self, f0, num_samples, options, out) {
         while (i < num_samples) {
             var t = f64_div(f64_from(t0 + i), sr);
             var carrier = f64_sin(f64_mul(f64_mul(PR_TAU, f0), t));
-            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(PR_TAU, f0), PR_TWO), t)), PR_TR_0_3);
+            var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(PR_TAU, f0), PR_TWO), t)), h2_gain);
             # modulator = 0.5 + 0.5*sin(TAU*mod_rate*t)
             var modulator = f64_add(PR_TR_0_5,
               f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(PR_TAU, mod_rate), t))));
@@ -817,6 +1000,11 @@ fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
     var t0 = CreatureTract_clock(self);   # 2.2.1 (ADR-0009), as in stridulatory
     if (crtract_osc_ok(f0, t0 + num_samples, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # audit B7
     if (crtract_pitch_ok(f0, sr) == 0) { return PRANI_ERR_INVALID_TRACT; }   # ADR-0011: the carrier
+    # 2.3.2 (audit D5, ADR-0011): the second harmonic is a sine prani adds itself, at
+    # 2 x f0, so past Nyquist it is left out rather than aliased: a cricket's 9 kHz
+    # partial at 16 kHz came out at 7 kHz. The render is then the band-limited one.
+    var h2_gain = PR_TR_0_3;
+    if (crtract_pitch_ok(f64_mul(f0, PR_TWO), sr) == 0) { h2_gain = 0; }
     var mod_rate = f64_mul(f0, PR_TR_0_5);
     var output = out;
     vec_truncate(output, 0);
@@ -824,7 +1012,7 @@ fn crtract_synthesize_vibratile_into(self, f0, num_samples, out) {
     while (i < num_samples) {
         var t = f64_div(f64_from(t0 + i), sr);
         var carrier = f64_sin(f64_mul(f64_mul(PR_TAU, f0), t));
-        var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(PR_TAU, f0), PR_TWO), t)), PR_TR_0_3);
+        var h2 = f64_mul(f64_sin(f64_mul(f64_mul(f64_mul(PR_TAU, f0), PR_TWO), t)), h2_gain);
         var modulator = f64_add(PR_TR_0_5,
           f64_mul(PR_TR_0_5, f64_sin(f64_mul(f64_mul(PR_TAU, mod_rate), t))));
         var y = f64_mul(f64_mul(f64_add(carrier, h2), modulator), PR_TR_0_25);
@@ -978,6 +1166,7 @@ fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
     var tract = CreatureTract_tract(self);
     var rng = CreatureTract_rng(self);
     var phase_inc = f64_div(purr_f0, sr);
+    var q = crtract_noise_scale(sr);   # ADR-0014
     var output = out;
     vec_truncate(output, 0);
     var i = 0;
@@ -991,7 +1180,7 @@ fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
             excitation = f64_mul(pulse, pulse);   # squared for a sharper pulse
         } else {
             # closed phase: near silence with slight noise
-            excitation = f64_mul(prani_rng_next_f32(rng), PR_TR_0_02);
+            excitation = f64_mul(f64_mul(prani_rng_next_f32(rng), PR_TR_0_02), q);   # ADR-0014
         }
         var ph = f64_add(CreatureTract_phase(self), phase_inc);
         if (f64_ge(ph, PR_ONE)) { ph = f64_sub(ph, PR_ONE); }
@@ -1008,8 +1197,9 @@ fn crtract_synthesize_purr_into(self, num_samples, purr_f0, out) {
 # set_formant_blend(target, target_bw, blend) -- CreatureTract::set_formant_blend.
 # Blends species-default formants toward `target` by `blend` (clamped [0,1]);
 # `target` / `target_bw` are 3-slot vecs (F1-F3 / B1-B3). At blend=0 uses the
-# species defaults, at blend=1 uses `target`. Returns PRANI_ERR_NONE or a
-# negative svara error mapped through prani.
+# species defaults, at blend=1 uses `target`. Each blended formant is kept in band
+# (crtract_in_band), as crtract_new's are. Returns PRANI_ERR_NONE or a negative
+# svara error mapped through prani.
 fn crtract_set_formant_blend(self, target, target_bw, blend) {
     if (self <= 0) { return prani_handle_code(self, PRANI_ERR_INVALID_TRACT); }   # ADR-0008
     if (target <= 0) { return prani_handle_code(target, PRANI_ERR_INVALID_VOCALIZATION); }   # ADR-0008
@@ -1042,20 +1232,33 @@ fn crtract_set_formant_blend(self, target, target_bw, blend) {
     # implementation in svara, so the formants are the same bits.
     var vt[80];
     var ny = f64_mul(CreatureTract_sample_rate(self), PR_HALF);
-    var bf3e = crtract_in_band(f64_mul(bf2, PR_TR_1_3), bf2, ny);   # audit B2 (ADR-0009)
+    var bf0p = crtract_in_band(bf0, 0, ny);     # audit D3, 2.3.2
+    var bf1p = crtract_in_band(bf1, bf0p, ny);
+    var bf2p = crtract_in_band(bf2, bf1p, ny);
+    var bf3e = crtract_in_band(f64_mul(bf2, PR_TR_1_3), bf2p, ny);   # audit B2 (ADR-0009)
     var bf4e = crtract_in_band(f64_mul(bf2, PR_TR_1_5), bf3e, ny);
+    var bsr = CreatureTract_sample_rate(self);
+    var bw0 = crtract_bw64_at_rate(bb0, bf0p, bsr);   # ADR-0014
+    var bw1 = crtract_bw64_at_rate(bb1, bf1p, bsr);
+    var bw2 = crtract_bw64_at_rate(bb2, bf2p, bsr);
+    var bw3 = crtract_bw64_at_rate(f64_mul(bb2, PR_TR_1_2), bf3e, bsr);
+    var bw4 = crtract_bw64_at_rate(f64_mul(bb2, PR_TR_1_4), bf4e, bsr);
     var vowel = svara_vowel_target_set(&vt,
-      (bf0), (bf1), (bf2), (bf3e), (bf4e),
-      (bb0), (bb1), (bb2), (f64_mul(bb2, PR_TR_1_2)), (f64_mul(bb2, PR_TR_1_4)));
+      (bf0p), (bf1p), (bf2p), (bf3e), (bf4e), bw0, bw1, bw2, bw3, bw4);
     # Rust used `.map_err(Into::into)` -- propagate svara error through prani.
-    return prani_from_svara(svara_tract_set_formants_from_target(CreatureTract_tract(self), vowel));
+    var tract = CreatureTract_tract(self);
+    var rc = svara_tract_set_formants_from_target(tract, vowel);
+    if (svara_is_err(rc) == 1) { return prani_from_svara(rc); }
+    return prani_from_svara(crtract_place_amps(tract, bf0, bf1, bf2, bb0, bb1, bb2, ny));   # ADR-0013
 }
 
 # apply_spectral_tilt(samples, tilt_db, sample_rate) -- static; first-order
 # lowpass applied in place to a vec. tilt_db is dB/octave: negative = darker
 # (lowpass), 0 = neutral. y[n] = (1-a)*x[n] + a*y[n-1]. The coefficient is
-# derived from tilt_db directly (sample_rate unused, kept for signature parity).
-# Returns PRANI_ERR_NONE, or PRANI_ERR_INVALID_TRACT for a non-finite tilt_db.
+# derived from tilt_db at 44.1 kHz and moved to sample_rate with its corner in Hz
+# (2.3.2, ADR-0014; through 2.3.1 sample_rate was unused, kept for signature parity).
+# Returns PRANI_ERR_NONE, or PRANI_ERR_INVALID_TRACT for a non-finite tilt_db or, when
+# the tilt is applied, a sample_rate that is not positive and finite.
 #
 # 2.0.5: all three non-finite tilts were silent, and each was silent in a
 # different way (measured). NaN: `|NaN| < 0.1` is false and `a < 0.01` is false,
@@ -1081,6 +1284,12 @@ fn crtract_apply_spectral_tilt_from(samples, tilt_db, sample_rate, state) {
     # dB/octave -> coefficient: a = clamp(-tilt_db/12, 0, 0.85)
     var a = f64_clamp(f64_div(f64_neg(tilt_db), PR_TR_12_0), 0, PR_TR_0_85);
     if (f64_lt(a, PR_TR_0_01)) { return 0; }
+    # 2.3.2 (ADR-0014): the coefficient is the 44.1 kHz one, moved to this rate with
+    # its corner in Hz. Through 2.3.1 sample_rate was unread, as in the Rust, and the
+    # corner fell with the rate: 5.5 times lower at 8 kHz. So it is now refused when
+    # it is not a positive finite rate, as every other reader of one refuses it.
+    if (prani_is_positive(sample_rate) == 0) { return PRANI_ERR_INVALID_TRACT; }
+    a = crtract_pole_at_rate(a, sample_rate);
     var one_minus_a = f64_sub(PR_ONE, a);
     var prev = load64(state);
     var n = vec_len(samples);

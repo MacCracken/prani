@@ -37,6 +37,11 @@ dominates. The other renders that held never use the glottal source.
 **prani takes svara's corrected pulse shape into the oracle's gain stage, in
 `src/tract.cyr`, and svara is unchanged.** It does this in two steps.
 
+*Extended in 2.3.2 by [ADR-0014](0014-a-render-does-not-depend-on-the-sample-rate.md):*
+the gain solved here is a 44.1 kHz one, and every other rate is now held to the
+44.1 kHz render. The breathiness mapping below carries the noise's scale for the rate,
+and is this one at 44.1 kHz.
+
 1. **The oracle's excitation, exactly.** svara's mix is linear in its breathiness
    b′, with the pulse at peak g. So prani hands svara `b′ = g·b / (1 − b + g·b)` and
    scales each sample by `(1 − b + g·b) / g`. The tract then hears

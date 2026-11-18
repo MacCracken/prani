@@ -37,7 +37,19 @@ code() {
 # split across lines (a blank or comment-only line between is skipped), or taken
 # by address.
 hits() {
-    code "$1" | awk -v names="$NAMES" '
+    code "$1" | scan
+}
+
+# The three helpers' own calls, by their exact text (with the regex escapes grep -E
+# needs). In a funnel file they are counted by OCCURRENCE and then removed, so that
+# anything else on their lines is still read (audit A5, 2.3.2: through 2.3.1 the
+# whole line of a helper call was exempt, so `vec_new_a(prani_allocator()); var s =
+# alloc(4096);` on one line passed).
+HELPERS='alloc\(size\)|vec_new_a\(prani_allocator\(\)\)|vec_push_a\(prani_allocator\(\), v, x\)'
+
+# scan -- hits' matcher, over code on stdin.
+scan() {
+    awk -v names="$NAMES" '
         { line[NR] = $0 }
         END {
             call = "(^|[^A-Za-z0-9_])" names "[[:space:]]*[(]"
@@ -70,17 +82,18 @@ for f in $(find src -name '*.cyr' | sort); do
     fi
 done
 
-# Each funnel file: exactly one of each, the helpers' own calls.
+# Each funnel file: exactly one OCCURRENCE of each helper's own call, and, with those
+# three removed, nothing else that allocates.
 for ff in $FUNNEL; do
     for pat in 'alloc\(size\)' \
                'vec_new_a\(prani_allocator\(\)\)' 'vec_push_a\(prani_allocator\(\), v, x\)'; do
-        n=$(code "$ff" | grep -c -E "(^|[^A-Za-z0-9_])$pat" || true)
+        n=$(code "$ff" | grep -o -E "(^|[^A-Za-z0-9_])$pat" | wc -l | tr -d ' ')
         if [ "$n" != "1" ]; then
             echo "$ff: expected exactly one '$pat', found $n"
             fail=1
         fi
     done
-    others=$(hits "$ff" | grep -v -E 'alloc\(size\)|vec_new_a\(prani_allocator|vec_push_a\(prani_allocator' || true)
+    others=$(code "$ff" | sed -E "s/$HELPERS/@helper@/g" | scan)
     if [ -n "$others" ]; then
         echo "$others" | sed "s|^|$ff:|"
         fail=1

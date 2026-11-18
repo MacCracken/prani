@@ -466,5 +466,23 @@ assert_eq(FatigueState_fatigue(sbad), G_NAN, "and still carries a NaN fatigue --
 assert_eq(fatigue_modifiers(sbad), PRANI_ERR_INVALID_VOCALIZATION,
   "but modifiers() off it is refused (2.2.0; it was NaN modifiers through 2.1.2)");
 
+# ================================================================
+# Audit K6, 2.3.2: a mutant moving PR_FAT_MAX_DURATION_S survived, since the guard's
+# tests passed the constant to prani_in_range themselves. The bound is stated here
+# as its decimal, 1e9 s (exact in both formats), through record_call and rest.
+test_group("2.3.2 K6 -- the duration bound is 1e9 s");
+var KD_1E9 = pr_of64(0x41cdcd6500000000);
+var kd = fatigue_new();
+fatigue_record_call(kd, KD_1E9, 1);
+assert_eq(FatigueState_alarm_count(kd), 1, "record_call accepts 1e9 s");
+fatigue_record_call(kd, t_next_up(KD_1E9), 1);
+assert_eq(FatigueState_alarm_count(kd), 1, "and drops the real above it");
+var kr = fatigue_new();
+fatigue_record_call(kr, pr_from(10), 0);
+fatigue_rest(kr, t_next_up(KD_1E9));
+assert_eq(FatigueState_bout_calling_time(kr), pr_from(10), "rest drops the real above 1e9 s");
+fatigue_rest(kr, KD_1E9);
+assert_eq(FatigueState_bout_calling_time(kr), 0, "and accepts 1e9 s, which ends the bout");
+
 var rc = assert_summary();
 syscall(60, rc);

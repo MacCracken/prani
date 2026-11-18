@@ -276,7 +276,11 @@ assert_eq(pr_eq(pr_max(SP_NAN, PR_ONE), PR_ONE), 1, "pr_max(NaN, b) == b (NaN lo
 assert_eq(prani_is_finite(pr_max(PR_ONE, SP_NAN)), 0, "pr_max(a, NaN) == NaN (NaN wins as arg 2)");
 # That asymmetry is why a NaN `distance` and a NaN `reference_distance` had
 # two DIFFERENT symptoms before the guards: full-volume audio vs a NaN buffer.
-assert_eq(prani_is_finite(pr_div(PR_ONE, pr_of64(0x0000000000000001))), 0, "1/5e-324 overflows to inf (the dt guard)");
+# The format's smallest subnormal: 5e-324 in f64, 1.4e-45 in f32. pr_of64(0x1) is 0 in
+# f32, where this would have tested 1/0 instead (audit C2, 2.3.2).
+var SP_SUBN = t_per(pr_of64(0x0000000000000001), 0x00000001);
+assert_eq(pr_gt(SP_SUBN, 0), 1, "control: the subnormal is not 0 in either build");
+assert_eq(prani_is_finite(pr_div(PR_ONE, SP_SUBN)), 0, "1/subnormal overflows to inf (the dt guard)");
 # The tiniest rate whose reciprocal is finite in the build's format: 1e-300 in f64,
 # f32's smallest normal 2^-126 (1.2e-38) in f32, where 1e-300 underflows to 0.
 var SP_TINY = t_per(pr_of64(0x01a56e1fc2f8f359), 0x00800000);
@@ -345,7 +349,7 @@ assert_eq(spatial_apply_distance_attenuation(one, PR_ONE, PR_ONE, pr_neg(sr48)),
   "negative sample_rate rejected (was alpha > 1: an overshooting filter)");
 assert_eq(spatial_apply_distance_attenuation(one, PR_ONE, PR_ONE, PRANI_POS_INF), PRANI_ERR_INVALID_TRACT,
   "+inf sample_rate rejected (was silence: alpha 0)");
-assert_eq(spatial_apply_distance_attenuation(one, PR_ONE, PR_ONE, pr_of64(0x0000000000000001)), PRANI_ERR_INVALID_TRACT,
+assert_eq(spatial_apply_distance_attenuation(one, PR_ONE, PR_ONE, SP_SUBN), PRANI_ERR_INVALID_TRACT,
   "subnormal sample_rate rejected (1/rate overflows)");
 # CONTROL -- the reciprocal guard is exactly "1/rate is finite", not a made-up
 # floor: an absurd-but-representable 1e-300 Hz is still accepted.
@@ -395,8 +399,14 @@ assert_eq(vec_len(spatial_apply_doppler_shift(s100, pr_neg(pr_from(343)), sr48))
   "v = -343 (AT the speed of sound) -> out_len 10, not the 0 the raw ratio gives");
 assert_eq(vec_len(spatial_apply_doppler_shift(s100, pr_neg(pr_from(1000000)), sr48)), 10,
   "v = -1e6 (far beyond it) -> out_len 10, not the negative the raw ratio gives");
-assert_eq(vec_len(spatial_apply_doppler_shift(s100, SP_BOUND, sr48)), 190,
-  "v = +308.7 -> out_len 190 (the 1.9x upper bound)");
+# Past the bound, so the clamp sets v in both formats. SP_BOUND itself is 343 x 0.9 in
+# the build's format: 308.7 in f64, but 308.69998 in f32, whose exact length is
+# 189.99999 (2.3.2, audit B1: each build truncates the exact length of the value it
+# holds; through 2.3.1 f32's own rounding gave 190).
+assert_eq(vec_len(spatial_apply_doppler_shift(s100, pr_from(400), sr48)), 190,
+  "v = +400, clamped to +308.7 -> out_len 190 (the 1.9x upper bound)");
+assert_eq(vec_len(spatial_apply_doppler_shift(s100, SP_BOUND, sr48)), t_per(190, 189),
+  "v = 343 x 0.9 in the build's format -> 190 in f64, 189 in f32 (308.69998)");
 # The raw arithmetic the clamp is protecting, evaluated here so the claim in
 # the spatial.cyr header is checked rather than asserted in prose.
 var sp_speed = pr_from(343);
@@ -410,6 +420,40 @@ var dop_nan_sr = spatial_apply_doppler_shift(s100, 0, SP_NAN);
 assert_eq(prani_is_err(dop_nan_sr), 0, "NaN _sample_rate NOT rejected (the parameter is unused)");
 assert_eq(vec_len(dop_nan_sr), 100, "NaN _sample_rate gives the identity resample, unchanged");
 assert_eq(pr_eq(vec_get(dop_nan_sr, 42), PR_ONE), 1, "NaN _sample_rate leaves the samples themselves untouched");
+
+# ================================================================
+test_group("2.3.2 B1 -- a long buffer's Doppler resampling is accurate in both formats");
+# 10 s of a 3 kHz unit sine at 44.1 kHz, shifted by a source receding at 10 m/s, held
+# to the same resampler run in f64 over the same input samples. The f64 build is that
+# arithmetic exactly. The f32 build keeps the position in f64 (ADR-0010) and rounds
+# only the interpolation; through 2.3.1 it held the position in f32, an error of
+# 9.2e-3 at 10 s and 0.89 at 400 s.
+var lb_n = 441000;
+var lb_in = vec_new();
+var lb_i = 0;
+var lb_w = f64_div(f64_mul(F64_TAU, f64_from(3000)), f64_from(44100));
+while (lb_i < lb_n) { vec_push(lb_in, pr_of64(f64_sin(f64_mul(lb_w, f64_from(lb_i))))); lb_i = lb_i + 1; }
+var lb_out = spatial_apply_doppler_shift(lb_in, pr_from(10), pr_from(44100));
+var lb_ratio = f64_div(f64_from(343), f64_from(353));
+var lb_m = f64_to(f64_div(f64_from(lb_n), lb_ratio));
+assert_eq(vec_len(lb_out), lb_m, "the output length is len / ratio in f64, truncated");
+var lb_err = 0;
+var lb_j = 0;
+while (lb_j < lb_m) {
+    var lb_src = f64_mul(f64_from(lb_j), lb_ratio);
+    var lb_k = f64_to(lb_src);
+    var lb_f = f64_sub(lb_src, f64_from(lb_k));
+    var lb_s0 = 0;
+    if (lb_k < lb_n) { lb_s0 = pr_to64(vec_get(lb_in, lb_k)); }
+    var lb_s1 = 0;
+    if (lb_k + 1 < lb_n) { lb_s1 = pr_to64(vec_get(lb_in, lb_k + 1)); }
+    var lb_ref = f64_add(lb_s0, f64_mul(f64_sub(lb_s1, lb_s0), lb_f));
+    var lb_e = f64_abs(f64_sub(pr_to64(vec_get(lb_out, lb_j)), lb_ref));
+    if (f64_gt(lb_e, lb_err) == 1) { lb_err = lb_e; }
+    lb_j = lb_j + 1;
+}
+var LB_TOL = t_per(0, 0x3EB0C6F7A0B5ED8D);   # f64: exact; f32: 1e-6, the interpolation's rounding
+assert_eq(f64_le(lb_err, LB_TOL), 1, "every sample is the f64 resampling's (2.3.1's f32 build: 9.2e-3)");
 
 var rc = assert_summary();
 syscall(60, rc);

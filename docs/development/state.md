@@ -5,12 +5,23 @@
 
 ## Version
 
-**2.3.1** — the deferred decisions. A pitch the sample rate cannot represent is
+**2.3.2** — the 2.3 sweep ([audit](../audit/2026-11-17-2.3-audit.md)): 25 findings
+and six surviving mutants in the 2.3 work, and one older defect verification found, all
+repaired. A formant past Nyquist is
+placed in band rather than costing the voice all five
+([ADR-0013](../adr/0013-a-formant-past-nyquist-is-placed-in-band.md)), a render at any
+rate is held to the same call at 44.1 kHz, where 8 kHz was 19 dB louder
+([ADR-0014](../adr/0014-a-render-does-not-depend-on-the-sample-rate.md)), voice's own
+biphonation and subharmonic sources are held to Nyquist, and the f32 build keeps
+every absolute position in f64, the Doppler resampler's included. `gen-f64.sh` refuses
+a source it cannot read exactly, and checks the manifest's pairs. **2681
+assertions / 22 suites, in each format.**
+
+On top of **2.3.1** — the deferred decisions. A pitch the sample rate cannot represent is
 refused ([ADR-0011](../adr/0011-a-pitch-past-nyquist-is-refused.md)), and a steady
 wind adds no Doppler shift
 ([ADR-0012](../adr/0012-a-steady-wind-does-not-shift-the-pitch.md)). CI and the
-release workflow fetch cyrius's installer at the pinned tag. **2546
-assertions / 22 suites, in each format.**
+release workflow fetch cyrius's installer at the pinned tag.
 
 On top of **2.3.0** — two float formats
 ([ADR-0010](../adr/0010-two-float-formats.md)). A real is f64 by default and f32 when
@@ -114,7 +125,7 @@ oracle at `2.0.3`.
 ## Tests
 
 `cyrius audit` is green end to end as of 2.3.0: fmt · lint · docs · tests · bench,
-**exit 0**. 22 suites / **2546 assertions, in each format** (770 at 2.0.3;
+**exit 0**. 22 suites / **2681 assertions, in each format** (770 at 2.0.3;
 2.0.4 added 430 closing the parity shortfalls — see
 [`rust-test-parity.md`](rust-test-parity.md)), plus the decoders' fuzz harness,
 `tests/prani.fcyr` (2.2.1). Measured with `for t in tests/*.tcyr; do cyrius test $t;
@@ -124,19 +135,20 @@ done` and the same with `-D PRANI_F32`, summing each total. CI runs the audit an
 the f32 build's suites, examples and fuzz harness, and `scripts/gen-f64.sh --check`.
 Before 2.0.4 it ran only build + test, so fmt · lint · docs · bench were local-only.
 
-`tests/real.tcyr` (2.3.0, **36** assertions) is the format layer's suite: the
+`tests/real.tcyr` (2.3.0, **44** assertions at 2.3.2) is the format layer's suite: the
 primitives' NaN, signed-zero and saturation behaviour in both formats, integers in
 the format, the f64 time base, and document portability (the same bytes from either
 build). `tests/realt.cyr` holds the shared helpers: `assert_real` is exact in the f64
-build and within a measured ulp budget in the f32 build.
+build and within a measured ulp budget in the f32 build; since 2.3.2 a NaN, or an
+f32-build word with high bits set, fails it in both.
 
-`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **263** at 2.3.1) is the
+`tests/hardening.tcyr` (added 2.0.3 at 53 assertions, **283** at 2.3.2) is the
 P(-1) sweeps' regression suite — one group per repaired finding, each written so it FAILS on
 the tree before it (the memory-safety groups crash the process there). Every group
 carries controls so it cannot pass vacuously. It also holds the two allocation
 budgets, measured with `alloc_used()` rather than asserted as wall-clock.
 
-`tests/allocrefused.tcyr` (2.2.0, **173** assertions at 2.3.1) is the allocation contract's
+`tests/allocrefused.tcyr` (2.2.0, **173** assertions at 2.3.2) is the allocation contract's
 proof. It redefines `prani_alloc_raw` to refuse each of prani's own requests in
 every public path, singly and from then on, and requires exactly `PRANI_ERR_ALLOC`
 back. It redefines the stdlib `alloc` too, to reach naad's reporting constructors
@@ -144,8 +156,10 @@ in measured windows. Eight mutants each fail it (CHANGELOG 2.2.0, *Verified*).
 `scripts/check-alloc.sh` (CI) keeps every allocation where the suite can see it.
 
 `tests/layers.tcyr` (2.2.1, 45 assertions) pins the RMS of 15 renders to a relative
-1e-9: every synthesis layer past the tract. A level move is a failure there, and the
-14 mutants in the 2.2.1 audit report each fail it. Re-record a level only with the
+1e-9 in the f64 build (1e-6 in f32): every synthesis layer past the tract. A level move
+is a failure there, and the 14 mutants in the 2.2.1 audit report each fail it **in the
+f64 build**. At the f32 build's tolerance not all do: the file says so for the
+fire-breath mutant (audit C6, 2.3.2). Re-record a level only with the
 change that moves it, and name it in that release's notes.
 
 One `tests/<module>.tcyr` per module, cross-checked against the Rust oracle
@@ -164,7 +178,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, on the cyrius 6.7.18 matched dep set, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), with a gate that would catch the next one (2.0.11), reporting a refused allocation (2.2.0), and swept a second time (2.2.1).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), with a gate that would catch the next one (2.0.11), reporting a refused allocation (2.2.0), swept a second time (2.2.1), built in two float formats (2.3.0), and its 2.3 work swept (2.3.2).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x was one arc with one destination: retiring `rust-old/`** — it

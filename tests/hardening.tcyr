@@ -318,7 +318,9 @@ assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(1001), H_DU
 assert_eq(prani_is_err(crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(1200), H_DUR_005)), 1,
   "1200 Hz (600 Hz exactly at nyquist) -> error");
 # above it: these ABORTED before svara 3.5.4 and now render
-var h1201 = crvoice_vocalize(hlv, PRANI_VOC_HOWL, pr_from(1201), H_DUR_005);
+# A GROWL: a wolf's HOWL carries a second voice at 1.78 x f0, 712 Hz, past 1201 Hz's
+# 600 Hz Nyquist, and is refused there since 2.3.2 (ADR-0011, audit D1).
+var h1201 = crvoice_vocalize(hlv, PRANI_VOC_GROWL, pr_from(1201), H_DUR_005);
 assert_eq(prani_is_err(h1201), 0, "1201 Hz synthesizes (aborted before 3.5.4)");
 assert_eq(vec_len(h1201), 60, "1201 Hz length is trunc(0.05 * 1201) = 60");
 assert_eq(t_all_finite_h(h1201), 1, "1201 Hz output is finite");
@@ -548,44 +550,48 @@ assert_eq(vec_len(crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, H
 # finite-only guard and a 2^63 ceiling each abort inside this group.
 # ================================================================
 test_group("an overflowing sample count is refused on every synthesis path");
+# Through 2.3.1 these were 1e300 and 1e308 in f64, and both f32::MAX in f32. 1e300 s
+# at 44.1 kHz is 4.4e304, finite, so the f64 build never tested the product's
+# overflow; and in f32 the two were one input (audit C6, 2.3.2). Each is now a value
+# of its format that does what its comment says.
 #ifdef PRANI_F32
-var H_1E300 = 0x7F7FFFFF;           # 1e300 s: finite, the product overflows to +inf
-var H_1E308 = 0x7F7FFFFF;           # 1e308 s: finite, only Mating's x2 overflows it
+var H_PROD_OVF = 0x799A130C;        # 1e35 s: finite, x 44100 Hz overflows to +inf
+var H_X2_OVF   = 0x7F61B1E6;        # 3e38 s: finite, and Mating's x2 alone overflows it
 var H_1E19  = 0x5F0AC723;           # 1e19: finite past 2^63, and no infinity anywhere
 var H_2P54  = 0x5A800000;           # 2^54: inside i64, past the exact-count ceiling
 #else
-var H_1E300 = 0x7e37e43c8800759c;   # 1e300 s: finite, the product overflows to +inf
-var H_1E308 = 0x7fe1ccf385ebc8a0;   # 1e308 s: finite, only Mating's x2 overflows it
+var H_PROD_OVF = 0x7f423a516e82d9ba;   # 1e305 s: finite, x 44100 Hz overflows to +inf
+var H_X2_OVF   = 0x7fe1ccf385ebc8a0;   # 1e308 s: finite, and Mating's x2 alone overflows it
 var H_1E19  = 0x43e158e460913d00;   # 1e19: finite past 2^63, and no infinity anywhere
 var H_2P54  = 0x4350000000000000;   # 2^54: inside i64, past the exact-count ceiling
 #endif
 var h_wolf = crvoice_new(PRANI_SP_WOLF);
-assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_1E300), PRANI_ERR_INVALID_VOCALIZATION,
-  "1e300 s at 44.1 kHz");
-assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E300, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
-  "the same product through the rate: 1 s at 1e300 Hz");
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_PROD_OVF), PRANI_ERR_INVALID_VOCALIZATION,
+  "a duration whose product with 44.1 kHz overflows");
+assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_PROD_OVF, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
+  "the same value as a rate, for 1 s: a count past i64");
 assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_1E19, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "1e19 samples: a finite product past i64, so no infinity for a check to find");
 assert_eq(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_2P54, PR_ONE), PRANI_ERR_INVALID_VOCALIZATION,
   "2^54 samples: fits i64, past the ceiling stream_new already enforced");
-assert_eq(crvoice_vocalize_with_intent(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_MATING, H_SR, H_1E308),
+assert_eq(crvoice_vocalize_with_intent(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_MATING, H_SR, H_X2_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "the intent's duration_scale is what overflows");
 # One voice per apparatus, plus the purr branch that returns before the block loop.
-assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, H_SR, H_1E300),
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_PURR, H_SR, H_PROD_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "the cat purr path");
-assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_CHIRP, H_SR, H_1E300),
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_CHIRP, H_SR, H_PROD_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "syringeal");
-assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HISS, H_SR, H_1E300),
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HISS, H_SR, H_PROD_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "noise only");
-assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_STRIDULATE, H_SR, H_1E300),
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_STRIDULATE, H_SR, H_PROD_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "stridulatory");
-assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, H_SR, H_1E300),
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, H_SR, H_PROD_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "vibratile");
 # The other public route to a count must agree with vocalize about the same input.
-assert_eq(stream_new(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_1E300),
+assert_eq(stream_new(h_wolf, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_PROD_OVF),
   PRANI_ERR_INVALID_VOCALIZATION, "stream_new refuses the same product");
 var h_fv = prani_ffi_voice_create(PRANI_SP_WOLF);
-assert_eq(prani_ffi_stream_start(h_fv, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_1E300), 0,
+assert_eq(prani_ffi_stream_start(h_fv, PRANI_VOC_HOWL, PRANI_INTENT_SOCIAL, H_SR, H_PROD_OVF), 0,
   "and the FFI hands back null for it");
 # CONTROLS: without these, a guard that refused everything would pass the above.
 assert_eq(vec_len(crvoice_vocalize(h_wolf, PRANI_VOC_HOWL, H_SR, H_DUR_005)), 2205,
@@ -865,11 +871,13 @@ assert_eq(crtract_synthesize_purr(pu_t, 100, H_SR), PRANI_ERR_INVALID_TRACT, "an
 assert_eq(prani_is_err(crtract_synthesize_purr(pu_t, 100, pr_from(27))), 0, "control: 27 Hz purrs");
 assert_eq(prani_in_range(CreatureTract_phase(pu_t), 0, PR_ONE), 1, "control: and the phase stays in [0, 1]");
 var pu_bee = crtract_new(species_params(PRANI_SP_BEE), H_SR);
-var TL_HARD_864_0 = pr_of64(0x7FEFFFFFFFFFFFFF);
+# The format's largest finite real: f64::MAX, or f32::MAX in f32, where f64::MAX
+# rounds to inf and would test a non-finite f0 instead (audit C2, 2.3.2).
+var TL_HARD_864_0 = t_per(pr_of64(0x7FEFFFFFFFFFFFFF), 0x7F7FFFFF);
 assert_eq(crtract_synthesize(pu_bee, TL_HARD_864_0, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
   "an f0 whose phase overflows is refused (2.2.0: 256 NaN samples as success)");
 var pu_cri = crtract_new(species_params(PRANI_SP_CRICKET), H_SR);
-var TL_HARD_867_0 = pr_of64(0x7FEFFFFFFFFFFFFF);
+var TL_HARD_867_0 = TL_HARD_864_0;
 assert_eq(crtract_synthesize(pu_cri, TL_HARD_867_0, 256, crtract_options_default()), PRANI_ERR_INVALID_TRACT,
   "on the stridulatory path too");
 var pu_lo = crvoice_new(PRANI_SP_WOLF);
@@ -952,15 +960,16 @@ assert_eq(vec_len(rd_ch), vec_len(rd_solo), "a MATING chorus spans its call (2.2
 # ================================================================
 test_group("2.3.1 V4 -- a pitch at or past Nyquist is refused, not rendered (ADR-0011)");
 # Through 2.3.0 a source pitched at or above sample_rate / 2 rendered as success: at
-# exactly Nyquist a sine samples as zero (a half-size cricket at 8 kHz gave 0.1 s of
-# RMS 3.3e-14), and past it a tone aliases to another pitch (a cricket's 4500 Hz at
-# 8 kHz came out at 3500 Hz). Each path now refuses the pitch it would render.
+# exactly Nyquist a sine samples as zero, and past it a tone aliases to another pitch
+# (a cricket's 4500 Hz at 8 kHz came out at 3500 Hz; a half-size cricket sings at
+# 8000 Hz, the rate itself, where the alias is 0 Hz and it gave 0.1 s of RMS 3.3e-14).
+# Each path now refuses the pitch it would render.
 var nq_d = pr_of64(0x3FB999999999999A);   # 0.1 s
 var nq_8k = pr_from(8000);
 # through vocalize: the two 2.3.0 symptoms, and a control at a rate that holds them
 var nq_half = crvoice_with_size(crvoice_new(PRANI_SP_CRICKET), PR_HALF);
 assert_eq(crvoice_vocalize(nq_half, PRANI_VOC_CHIRP, nq_8k, nq_d), PRANI_ERR_INVALID_TRACT,
-  "a half-size cricket at 8 kHz (2.3.0: success, RMS 3.3e-14)");
+  "a half-size cricket at 8 kHz, 8000 Hz (2.3.0: success, RMS 3.3e-14)");
 assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_CHIRP, nq_8k, nq_d), PRANI_ERR_INVALID_TRACT,
   "a cricket's 4500 Hz at 8 kHz (2.3.0: success, aliased to 3500 Hz)");
 assert_eq(prani_is_err(crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_CHIRP, H_SR, nq_d)), 0,
@@ -1020,6 +1029,85 @@ var wd_hv = bridge_doppler_velocity_from_wind(pr_from(10), PR_PI);
 assert_eq(vec_len(spatial_apply_doppler_shift(wd_in, wd_hv, H_SR)), 1000, "nor does a headwind (2.3.0: 970)");
 assert_eq(vec_len(spatial_apply_doppler_shift(wd_in, pr_from(10), H_SR)) != 1000, 1,
   "control: a source receding at 10 m/s does shift it");
+
+# ================================================================
+test_group("2.3.2 B2 -- the nasal notch stays inside a buffer past 2^24 samples");
+# A fraction of 1.0 (legal since 2.0.5) over a 16777219-sample buffer: in f32 the
+# buffer's length rounds up to 16777220 as a real, and through 2.3.1 the notch read
+# one sample past the end and the process exited ("vec: index out of bounds").
+var nb_n = 16777219;
+var nb_buf = prani_vec_new();
+assert_eq(prani_vec_push_zeros(nb_buf, nb_n), 0, "control: the buffer is built");
+assert_eq(crvoice_apply_nasal_antiformant(nb_buf, H_SR, PR_ONE), 0, "a fraction of 1.0 notches the whole buffer");
+assert_eq(vec_len(nb_buf), nb_n, "and leaves its length alone");
+assert_eq(crvoice_apply_nasal_antiformant(nb_buf, H_SR, PR_TWO), 0, "so does a fraction past 1.0");
+
+# ================================================================
+test_group("2.3.2 D1 -- the layers' own sources are held to Nyquist (ADR-0011)");
+# The canid biphonation, 1.78 x f0, is an independent pitch the tract's check never
+# saw: through 2.3.1 it aliased and the call returned success.
+var bp_dog = crvoice_with_f0_offset(crvoice_new(PRANI_SP_DOG), pr_from(1900));   # eff f0 2000
+assert_eq(crvoice_vocalize_with_intent(bp_dog, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, nq_8k, nq_d),
+  PRANI_ERR_INVALID_TRACT, "a dog at 2000 Hz howling at 8 kHz: its 4984 Hz voice (2.3.1: aliased to 3016 Hz)");
+assert_eq(crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, pr_from(1201), nq_d), PRANI_ERR_INVALID_TRACT,
+  "a default wolf howling at 1201 Hz: its 712 Hz voice (2.3.1: aliased to 489 Hz)");
+assert_eq(prani_is_err(crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_GROWL, pr_from(1201), nq_d)), 0,
+  "control: a growl, which has no second voice, renders there");
+assert_eq(prani_is_err(crvoice_vocalize_with_intent(bp_dog, PRANI_VOC_HOWL, PRANI_INTENT_ALARM, pr_from(16000), nq_d)),
+  0, "control: the same dog at 16 kHz renders its 4984 Hz voice");
+assert_eq(prani_is_err(crvoice_vocalize(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, pr_from(1201), nq_d)),
+  0, "control: a lion's subharmonic (half its pitch) is in band at 1201 Hz");
+# A call of no samples renders no second voice, and is an empty buffer, as the tract's
+# own pitch checks leave it (the 2.3.2 sweep caught the check refusing it at first).
+var bp_zero = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, pr_from(1201), 0);
+assert_eq(prani_is_err(bp_zero), 0, "control: a zero-length howl at 1201 Hz is not refused");
+assert_eq(vec_len(bp_zero), 0, "and is empty");
+
+# ================================================================
+test_group("2.3.2 D2/D4 -- where the pitch check sits, and one exactly at Nyquist");
+# The check is on the pitch each path renders, after its clamp and its 2 kHz split
+# (ADR-0011). Neither placement was pinned through 2.3.1: checking the raw f0, or
+# splitting the syrinx at >= 2000, passed every suite.
+var pl_wo = crtract_new(species_params(PRANI_SP_WOLF), nq_8k);
+assert_eq(prani_is_err(crtract_synthesize(pl_wo, pr_from(5000), 64, nq_o)), 0,
+  "a wolf asked for 5000 Hz at 8 kHz renders: the clamp brings it to 1200 Hz first");
+var pl_cr = crtract_new(species_params(PRANI_SP_CROW), pr_from(5000));
+assert_eq(prani_is_err(crtract_synthesize(pl_cr, pr_from(2000), 64, nq_o)), 0,
+  "a crow at exactly 2000 Hz at 5 kHz renders: one source through svara, not two");
+# a cricket sized to sing at exactly 4000 Hz (4500 / 1.125) through vocalize at 8 kHz
+var pl_ny = crvoice_with_size(crvoice_new(PRANI_SP_CRICKET), pr_of64(0x3FF2000000000000));
+assert_eq(crvoice_effective_f0(pl_ny), pr_from(4000), "control: the cricket's pitch is exactly 4000 Hz");
+assert_eq(crvoice_vocalize(pl_ny, PRANI_VOC_CHIRP, nq_8k, nq_d), PRANI_ERR_INVALID_TRACT,
+  "and at 8 kHz that is exactly Nyquist: refused (2.3.0: success, silence)");
+
+# ================================================================
+test_group("2.3.2 B3 -- a builder's maximum is inside the other build's bounds");
+# A document carries f64 bits in both builds (ADR-0010), so a value the f32 build
+# stores must also pass the f64 build's checks: jitter <= 0.05, shimmer <= 0.1 and
+# |f0_offset| <= f0_max - f0_min, in f64. Through 2.3.1 the f32 builders clamped to
+# the NEAREST f32 of each bound, which for these is just above it, and the f64 build
+# refused the f32 build's voice at the jitter or shimmer ceiling (-3).
+var bb_v = crvoice_with_shimmer(crvoice_with_jitter(crvoice_new(PRANI_SP_CAT), PR_ONE), PR_ONE);
+var bb_p = CreatureVoice_params(bb_v);
+assert_eq(f64_le(pr_to64(SpeciesParams_jitter(bb_p)), 0x3fa999999999999a), 1,
+  "the jitter ceiling, widened, is <= the f64 bound 0.05 (2.3.1's f32: 0.0500000007)");
+assert_eq(f64_le(pr_to64(SpeciesParams_shimmer(bb_p)), 0x3fb999999999999a), 1,
+  "the shimmer ceiling, widened, is <= 0.1 (2.3.1's f32: 0.100000001)");
+assert_eq(f64_gt(pr_to64(SpeciesParams_jitter(bb_p)), 0x3fa999963e9b4642), 1,   # 0.0499999
+  "control: and it is still the ceiling, to within one f32 step");
+# custom params whose f32 difference rounds UP past the exact one: 1000.7 - 100.3
+var bb_w = crvoice_new(PRANI_SP_WOLF);
+SpeciesParams_set_f0_min(CreatureVoice_params(bb_w), pr_of64(0x4059133333333333));
+SpeciesParams_set_f0_max(CreatureVoice_params(bb_w), pr_of64(0x408f45999999999a));
+bb_w = crvoice_with_f0_offset(bb_w, pr_from(100000));
+var bb_exact = f64_sub(pr_to64(SpeciesParams_f0_max(CreatureVoice_params(bb_w))),
+  pr_to64(SpeciesParams_f0_min(CreatureVoice_params(bb_w))));
+assert_eq(f64_le(pr_to64(CreatureVoice_f0_offset(bb_w)), bb_exact), 1,
+  "a saturated f0_offset is <= the exact f0_max - f0_min of the stored params");
+var bb_sb = str_builder_new();
+crvoice_to_json(bb_v, bb_sb);
+assert_eq(prani_is_err(crvoice_from_json_str(str_data(str_builder_build(bb_sb)))), 0,
+  "control: the ceiling voice reads back in its own build");
 
 var rc = assert_summary();
 syscall(60, rc);

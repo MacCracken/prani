@@ -346,14 +346,18 @@ assert_eq(CreatureVoice_f0_offset(v_off), pr_from(1050), "with_f0_offset clamps 
 # with_size floor is a CLAMP, not an abs -- a negative scale lands on 0.1 too.
 var v_neg = crvoice_with_size(crvoice_new(PRANI_SP_WOLF), pr_neg(T_1_0));
 assert_eq(CreatureVoice_size_scale(v_neg), PR_V_0_1, "with_size clamps -1 -> 0.1");
-# with_jitter clamps to [0, 0.05] (mutates params in place).
+# with_jitter clamps to [0, 0.05] (mutates params in place). The ceiling is 0.05 in
+# f64 and, since 2.3.2, the f32 below 0.05 rather than the nearest one, above it, so
+# a document saved at the maximum loads in either build (audit B3; hardening.tcyr).
 var v_ji = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), T_1_0);
-assert_eq(SpeciesParams_jitter(CreatureVoice_params(v_ji)), PR_V_0_05, "with_jitter clamps 1.0 -> 0.05");
+assert_eq(SpeciesParams_jitter(CreatureVoice_params(v_ji)), t_per(PR_V_0_05, 0x3D4CCCCC),
+  "with_jitter clamps 1.0 -> 0.05");
 var v_ji0 = crvoice_with_jitter(crvoice_new(PRANI_SP_WOLF), pr_neg(T_1_0));
 assert_eq(SpeciesParams_jitter(CreatureVoice_params(v_ji0)), 0, "with_jitter clamps -1.0 -> 0.0");
 # with_shimmer clamps to [0, 0.1] (mutates params in place).
 var v_sh = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), T_1_0);
-assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh)), PR_V_0_1, "with_shimmer clamps 1.0 -> 0.1");
+assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh)), t_per(PR_V_0_1, 0x3DCCCCCC),
+  "with_shimmer clamps 1.0 -> 0.1 (f32: below it)");
 var v_sh0 = crvoice_with_shimmer(crvoice_new(PRANI_SP_WOLF), pr_neg(T_1_0));
 assert_eq(SpeciesParams_shimmer(CreatureVoice_params(v_sh0)), 0, "with_shimmer clamps -1.0 -> 0.0");
 
@@ -885,12 +889,12 @@ test_group("2.0.5 guards -- vocalization / intent tags out of range");
 # as a 2205-sample SUCCESS (measured). DELIBERATE DIVERGENCE, forced by the
 # enum -> int erasure.
 var gv = crvoice_new(PRANI_SP_WOLF);
-assert_eq(crvoice_vocalize(gv, pr_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag -1 rejected");
+assert_eq(crvoice_vocalize(gv, (0 - 1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION, "voc tag -1 rejected");
 assert_eq(crvoice_vocalize(gv, PRANI_VOC_COUNT, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "voc tag == PRANI_VOC_COUNT rejected");
 assert_eq(crvoice_vocalize(gv, 99, T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "voc tag 99 rejected (was a 2205-sample success)");
-assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, pr_neg(1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
+assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, (0 - 1), T_SR, T_DUR_005), PRANI_ERR_INVALID_VOCALIZATION,
   "intent tag -1 rejected");
 assert_eq(crvoice_vocalize_with_intent(gv, PRANI_VOC_HOWL, PRANI_INTENT_COUNT, T_SR, T_DUR_005),
   PRANI_ERR_INVALID_VOCALIZATION,
@@ -1198,7 +1202,7 @@ assert_eq(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_j
 # resonance_seed is deliberately NOT range-checked -- it is an RNG seed, and
 # every i64 bit pattern is a legal one.
 var g_jr = crvoice_clone_params(species_params(PRANI_SP_WOLF));
-SpeciesParams_set_resonance_seed(g_jr, pr_neg(1));
+SpeciesParams_set_resonance_seed(g_jr, (0 - 1));
 assert_eq(prani_is_err(crvoice_from_json_str(t_voice_json(PRANI_SP_WOLF, 0, T_1_0, T_0_5, g_jr))), 0,
   "resonance_seed is NOT range-checked (every i64 is a legal seed)");
 # Snake's row is f0_min == f0_max == f0_default == 0.0 -- the degenerate case
@@ -1388,6 +1392,93 @@ var vl_ph = sequence_call_phrase_synthesize(sequence_call_phrase_new(vl_els, PRA
   crvoice_new(PRANI_SP_WOLF), T_8000);
 assert_eq(prani_is_err(vl_ph), 0, "control: the wolf howl+bark phrase synthesized");
 assert_eq(pr_lt(t_max_abs(vl_ph), T_1_0), 1, "the wolf howl+bark phrase stays under full scale (2.24 before)");
+
+# ================================================================
+# Audit C1, 2.3.2. The trill's AM and the subharmonic and biphonation layers run a
+# tone from time 0 over the whole call. Through 2.3.1 each carried its own copy of
+# the f32 build's time-base arm, and none was tested: an f32 arm written in f32
+# measured up to 0.12 off at 1000 s and 1.9e-7 at sample 1000. They share
+# crvoice_tone now. Each expected value is the true sin(2*pi*f*i/44100), with the
+# phase reduced exactly ((f*i) mod 44100) in Python before the sine, held to 1e-9 in
+# f64 (measured 2.4e-10, at 712 Hz 1000 s in) and 5e-8 in f32 (measured 2.8e-8: the
+# one rounding to f32 is up to 3e-8 below 1).
+test_group("2.3.2 C1 -- the voice layers' tone holds its time base (ADR-0010)");
+var C1_TOL = t_per(0x3e112e0be826d695, 0x3e6ad7f29abcaf48);
+var c1_bad = 0;
+# c1_tone(f, i, exp64) -- count a miss if sample i of crvoice_tone at f Hz, 44.1 kHz,
+# is farther than C1_TOL from the true value exp64 (f64 bits).
+fn c1_tone(f, i, exp64) {
+    var got = pr_to64(crvoice_tone(pr_from(f), i, pr_from(44100)));
+    if (f64_le(f64_abs(f64_sub(got, exp64)), C1_TOL) == 0) {
+        c1_bad = c1_bad + 1;
+        println("  C1 miss at f, i:");
+        println_int(f);
+        println_int(i);
+    }
+    return 0;
+}
+c1_tone(20, 1, 0x3f6757dccc777cfb);
+c1_tone(20, 1000, 0x3fd26d9dc818b197);
+c1_tone(20, 441001, 0x3f6757dccc777cfb);
+c1_tone(20, 16777217, 0xbfef3cde50fd8923);
+c1_tone(20, 44100007, 0x3f946c8a3f8995ad);
+c1_tone(50, 1, 0x3f7d2dc6697f1170);
+c1_tone(50, 1000, 0x3fe7d76ff657a92a);
+c1_tone(50, 441001, 0x3f7d2dc6697f1170);
+c1_tone(50, 16777217, 0xbfef17d3f340a3fd);
+c1_tone(50, 44100007, 0x3fa9856661817582);
+c1_tone(712, 1, 0x3fb9ecc2744afb7d);
+c1_tone(712, 1000, 0x3fe94ce1e2a1c450);
+c1_tone(712, 441001, 0x3fb9ecc2744afb7d);
+c1_tone(712, 16777217, 0x3fefecee24f681ca);
+c1_tone(712, 44100007, 0x3fe4dc710269c64f);
+assert_eq(c1_bad, 0, "15 samples of a 20, 50 and 712 Hz tone, to 1000 s, are the true sine");
+# The trill's AM through it: 0.65 + 0.35 x the tone, on 10 s of ones. Its f32 budget
+# also carries 0.65's and 0.35's own rounding to f32 (2.4e-8 and 6e-9).
+var c1_buf = vec_new();
+var c1_k = 0;
+while (c1_k < 441002) { vec_push(c1_buf, PR_ONE); c1_k = c1_k + 1; }
+assert_eq(crvoice_apply_am_pattern(c1_buf, PRANI_VOC_TRILL, pr_from(44100)), 0, "control: the AM applies");
+var c1_exp = f64_add(0x3fe4cccccccccccd, f64_mul(0x3fd6666666666666, 0x3f6757dccc777cfb));
+var c1_am_tol = t_per(0x3e112e0be826d695, 0x3e8ad7f29abcaf48);   # 1e-9 / 2e-7
+assert_eq(f64_le(f64_abs(f64_sub(pr_to64(vec_get(c1_buf, 441001)), c1_exp)), c1_am_tol), 1,
+  "a trill's AM 10 s in is 0.65 + 0.35 sin(2 pi 20 t)");
+
+# ================================================================
+# Audit K4 and K7, 2.3.2: mutants moving PRANI_EPSILON and PR_V_0_999 survived.
+test_group("2.3.2 K4/K7 -- the contour's epsilon and the notch's pole ceiling");
+# K4: a contour segment narrower than epsilon (2^-23) is not divided by; one wider
+# is interpolated. 2^-24 and 1.5 x 2^-23 wide, at 0.25, are exact in both formats,
+# and an epsilon halved or doubled moves one of them across it.
+var k4_pts = vec_new();
+vec_push(k4_pts, 0);
+vec_push(k4_pts, PR_ONE);
+vec_push(k4_pts, pr_of64(0x3fd0000000000000));                       # 0.25
+vec_push(k4_pts, PR_ONE);
+vec_push(k4_pts, pr_of64(0x3fd0000040000000));                       # 0.25 + 2^-24
+vec_push(k4_pts, pr_from(3));
+vec_push(k4_pts, PR_ONE);
+vec_push(k4_pts, pr_from(3));
+var k4_pc[16];
+PitchContour_set_base(&k4_pc, pr_from(100));
+PitchContour_set_points(&k4_pc, k4_pts);
+assert_eq(crvoice_pitch_contour_f0_at(&k4_pc, pr_of64(0x3fd0000020000000)), pr_from(100),
+  "a segment 2^-24 wide is not interpolated: 100 Hz at its middle");
+vec_set(k4_pts, 4, pr_of64(0x3fd00000c0000000));                     # 0.25 + 1.5 x 2^-23
+assert_eq(crvoice_pitch_contour_f0_at(&k4_pc, pr_of64(0x3fd0000060000000)), pr_from(200),
+  "one 1.5 x 2^-23 wide is: 200 Hz at its middle");
+# K7: the nasal notch's pole radius 1 - pi x 80 / sr is held at 0.999 above 251 kHz.
+# An impulse at 400 kHz: the second sample is 2 cos(theta) (r - 1) x 0.99, exactly
+# -0.0019799847329753134 at r = 0.999 (Python). f32 measured 1.0e-8 off, the f32
+# 0.999's own rounding; r = 0.99 is 1.8e-2 off and the unheld 0.99937 7.4e-4.
+var k7 = vec_new();
+vec_push(k7, PR_ONE);
+var k7_i = 1;
+while (k7_i < 100) { vec_push(k7, 0); k7_i = k7_i + 1; }
+assert_eq(crvoice_apply_nasal_antiformant(k7, pr_from(400000), PR_ONE), 0, "control: the notch applies at 400 kHz");
+var k7_tol = t_per(0x3cd203af9ee75616, 0x3e7ad7f29abcaf48);   # 1e-15 / 1e-7
+assert_eq(f64_le(f64_abs(f64_sub(pr_to64(vec_get(k7, 1)), 0xbf603854359735c9)), k7_tol), 1,
+  "its pole radius is held at 0.999");
 
 var rc = assert_summary();
 syscall(60, rc);

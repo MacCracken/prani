@@ -100,6 +100,8 @@ test_group("integers in the format");
 assert_eq(pr_to(pr_from(16777216)), 16777216, "2^24 is exact");
 assert_eq(pr_to(pr_from(16777217)), t_per(16777217, 16777216), "2^24 + 1: exact in f64, 2^24 in f32");
 assert_eq(t_next_up(pr_from(16777216)) == pr_from(16777218), t_per(0, 1), "f32's next integer past 2^24 is +2");
+# 2^53 - 1 is correctly rounded in both: exact in f64, and 2^53 in f32 (it rounds once).
+assert_eq(pr_from(9007199254740991), t_per(0x433FFFFFFFFFFFFF, 0x5A000000), "2^53 - 1, rounded once");
 
 # ================================================================
 test_group("time and phase stay f64 (real.cyr, ADR-0010)");
@@ -145,6 +147,22 @@ assert_eq(rt_vk > 0, 1, "the effort is written as 0.5's f64 bits");
 # the pairs decoder, which the f32 build provides under derive's name
 var rt_pairs = bayan_json_parse(str_new(RT_DOC, strlen(RT_DOC)));   # it takes a Str
 assert_eq(FatigueState_fatigue(FatigueState_from_json(rt_pairs)), PR_HALF, "the pairs decoder reads it too");
+
+# Audit C5, 2.3.2. The helpers every budget rests on. t_key read only the low 32 bits
+# of an f32-build word, so a word with high bits set, an f64 pattern leaked into
+# the f32 build, measured as the real in its low half: 0 ulps from 1.0 here.
+test_group("2.3.2 C5 -- the ulps helpers refuse a word that is not of the format");
+var c5_one = PR_ONE;
+var c5_hi = c5_one | (1 << 32);
+assert_eq(t_word_ok(c5_one), 1, "1.0 is a word of either format");
+assert_eq(t_word_ok(c5_hi), t_per(1, 0), "a word with high bits is one only in f64");
+assert_eq(t_ulps(c5_one, c5_hi), t_per(4294967296, 0x7FFFFFFFFFFFFFFF),
+  "f32: no distance is measured to it (2.3.1: 0 ulps from 1.0); f64: 2^32 ulps");
+assert_eq(t_ulps(c5_one, t_per(0x3FF0000000000000, 0xFFFFFFFF3F800000)), t_per(0, 0x7FFFFFFFFFFFFFFF),
+  "f32: nor to a sign-extended 1.0");
+assert_eq(t_ulps(pr_div(0, 0), pr_div(0, 0)), 0x7FFFFFFFFFFFFFFF, "two NaNs have no distance, in either build");
+assert_eq(t_ulps(c5_one, t_next_up(c5_one)), 1, "control: the next real up is 1 ulp away");
+assert_eq(t_ulps(pr_neg(0), 0), 0, "control: -0 and +0 share a key");
 
 var rc = assert_summary();
 syscall(60, rc);

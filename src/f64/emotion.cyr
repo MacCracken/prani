@@ -122,17 +122,39 @@ fn emotion_arousal(self) {
     return PrEmotion_arousal(self);
 }
 
+# emotion_blend(v, t, s) -- one smoothing step, v*s + t*(1-s), the Rust's formula.
+# The exact blend always lies between v and t, but two roundings can put the
+# computed one past t once v has all but reached it: an arousal target of exactly
+# 0.66, the Mid/High bound, read High after enough updates, in both builds, where
+# exact arithmetic never leaves Mid (audit B5, 2.3.2). So the result is held
+# between v and t, which can only move it toward the exact value. The f32 build
+# blends in f64 and rounds once (ADR-0010).
+#
+# The hold is sound only for a convex blend, 0 <= s <= 1. A smoothing outside that
+# (a raw setter's: update cannot refuse it) is blended as it is, so the state
+# leaves its range and the guards report it (tests/emotion.tcyr, input-range guards).
+#must_use
+fn emotion_blend(v, t, s) {
+    var r = f64_add(f64_mul(v, s), f64_mul(t, f64_sub(PRE_1_0, s)));
+    if (prani_in_range(s, PRE_0_0, PRE_1_0) == 0) { return r; }
+    var lo = f64_min(v, t);
+    var hi = f64_max(v, t);
+    if (f64_lt(r, lo)) { return lo; }
+    if (f64_gt(r, hi)) { return hi; }
+    return r;
+}
+
 # update(self, target_valence, target_arousal) -- exponential decay toward the
 # clamped target at rate `smoothing`. Call once per frame/tick.
 #   valence = valence*s + tv*(1-s);  arousal = arousal*s + ta*(1-s)
+# each held between its old value and its target (emotion_blend).
 fn emotion_update(self, target_valence, target_arousal) {
     if (self <= 0) { return 0; }   # ADR-0008
     var tv = f64_clamp(target_valence, PRE_NEG_1_0, PRE_1_0);
     var ta = f64_clamp(target_arousal, PRE_0_0, PRE_1_0);
     var s = PrEmotion_smoothing(self);
-    var one_minus_s = f64_sub(PRE_1_0, s);
-    PrEmotion_set_valence(self, f64_add(f64_mul(PrEmotion_valence(self), s), f64_mul(tv, one_minus_s)));
-    PrEmotion_set_arousal(self, f64_add(f64_mul(PrEmotion_arousal(self), s), f64_mul(ta, one_minus_s)));
+    PrEmotion_set_valence(self, emotion_blend(PrEmotion_valence(self), tv, s));
+    PrEmotion_set_arousal(self, emotion_blend(PrEmotion_arousal(self), ta, s));
 }
 
 # set(self, valence, arousal) -- direct (no smoothing), clamped.

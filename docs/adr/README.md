@@ -33,6 +33,8 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0010](0010-two-float-formats.md) | prani builds in either float format: f64, or f32 | Accepted |
 | [0011](0011-a-pitch-past-nyquist-is-refused.md) | A pitch the sample rate cannot represent is refused | Accepted |
 | [0012](0012-a-steady-wind-does-not-shift-the-pitch.md) | A steady wind does not shift the pitch | Accepted |
+| [0013](0013-a-formant-past-nyquist-is-placed-in-band.md) | A formant past Nyquist is placed in band, not lost | Accepted |
+| [0014](0014-a-render-does-not-depend-on-the-sample-rate.md) | A render's level does not depend on the sample rate | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
@@ -78,3 +80,14 @@ ADR-0010's bar of accuracy over the Rust's numbers. 0011 refuses a pitch at or p
 Nyquist, which rendered silence or an alias as success. 0012 makes the wind's Doppler
 term the physically correct 0: a steady wind does not change the pitch heard between a
 source and a listener at rest.
+
+0013 comes out of the 2.3 sweep
+([`docs/audit/2026-11-17-2.3-audit.md`](../audit/2026-11-17-2.3-audit.md)). It extends
+ADR-0009's placement of prani's estimated formants to the species' own: a formant past
+Nyquist made svara refuse all five, and the Rust, and prani through 2.3.1, rendered
+svara's default vowel as the species, and discarded each block's refusal.
+
+0014 comes out of verifying 0013, and is older than 2.3. prani's levels are calibrated
+at 44.1 kHz (ADR-0007), and four stages, two of them svara's, had a response fixed per
+sample: a render at 8 kHz was 19 dB louder than the same call at 44.1 kHz. prani now
+holds each to its 44.1 kHz response, through what svara exposes.

@@ -213,8 +213,22 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     var ratio = pr_div(speed, pr_add(speed, v));
 
     var len = vec_len(samples);
+    #ifdef PRANI_F32
+    # ADR-0010 (2.3.2, audit B1): the resampling position is an absolute sample
+    # index, so it stays f64, as an oscillator's time does. In f32 its fraction
+    # coarsens as the buffer grows (2^-7 of a sample past 2^16, a whole sample at
+    # 2^23), and 400 s of a 3 kHz tone came back with errors of 0.89. The clamp, the
+    # ratio and the length are taken in f64 from the widened velocity, exactly as the
+    # f64 build takes them, so f32's rounding of 0.9 and of the ratio neither drifts
+    # the position nor moves the length. Only the interpolation weight is rounded.
+    var bound64 = f64_mul(f64_from(343), 0x3FECCCCCCCCCCCCD);   # 343 x 0.9, as the f64 build
+    var v64 = f64_clamp(pr_to64(velocity), f64_neg(bound64), bound64);
+    var ratio64 = f64_div(f64_from(343), f64_add(f64_from(343), v64));
+    var out_len = f64_to(f64_div(f64_from(len), ratio64));
+    #else
     # out_len = (len / ratio) as usize  -- len as f64, divide, truncate.
     var out_len = pr_to(pr_div(pr_from(len), ratio));
+    #endif
     # Moving away stretches a buffer up to 1.9x, so one past ~1.41e8 samples can
     # outgrow a vec. Refused before the first push, which would be a process exit.
     if (prani_buffer_len_ok(out_len) == 0) { return PRANI_ERR_INVALID_VOCALIZATION; }
@@ -223,10 +237,16 @@ fn spatial_apply_doppler_shift(samples, velocity, _sample_rate) {
     if (output < 0) { return output; }   # PRANI_ERR_ALLOC (2.2.0)
     var i = 0;
     while (i < out_len) {
+        #ifdef PRANI_F32
+        var src64 = f64_mul(f64_from(i), ratio64);
+        var idx = f64_to(src64);
+        var frac = pr_of64(f64_sub(src64, f64_from(idx)));
+        #else
         # src = i * ratio;  idx = trunc(src);  frac = src - idx
         var src = pr_mul(pr_from(i), ratio);
         var idx = pr_to(src);
         var frac = pr_sub(src, pr_from(idx));
+        #endif
 
         var s0 = 0;
         if (idx < len) { s0 = vec_get(samples, idx); }

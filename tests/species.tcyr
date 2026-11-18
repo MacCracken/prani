@@ -571,5 +571,21 @@ var sz_p = species_params_into(&sz_row, PRANI_SP_RAPTOR);
 assert_eq(SpeciesParams_resonance_seed(sz_p), SpeciesParams_resonance_seed(species_params(PRANI_SP_RAPTOR)),
   "control: a stack row holds the same species as an allocated one, last field included");
 
+# ================================================================
+# Audit K16, 2.3.2: a mutant lowering PR_SP_JITTER_MAX survived. The decoders' range
+# check accepts the format's nearest 0.05 and 0.1 (the builders clamp below them,
+# hardening.tcyr B3), and refuses the real above. Each is stated as its decimal.
+test_group("2.3.2 K16 -- the jitter and shimmer bounds are their decimals");
+var kj = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_jitter(kj, pr_of64(0x3fa999999999999a));
+assert_eq(species_params_validate(kj), PRANI_ERR_NONE, "jitter 0.05 is in range");
+SpeciesParams_set_jitter(kj, t_next_up(pr_of64(0x3fa999999999999a)));
+assert_eq(species_params_validate(kj), PRANI_ERR_INVALID_SPECIES, "the real above it is not");
+var ks = species_params(PRANI_SP_WOLF);
+SpeciesParams_set_shimmer(ks, pr_of64(0x3fb999999999999a));
+assert_eq(species_params_validate(ks), PRANI_ERR_NONE, "shimmer 0.1 is in range");
+SpeciesParams_set_shimmer(ks, t_next_up(pr_of64(0x3fb999999999999a)));
+assert_eq(species_params_validate(ks), PRANI_ERR_INVALID_SPECIES, "the real above it is not");
+
 var rc = assert_summary();
 syscall(60, rc);
