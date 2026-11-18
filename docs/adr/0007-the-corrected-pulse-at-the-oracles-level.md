@@ -42,6 +42,11 @@ the gain solved here is a 44.1 kHz one, and every other rate is now held to the
 44.1 kHz render. The breathiness mapping below carries the noise's scale for the rate,
 and is this one at 44.1 kHz.
 
+*Re-solved in 2.3.3 by [ADR-0015](0015-a-formant-renders-the-width-it-is-specified.md),*
+by this ADR's method against the same 56 renders and 2.1.1's levels, when the formants
+began to render their specified widths: the gain is −3.78 dB, from +7.37, and the 56
+spread from −4.9 to +7.9 dB around it.
+
 1. **The oracle's excitation, exactly.** svara's mix is linear in its breathiness
    b′, with the pulse at peak g. So prani hands svara `b′ = g·b / (1 − b + g·b)` and
    scales each sample by `(1 − b + g·b) / g`. The tract then hears

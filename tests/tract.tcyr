@@ -1156,7 +1156,11 @@ assert_eq(SvVocalTract_lip_radiation(v1_s44), 0x3FEF0A3D70A3D70A, "at 44.1 kHz s
 assert_eq(SvVocalTract_interaction_strength(v1_s44), 0x3FA999999999999A, "its interaction its own 0.05");
 assert_eq(SvSmoothedParam_current(SvVocalTract_gain(v1_s44)), 0x3FF0000000000000, "its gain 1.0");
 assert_eq(DcBlocker_r(CreatureTract_dc_blocker(v1_w44)), PRANI_DCBLOCK_R, "and the DC blocker's pole its 0.995");
-assert_eq(SvFormant_bandwidth(vec_get(SvVocalTract_formants(v1_s44), 0)), f64_from(100), "F1 has its own 100 Hz");
+# 2.3.3 (ADR-0015): svara renders a bandwidth b' as b' sin(w0), so a 100 Hz F1 at
+# 420 Hz is handed svara 1668.2 Hz (Python) to render 100 Hz wide; 2.3.2 handed it 100.
+var v1_bw44 = SvFormant_bandwidth(vec_get(SvVocalTract_formants(v1_s44), 0));
+assert_eq(f64_le(f64_abs(f64_sub(v1_bw44, 0x409a10c801a1a4c8)), 0x3E112E0BE826D695), 1,
+  "F1 is handed svara 1668.2 Hz, which it renders 100 Hz wide");
 var v1_w8 = crtract_new(species_params(PRANI_SP_WOLF), pr_from(8000));
 var v1_s8 = CreatureTract_tract(v1_w8);
 var V1_TOL = t_per(0x3D719799812DEA11, 0x3E7AD7F29ABCAF48);   # 1e-12 / 1e-7
@@ -1170,8 +1174,8 @@ assert_eq(f64_le(f64_abs(f64_sub(v1_r8, 0x3fef20bd87a38be5)), V1_TOL), 1,
   "the DC blocker's pole 0.995^(44100/8000), its corner where it is at 44.1 kHz");
 var v1_c8 = crtract_new(species_params(PRANI_SP_CAT), pr_from(8000));
 var v1_bw = SvFormant_bandwidth(vec_get(SvVocalTract_formants(CreatureTract_tract(v1_c8)), 0));
-assert_eq(f64_le(f64_abs(f64_sub(v1_bw, 0x403786b0bc3e60ac)), 0x3E45798EE2308C3A), 1,
-  "a cat's F1 is handed svara 23.53 Hz wide at 8 kHz, to pass what its 120 Hz does at 44.1 kHz");
+assert_eq(f64_le(f64_abs(f64_sub(v1_bw, 0x406834a384efff15)), 0x3E112E0BE826D695), 1,
+  "a cat's 120 Hz F1 is handed svara 193.64 Hz at 8 kHz, which it renders 120 Hz wide");
 assert_real(crtract_noise_scale(pr_from(8000)), pr_of64(0x3fdb423c5acf2baa), 1,
   "white noise at 8 kHz x sqrt(8000/44100)");
 assert_eq(crtract_noise_scale(T_SR), PR_ONE, "and x 1 at 44.1 kHz");
@@ -1182,14 +1186,16 @@ assert_eq(crtract_apply_spectral_tilt(v1_tl, T_TILT_N6, pr_from(8000)), PRANI_ER
   "control: a -6 dB/oct tilt at 8 kHz");
 assert_eq(f64_le(f64_abs(f64_sub(pr_to64(vec_get(v1_tl, 0)), 0x3fef4c8ad44db68d)), V1_TOL), 1,
   "has its 44.1 kHz corner: y[0] = 1 - 0.5^(44100/8000)");
-# naad's bandpass for a noise-only voice passes the noise power in Hz it does at
-# 44.1 kHz: a snake's Q 2 at 2500 Hz is 0.583 at 8 kHz (Python), where 2.3.1's Q 2
-# passed half of it, its alpha sin(w0) / 2Q shrinking toward Nyquist.
+# naad's bandpass for a noise-only voice renders the band its Q specifies, f / Q Hz:
+# a snake's Q 2 at 2500 Hz is handed naad as 0.941 at 8 kHz and 1.958 at 44.1 kHz
+# (Python, ADR-0015), where 2.3.1's Q 2 at 8 kHz passed half of it, naad's alpha
+# sin(w0) / 2Q shrinking toward Nyquist.
 var v1_sn = crtract_new(species_params(PRANI_SP_SNAKE), pr_from(8000));
-assert_eq(f64_le(f64_abs(f64_sub(BiquadFilter_q(CreatureTract_noise_filter(v1_sn)), 0x3fe2a8dabdcaa6e3)),
-    0x3D719799812DEA11), 1, "a snake's noise band at 8 kHz has Q 0.583");
+assert_eq(f64_le(f64_abs(f64_sub(BiquadFilter_q(CreatureTract_noise_filter(v1_sn)), 0x3fee1d2165cadadc)),
+    0x3D719799812DEA11), 1, "a snake's noise band at 8 kHz has Q 0.941");
 var v1_sn44 = crtract_new(species_params(PRANI_SP_SNAKE), T_SR);
-assert_eq(BiquadFilter_q(CreatureTract_noise_filter(v1_sn44)), f64_from(2), "and Q 2 at 44.1 kHz");
+assert_eq(f64_le(f64_abs(f64_sub(BiquadFilter_q(CreatureTract_noise_filter(v1_sn44)), 0x3fff53dfcdde36cb)),
+    0x3D719799812DEA11), 1, "and Q 1.958 at 44.1 kHz");
 # The glottal source's noise carries the same density: svara is handed the breathiness
 # whose noise is scaled by sqrt(8000/44100), not the 44.1 kHz one.
 var v1_gl = crtract_glottal_new(T_220, pr_from(8000), wolf, PR_ONE);
@@ -1291,6 +1297,61 @@ assert_eq(v1_off(PRANI_SP_BEE, 96000, 200), 0, "control: and at 96 kHz");
 assert_eq(v1_off(PRANI_SP_WOLF, 8000, 400), 0, "a wolf's 400 Hz harmonic at 8 kHz is its level at 44.1 kHz");
 assert_eq(v1_off(PRANI_SP_WOLF, 16000, 400), 0, "and at 16 kHz");
 assert_eq(v1_off(PRANI_SP_WOLF, 96000, 400), 0, "and at 96 kHz");
+
+# 2.3.3 (ADR-0015). A formant specified b Hz wide renders b Hz wide, measured on the
+# resonance itself: one svara resonance, built as crtract_new builds it, driven by a
+# steady sine, is 3 dB down from its peak at the analog resonance's -3 dB edges,
+# sqrt(f^2 + b^2/4) -+ b/2. Through 2.3.2 a wolf's 100 Hz F1 at 420 Hz rendered 6.0 Hz
+# wide at 44.1 kHz. Held to 0.25 dB of -3.01 dB at each edge.
+test_group("2.3.3 a formant renders the width it is specified");
+# fw_amp(filt, f, sr) -- the steady amplitude of filt's output for a unit sine at f Hz
+# (f64): 2 s of it, the last second measured by a Goertzel at f.
+fn fw_amp(filt, f, sr) {
+    var w = f64_div(f64_mul(F64_TAU, f), f64_from(sr));
+    var cw = f64_mul(F64_TWO, f64_cos(w));
+    var s1 = 0;
+    var s2 = 0;
+    var i = 0;
+    while (i < sr * 2) {
+        var y = svara_formant_filter_process_sample(filt, f64_sin(f64_mul(w, f64_from(i))));
+        if (i >= sr) {
+            var x = f64_add(f64_sub(f64_mul(cw, s1), s2), y);
+            s2 = s1;
+            s1 = x;
+        }
+        i = i + 1;
+    }
+    var re = f64_sub(s1, f64_mul(s2, f64_cos(w)));
+    var im = f64_mul(s2, f64_sin(w));
+    return f64_div(f64_mul(F64_TWO, f64_sqrt(f64_add(f64_mul(re, re), f64_mul(im, im)))), f64_from(sr));
+}
+# fw_db3(f, b, sr) -- 1 iff a resonance at f Hz specified b Hz wide, through
+# crtract_bw64, is within 0.25 dB of -3.01 dB at both analog -3 dB edges.
+fn fw_db3(f, b, sr) {
+    var fv = vec_new();
+    vec_push(fv, svara_formant_new(f64_from(f), crtract_bw64(pr_from(b), pr_from(f), pr_from(sr)), F64_ONE));
+    var filt = svara_formant_filter_new(fv, f64_from(sr));
+    var half = f64_div(f64_from(b), F64_TWO);
+    var mid = f64_sqrt(f64_add(f64_mul(f64_from(f), f64_from(f)), f64_mul(half, half)));
+    var pk = fw_amp(filt, f64_from(f), sr);
+    var ok = 1;
+    var k = 0;
+    while (k < 2) {
+        svara_formant_filter_reset(filt);
+        var e = f64_sub(mid, half);
+        if (k == 1) { e = f64_add(mid, half); }
+        var r = f64_div(fw_amp(filt, e, sr), pk);
+        if (f64_lt(r, 0x3FE5FC76F3FF3218) == 1) { ok = 0; }   # 10^(-3.26/20)
+        if (f64_gt(r, 0x3FE749F8DF65990B) == 1) { ok = 0; }   # 10^(-2.76/20)
+        k = k + 1;
+    }
+    return ok;
+}
+assert_eq(fw_db3(420, 100, 44100), 1, "a wolf's F1, 100 Hz wide at 420 Hz, at 44.1 kHz (2.3.2: 6.0 Hz)");
+assert_eq(fw_db3(2100, 150, 44100), 1, "its F3, 150 Hz wide at 2100 Hz (2.3.2: 44 Hz)");
+assert_eq(fw_db3(850, 120, 8000), 1, "a cat's F1 at 8 kHz");
+assert_eq(fw_db3(3500, 500, 16000), 1, "a songbird's F1 at 16 kHz, 500 Hz wide at 3500 Hz");
+assert_eq(fw_db3(420, 100, 96000), 1, "a wolf's F1 at 96 kHz (2.3.2: 2.7 Hz)");
 
 var rc = assert_summary();
 syscall(60, rc);

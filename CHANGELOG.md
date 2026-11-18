@@ -20,6 +20,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > The path changed at 2.0.0 because the port created `rust-old/` by moving the
 > Rust aside, so the era decides which form resolves.
 
+## [2.3.3] - the specified formant widths
+
+Patch release: every formant renders the width its species specifies, at every rate
+([ADR-0015](docs/adr/0015-a-formant-renders-the-width-it-is-specified.md)). Found while
+repairing audit V1 in 2.3.2, and older than the port.
+
+No dependency moves: cyrius 6.7.18, svara 3.14.0, naad 2.3.5, hisab 3.5.0, goonj
+2.3.2, sakshi 2.5.10. The consumer floor stays cyrius 6.7.2, for both formats.
+**2,686 assertions / 22 suites, in each format.**
+
+### Changed
+
+- ⚠ **A formant renders the width it is specified.** svara's resonator computes
+  α = sin ω₀ · sinh(πb/sr), the line its port carried from its own Rust 1.0.0
+  (`src/formant.rs:253-254`), and that renders a b Hz bandwidth about b · sin(2πf/sr)
+  wide. A wolf's 100 Hz F1 at 420 Hz was 6.0 Hz wide at 44.1 kHz, its 150 Hz F3 44 Hz,
+  and 2.3.2 held every other rate to those widths. Against the analog resonance, that was
+  9.4 dB RMS off near the peak and 5.1 dB low in in-band power. prani now hands svara
+  b' = (sr/π) · asinh(πb / (sr · sin ω₀)), at which svara's α is πb/sr. Of three rules
+  measured, that is the closest to the analog resonance: 0.45 dB near the peak and
+  0.12 dB in power. The noise-only voice's naad Q renders its f/Q band the same way. A
+  bandwidth svara refuses is still handed over unchanged, for svara to refuse.
+- ⚠ **The excitation gain is re-solved** (ADR-0007's method, against the same 56 renders
+  and 2.1.1's levels). The wider resonances made the median 10.82 dB louder. The gain is
+  now −3.78 dB, from +7.37, and the median is 2.1.1's level again. Around it the 56
+  spread from −4.9 to +7.9 dB, so the voice suite's bound on that spread is re-recorded
+  at ±8 dB.
+- **ADR-0014's bandwidth rule is superseded.** Its lip, pole and noise rules stand, and
+  now hold each stage to a 44.1 kHz render whose formants are accurate. Over 861 renders
+  at seven rates, the mean level error against 44.1 kHz is 0.225 dB (2.3.2: 0.253), the
+  worst 2.6 (3.1), and the mean spectral error 1.10 dB (1.27).
+
+### Fixed
+
+- **The f32 build's nasal notch recursed in f32**, with poles 0.994 from the unit circle,
+  which amplified its own rounding. A cat's howl, whose meow opens on it, was up to
+  4.2e-6 of its peak off the f64 build over the nasal phase, and 1.28e-6 off in RMS once
+  its formants widened, against 1.6e-7 at most for every other pinned layer. It now
+  recurses in f64 and rounds each sample once: 1.43e-7. The f64 build is unchanged by it
+  (ADR-0010, amended).
+
+### Verified
+
+- **The widths are measured, not assumed.** `tests/tract.tcyr` drives a steady sine
+  through one svara resonance built as `crtract_new` builds it, and finds it within
+  0.25 dB of −3 dB at the analog resonance's edges, at 44.1, 8, 16 and 96 kHz: −3.01 dB
+  well below Nyquist, −2.91 and −3.14 dB for a songbird's F1 at 16 kHz. Handed svara's
+  widths, as 2.3.2 did, a wolf's F1 is 24.5 dB down there. That mutant fails 9
+  assertions, among them every width case.
+- **The audio moved where the widths are rendered.** In the whole-surface sweep against
+  tag 2.3.2, in each format:
+  - 283 of 404 renders moved, 122 of the 127 at 44.1 kHz among them. At 44.1 kHz their
+    RMS changed by −3.0 to +8.4 dB around a median of 0.00, 51 of them by less than
+    1 dB. The five that did not move are the cricket's and the bee's, whose paths never
+    reach svara's formants;
+  - no render changed its status or length, none became non-finite, all 26 JSON
+    documents are byte-identical, and no hostile case changed its status;
+  - the loudest render peaks at 0.657 (2.3.2: 0.665).
+- **The pinned levels moved, and are re-recorded** (`tests/layers.tcyr`): 13 of 15, by
+  −0.10 to +3.91 dB. The songbird's trill moved most, then the two streams and the
+  cat's howl. The cricket and the bee did not move.
+- **Gates.**
+  - All 22 suites pass in each format (2,686 assertions each), and so do the fuzz
+    harness and the five examples.
+  - `cyrius audit` exits 0, `scripts/check-alloc.sh` and `gen-f64.sh --check` pass,
+    every file is clean under `cyrfmt` and lint, and `cyrius deps --verify` is 50/50.
+  - The consumer floor is still cyrius 6.7.2 in both formats: the from-scratch consumer
+    builds there warning-free, and its output is byte-identical to 6.7.18's.
+
+### Docs
+
+- ADR-0015, and amendments to ADR-0007, ADR-0010 and ADR-0014 (status: its bandwidth
+  rule superseded).
+
 ## [2.3.2] - the 2.3 sweep
 
 Patch release: an independent review of the 2.3.0 and 2.3.1 work, and the repair of

@@ -9,7 +9,10 @@
 # Those layers were checked only for "no error, right length, finite, audible".
 #
 # Each case renders one call that runs the layer named above it and pins its RMS to
-# within a RELATIVE 1e-9 of the value recorded on the 2.2.1 tree. Relative, and that
+# within a RELATIVE 1e-9 of the value recorded on the 2.2.1 tree, re-recorded in 2.3.3
+# when the formants began to render their specified widths and the excitation gain
+# was re-solved (ADR-0015): 13 of the 15 moved, by -0.10 to +3.91 dB; the cricket and
+# the bee, whose paths never reach svara's formants, did not. Relative, and that
 # tight, because some layers are small next to what they ride on: the dragon's
 # fire-breath moves a roar dominated by its 0.4 subharmonic by about 1e-6, far
 # inside any tolerance in dB. 1e-9 is still a million times wider than the
@@ -133,53 +136,53 @@ fn lv_pin(name, v, n, rms_ref) {
     return 0;
 }
 
-# dragon_roar: subharmonics, chaos noise and fire-breath (RMS 0.113115099)
+# dragon_roar: subharmonics, chaos noise and fire-breath (RMS 0.113088466)
 var lv_1 = crvoice_vocalize(crvoice_new(PRANI_SP_DRAGON), PRANI_VOC_ROAR, LV_SR, LV_D);
-lv_pin("dragon_roar", lv_1, 4410, 0x3fbcf51c711e1816);
-# lion_roar: subharmonics and chaos noise (RMS 0.113115348)
+lv_pin("dragon_roar", lv_1, 4410, 0x3fbcf35da04f4638);
+# lion_roar: subharmonics and chaos noise (RMS 0.113119070)
 var lv_2 = crvoice_vocalize(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, LV_SR, LV_D);
-lv_pin("lion_roar", lv_2, 4410, 0x3fbcf520a23093ca);
-# croc_rumble: the crocodilian subharmonic (RMS 0.114626304)
+lv_pin("lion_roar", lv_2, 4410, 0x3fbcf55f1318cec5);
+# croc_rumble: the crocodilian subharmonic (RMS 0.114637486)
 var lv_3 = crvoice_vocalize(crvoice_new(PRANI_SP_CROCODILIAN), PRANI_VOC_RUMBLE, LV_SR, LV_D);
-lv_pin("croc_rumble", lv_3, 4410, 0x3fbd582644c55dc8);
-# wolf_howl: biphonation, the formant transition and the nasal notch (RMS 0.0262776811)
+lv_pin("croc_rumble", lv_3, 4410, 0x3fbd58e1de059804);
+# wolf_howl: biphonation, the formant transition and the nasal notch (RMS 0.0264676105)
 var lv_4 = crvoice_vocalize(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, LV_SR, LV_D);
-lv_pin("wolf_howl", lv_4, 4410, 0x3f9ae8895440751c);
-# dog_whine: biphonation on a whine (RMS 0.0264844308)
+lv_pin("wolf_howl", lv_4, 4410, 0x3f9b1a5346b481b9);
+# dog_whine: biphonation on a whine (RMS 0.0264056536)
 var lv_5 = crvoice_vocalize(crvoice_new(PRANI_SP_DOG), PRANI_VOC_WHINE, LV_SR, LV_D);
-lv_pin("dog_whine", lv_5, 4410, 0x3f9b1ebc10cd7ad0);
-# dog_howl: biphonation on a dog (RMS 0.0260660493)
+lv_pin("dog_whine", lv_5, 4410, 0x3f9b0a156a1f7550);
+# dog_howl: biphonation on a dog (RMS 0.0261501962)
 var lv_6 = crvoice_vocalize(crvoice_new(PRANI_SP_DOG), PRANI_VOC_HOWL, LV_SR, LV_D);
-lv_pin("dog_howl", lv_6, 4410, 0x3f9ab10ef5652d65);
-# cat_howl: the cat meow transition and its nasal notch (RMS 0.00238020656)
+lv_pin("dog_howl", lv_6, 4410, 0x3f9ac71df65efe26);
+# cat_howl: the cat meow transition and its nasal notch (RMS 0.0025202112)
 var lv_7 = crvoice_vocalize(crvoice_new(PRANI_SP_CAT), PRANI_VOC_HOWL, LV_SR, LV_D);
-lv_pin("cat_howl", lv_7, 4410, 0x3f637fa7ab0756ba);
-# songbird_trill: the dual-source syrinx and the trill AM (RMS 0.0203461913)
+lv_pin("cat_howl", lv_7, 4410, 0x3f64a54415336c23);
+# songbird_trill: the dual-source syrinx and the trill AM (RMS 0.0318966772)
 var lv_8 = crvoice_vocalize(crvoice_new(PRANI_SP_SONGBIRD), PRANI_VOC_TRILL, LV_SR, LV_D);
-lv_pin("songbird_trill", lv_8, 4410, 0x3f94d5a1c83b5a35);
-# snake_hiss: the noise path and the hiss envelope (RMS 0.0157448741)
+lv_pin("songbird_trill", lv_8, 4410, 0x3fa054c2e2bd9db4);
+# snake_hiss: the noise path and the hiss envelope (RMS 0.0158966513)
 var lv_9 = crvoice_vocalize(crvoice_new(PRANI_SP_SNAKE), PRANI_VOC_HISS, LV_SR, LV_D);
-lv_pin("snake_hiss", lv_9, 4410, 0x3f901f6c9cf83d76);
+lv_pin("snake_hiss", lv_9, 4410, 0x3f90473635c0fe91);
 # cricket_stridulate: the cricket pulse train (RMS 0.0501997929)
 var lv_10 = crvoice_vocalize(crvoice_new(PRANI_SP_CRICKET), PRANI_VOC_STRIDULATE, LV_SR, LV_D2);
 lv_pin("cricket_stridulate", lv_10, 8820, 0x3fa9b3c989c6b222);
 # bee_buzz: the vibratile wing-beat (RMS 0.0466716208)
 var lv_11 = crvoice_vocalize(crvoice_new(PRANI_SP_BEE), PRANI_VOC_BUZZ, LV_SR, LV_D);
 lv_pin("bee_buzz", lv_11, 4410, 0x3fa7e557ba02e138);
-# wolf_roar_effort09: vocal effort's amplitude and tilt (RMS 0.00607559166)
+# wolf_roar_effort09: vocal effort's amplitude and tilt (RMS 0.00600345544)
 var lv_12 = crvoice_vocalize(crvoice_with_vocal_effort(crvoice_new(PRANI_SP_WOLF), LV_E09),
   PRANI_VOC_ROAR, LV_SR, LV_D);
-lv_pin("wolf_roar_effort09", lv_12, 4410, 0x3f78e2b8376999bf);
-# chorus4_howl: the chorus offsets and its 1/sqrt(n) normalisation (RMS 0.0273359004)
+lv_pin("wolf_roar_effort09", lv_12, 4410, 0x3f7897144c467864);
+# chorus4_howl: the chorus offsets and its 1/sqrt(n) normalisation (RMS 0.0274810557)
 var lv_13 = lv_chorus();
-lv_pin("chorus4_howl", lv_13, 5292, 0x3f9bfdf139c0fb38);
-# stream_wolf_howl: the stream's intent amplitude and contour (RMS 0.00945801896)
+lv_pin("chorus4_howl", lv_13, 5292, 0x3f9c23fe6d2e59a3);
+# stream_wolf_howl: the stream's intent amplitude and contour (RMS 0.0128207419)
 var lv_14 = lv_drain(stream_new(crvoice_new(PRANI_SP_WOLF), PRANI_VOC_HOWL, PRANI_INTENT_TERRITORIAL, LV_SR, LV_D),
   512);
-lv_pin("stream_wolf_howl", lv_14, 6615, 0x3f835eb9d0c77f99);
-# stream_lion_roar: the stream's spectral tilt (RMS 0.000725419543)
+lv_pin("stream_wolf_howl", lv_14, 6615, 0x3f8a41c2dac8f211);
+# stream_lion_roar: the stream's spectral tilt (RMS 0.0010293583)
 var lv_15 = lv_drain(stream_new(crvoice_new(PRANI_SP_LION), PRANI_VOC_ROAR, PRANI_INTENT_IDLE, LV_SR, LV_D), 512);
-lv_pin("stream_lion_roar", lv_15, 4410, 0x3f47c5429b8263cc);
+lv_pin("stream_lion_roar", lv_15, 4410, 0x3f50dd710e399473);
 
 var rc = assert_summary();
 syscall(60, rc);

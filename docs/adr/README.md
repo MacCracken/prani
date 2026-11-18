@@ -34,7 +34,8 @@ Decisions about prani — what we chose, the context, and the consequences we ac
 | [0011](0011-a-pitch-past-nyquist-is-refused.md) | A pitch the sample rate cannot represent is refused | Accepted |
 | [0012](0012-a-steady-wind-does-not-shift-the-pitch.md) | A steady wind does not shift the pitch | Accepted |
 | [0013](0013-a-formant-past-nyquist-is-placed-in-band.md) | A formant past Nyquist is placed in band, not lost | Accepted |
-| [0014](0014-a-render-does-not-depend-on-the-sample-rate.md) | A render's level does not depend on the sample rate | Accepted |
+| [0014](0014-a-render-does-not-depend-on-the-sample-rate.md) | A render's level does not depend on the sample rate | Accepted; bandwidth rule superseded by 0015 |
+| [0015](0015-a-formant-renders-the-width-it-is-specified.md) | A formant renders the width it is specified | Accepted |
 
 0001–0003 come out of the 2.0.3 P(-1) sweep
 ([`docs/audit/2026-08-30-audit.md`](../audit/2026-08-30-audit.md)). Each records a
@@ -91,3 +92,9 @@ svara's default vowel as the species, and discarded each block's refusal.
 at 44.1 kHz (ADR-0007), and four stages, two of them svara's, had a response fixed per
 sample: a render at 8 kHz was 19 dB louder than the same call at 44.1 kHz. prani now
 holds each to its 44.1 kHz response, through what svara exposes.
+
+0015 is 2.3.3. svara's resonator renders a bandwidth b about b · sin(2πf/sr) wide, a
+formula its port carried from its own Rust, so a wolf's 100 Hz F1 rendered 6 Hz wide at
+44.1 kHz. prani now hands svara the bandwidth at which it renders the width specified,
+at every rate, re-solves ADR-0007's gain for the wider resonances, and supersedes
+ADR-0014's bandwidth rule.

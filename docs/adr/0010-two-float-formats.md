@@ -119,6 +119,11 @@ The f32 build is measured against the f64 build, which is its reference.
    2^24 a real cannot hold every count: the nasal anti-formant compared its count with
    `pr_from(len)`, which rounds 16,777,219 up to 16,777,220, and the f32 build read past
    the buffer and exited the process.
+   *Amended in 2.3.3 (ADR-0015).* So does a recursive filter whose poles sit close to
+   the unit circle. The nasal notch's, at r = 0.994 at 44.1 kHz, amplified the f32
+   build's own rounding: a cat's howl was up to 4.2e-6 of its peak off the f64 build
+   over its nasal phase, and 1.28e-6 off in RMS once the formants rendered their
+   widths. It now recurses in f64 in the f32 build and rounds each sample once: 1.43e-7.
 5. **A blend stays where the exact one is.** *Added in 2.3.2 (audit B5).* The emotion
    update `v·s + t·(1 − s)` can be rounded past its target once v has all but reached it,
    in either format, and a target on a zone bound then reads the zone beyond. The exact

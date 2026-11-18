@@ -5,7 +5,14 @@
 
 ## Version
 
-**2.3.2** — the 2.3 sweep ([audit](../audit/2026-11-17-2.3-audit.md)): 25 findings
+**2.3.3** — the specified formant widths
+([ADR-0015](../adr/0015-a-formant-renders-the-width-it-is-specified.md)). svara renders
+a bandwidth b about b · sin(2πf/sr) wide, so a wolf's 100 Hz F1 was 6 Hz wide at
+44.1 kHz. prani now hands svara the bandwidth at which it renders the width specified,
+at every rate, and ADR-0007's gain is re-solved for the wider resonances (−3.78 dB, from
++7.37). **2686 assertions / 22 suites, in each format.**
+
+On top of **2.3.2** — the 2.3 sweep ([audit](../audit/2026-11-17-2.3-audit.md)): 25 findings
 and six surviving mutants in the 2.3 work, and one older defect verification found, all
 repaired. A formant past Nyquist is
 placed in band rather than costing the voice all five
@@ -14,8 +21,7 @@ rate is held to the same call at 44.1 kHz, where 8 kHz was 19 dB louder
 ([ADR-0014](../adr/0014-a-render-does-not-depend-on-the-sample-rate.md)), voice's own
 biphonation and subharmonic sources are held to Nyquist, and the f32 build keeps
 every absolute position in f64, the Doppler resampler's included. `gen-f64.sh` refuses
-a source it cannot read exactly, and checks the manifest's pairs. **2681
-assertions / 22 suites, in each format.**
+a source it cannot read exactly, and checks the manifest's pairs.
 
 On top of **2.3.1** — the deferred decisions. A pitch the sample rate cannot represent is
 refused ([ADR-0011](../adr/0011-a-pitch-past-nyquist-is-refused.md)), and a steady
@@ -125,7 +131,7 @@ oracle at `2.0.3`.
 ## Tests
 
 `cyrius audit` is green end to end as of 2.3.0: fmt · lint · docs · tests · bench,
-**exit 0**. 22 suites / **2681 assertions, in each format** (770 at 2.0.3;
+**exit 0**. 22 suites / **2686 assertions, in each format** (770 at 2.0.3;
 2.0.4 added 430 closing the parity shortfalls — see
 [`rust-test-parity.md`](rust-test-parity.md)), plus the decoders' fuzz harness,
 `tests/prani.fcyr` (2.2.1). Measured with `for t in tests/*.tcyr; do cyrius test $t;
@@ -178,7 +184,7 @@ an all-zero buffer satisfied every synthesis assertion in the project.
 ## In flight
 
 Nothing. The port is complete, on the cyrius 6.7.18 matched dep set, audited
-(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), with a gate that would catch the next one (2.0.11), reporting a refused allocation (2.2.0), swept a second time (2.2.1), built in two float formats (2.3.0), and its 2.3 work swept (2.3.2).
+(2.0.3), re-verified against the oracle's tests (2.0.4), and range-guarded (2.0.5), exercised by runnable examples (2.0.6), measured against the oracle (2.0.7), no longer carrying it (2.0.8), with its two measured perf defects repaired (2.0.10), with a gate that would catch the next one (2.0.11), reporting a refused allocation (2.2.0), swept a second time (2.2.1), built in two float formats (2.3.0), its 2.3 work swept (2.3.2), and its formants rendered the widths specified (2.3.3).
 
 **Open work lives in [`roadmap.md`](roadmap.md)**, not here. It is open work
 only, and **2.0.x was one arc with one destination: retiring `rust-old/`** — it

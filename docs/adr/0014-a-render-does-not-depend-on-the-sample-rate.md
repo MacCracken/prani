@@ -1,6 +1,6 @@
 # 0014 — A render's level does not depend on the sample rate
 
-**Status**: Accepted
+**Status**: Accepted; its bandwidth rule (decision 2) superseded by [0015](0015-a-formant-renders-the-width-it-is-specified.md) in 2.3.3
 **Date**: 2026-11-17
 
 ## Context
